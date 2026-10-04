@@ -225,22 +225,35 @@ cancels each matrix's own magnitude. CKA = 1 means the two representation
 sets have identical covariance structure (up to rotation/scale); CKA = 0
 means they share none.
 
-**The paper's twist — CKAᵀ (Eq. 7).** FLIP does not use plain CKA on
+**The paper's twist — CKAᵀ (Sec. 4.2.2).** FLIP does not use plain CKA on
 *sample-similarity* Gram matrices ($XX^\top$); it uses the **transposed**
 form, $\mathrm{CKA}^\top(A,B) := \mathrm{CKA}(A^\top, B^\top)$, i.e., it
-compares **feature-covariance patterns** ($X^\top X$) between two groups.
-Why: for fairness we care about whether the *relationships among latent
-features* are the same across protected groups. If the Black applicants'
-latents and the White applicants' latents have the same feature-covariance
-structure, then the latent geometry does not encode "which group you're
-in" — a necessary condition for the representation to be group-blind.
-Sample-space CKA would instead ask whether *individuals* align across
-groups, which is neither necessary nor desirable for fairness.
+compares **activation patterns** between two groups. Why: for fairness we
+care about whether the latent features behave the same across protected
+groups. Sample-space CKA would instead ask whether *individuals* align
+across groups, which is neither necessary nor desirable for fairness.
 
-Implementation detail: with centered inputs (each column mean-subtracted)
-and a linear kernel, the formula reduces to the cheap closed form above —
-no kernel matrix over sample pairs is ever materialized, so it scales to
-large batches.
+**What the transpose means in code.** Inside $\mathrm{CKA}(A^\top, B^\top)$
+the "samples" are the $p$ activations, so the linear kernels are
+$K = A^\top A$ and $L = B^\top B$ (both $p \times p$), the centering matrix
+$H$ of Eq. 5 is $p \times p$, and
+
+$$
+\mathrm{CKA}^\top(A,B) = \frac{\mathrm{tr}(KHLH)}{\sqrt{\mathrm{tr}(KHKH)\,\mathrm{tr}(LHLH)}}
+= \frac{\langle \tilde A^\top \tilde A,\ \tilde B^\top \tilde B\rangle_F}{\|\tilde A^\top \tilde A\|_F\,\|\tilde B^\top \tilde B\|_F},
+\qquad \tilde A = AH,
+$$
+
+where $AH$ subtracts **each row's mean across the activations**
+(`A.mean(dim=1)`). Groups may differ in size; no kernel over sample pairs
+is materialized. An earlier version centered each activation over the
+group's samples (`dim=0`), which turns $A^\top A$ into a within-group
+covariance and discards each group's mean: two groups whose activations
+differ only by a shift scored ≈ 1. With the paper's centering a shifted
+group scores lower (0.76 vs 0.997 in a toy test), so the loss now sees
+group-mean differences, which Eq. 4's $P(X) = P(X \mid S)$ requires.
+Inputs with ≤ 2 activations are skipped: after centering across two
+columns every group's Gram is ∝ [[1,−1],[−1,1]], so CKAᵀ is constant.
 
 #### 2.1.2 `disentanglement_loss` — the fairness objective D′ (Eq. 10)
 
@@ -262,8 +275,8 @@ independent of the protected attribute."
 
 Edge-case handling: if a batch contains fewer than two groups, or a group
 has fewer than 2 samples, the loss returns 0 (no signal) rather than
-crashing; groups are truncated to the smallest common size so CKAᵀ compares
-equal-sized matrices (the balanced sampler normally guarantees this).
+crashing. Groups of different sizes need no truncation. Representations
+with ≤ 2 columns return `None` and are skipped by the multi-stage loss.
 
 #### 2.1.3 `multi_stage_disentanglement_loss` — three-stage intervention (Sec. 4.3.2)
 
@@ -273,10 +286,13 @@ latent:
 1. **Latent stage** — on $\mu_z$ (flattened over tokens): the primary
    objective; the latent is what the diffusion prior will model, so it must
    be group-blind.
-2. **Detokenizer stage** — *feature-wise* on the reconstruction logits
-   (numerical logits and each categorical column's logits separately,
+2. **Detokenizer stage** — *feature-wise* on the reconstruction logits:
+   each numerical feature's **pre-aggregation** logits
+   `h_num[:, j] * weight[j]` (one `d_token`-wide matrix per feature, as
+   Sec. 4.3.2 specifies, exposed as `recon_num_pre` by
+   `forward_with_stages`) and each categorical column's logits,
    **excluding the protected attribute's own logits**, which are supervised
-   by the uniform-attribute loss instead). Applying CKAᵀ per-feature and
+   by the uniform-attribute loss instead. Applying CKAᵀ per-feature and
    mean-aggregating prevents wide categorical columns (many unique values)
    from dominating the loss purely by dimension count.
 3. **Decoder stage** — on the decoder's token output $h$ (flattened), whose
@@ -315,6 +331,11 @@ $$
 i.e., the Phase-2 encoder's latent distribution must stay close (in
 sliced-Wasserstein terms) to the *frozen* Phase-1 encoder's latent
 distribution, while the disentanglement term removes group structure.
+Sec. 4.3.2 applies SWD at the **latent and decoder** stages, so the
+whole Phase-1 VAE is frozen and the penalty is the mean of
+$\mathrm{SWD}(\mu_{\text{ref}}, \mu)$ and $\mathrm{SWD}(h_{\text{ref}}, h)$
+(each capped by `MAX_DIV_PENALTY`); at the detokenizer stage the paper uses
+$\mathcal{L}_{\text{quality}}$ as the divergence, which Phase 2 keeps.
 The two terms together say: "keep everything you learned, except the part
 that encodes the protected attribute."
 
@@ -335,6 +356,16 @@ shaped to help predict it (that's how CE backprop works). Instead, FLIP
 (2) pushes its predicted distribution toward uniform, so the model has no
 incentive to encode group identity anywhere, and synthetic data assigns
 protected-group labels at equal rates.
+
+**What the code trains (deviation).** Eq. 3 is a batch-level quantity:
+one row's gradient depends on every other row's prediction, so DP-SGD's
+per-row clipping cannot bound it. The code uses the per-row variant
+$\frac{1}{n}\sum_i \|\mathrm{softmax}(s_i) - \mathrm{uniform}\|_2$
+(`uniform_attribute_loss_per_sample`), which is DP-decomposable but
+stronger: every row, not just the batch average, is pushed to uniform,
+so the decoded protected column is close to random rather than a
+definite per-row assignment. It is a **mean** like MSE/CE; an earlier
+version summed it, which outweighed reconstruction by ~batch size.
 
 #### 2.1.6 `BalancedGroupSampler` — balanced mini-batches (Sec. 4.2.1, Eq. 11)
 
@@ -433,6 +464,14 @@ Two changes:
 
 ### 2.3 Modification: `tabsyn/vae/main.py` — the training loop
 
+> **Status: unused.** The FLIP loop in this file is never called by the
+> HMDA pipelines and does not run (bad `ref_mu` unpack, a second backward
+> through a freed graph, `ReduceLROnPlateau(verbose=)` rejected by torch
+> 2.14, and `utils.get_args()` lacks the FLIP flags). Only its
+> `compute_loss()` is used. The live FLIP loop is `train_flip()` in
+> `run_flip_demo.py`, shared by both pipelines; it implements the
+> loss, two-phase schedule and DP wiring described below (items 1–4).
+
 This is the heart of the integration. Changes:
 
 1. **`compute_loss()` gained `s_idx` / `Recon_S_logits` arguments.** When a
@@ -449,9 +488,9 @@ This is the heart of the integration. Changes:
      representation of the data, with the protected attribute already
      treated as random.
    - **Phase 2 (disentanglement), remaining epochs:** at the phase
-     boundary, a **copy of the encoder is frozen** (the "reference
-     encoder" $q_{\theta_0}$). Each Phase-2 step adds
-     $$\underbrace{\mathrm{SWD}\big(\mu_{\text{ref}}, \mu_{\text{cur}}\big)}_{\mathcal{D}}
+     boundary, a **copy of the Phase-1 VAE is frozen** (the reference
+     $M_{\theta_0}$). Each Phase-2 step adds
+     $$\underbrace{\tfrac12\big[\mathrm{SWD}(\mu_{\text{ref}}, \mu_{\text{cur}}) + \mathrm{SWD}(h_{\text{ref}}, h_{\text{cur}})\big]}_{\mathcal{D}}
      \;+\; \lambda_{\text{fair}} \cdot \underbrace{\mathcal{D}'_{\text{multi-stage}}}_{\text{Eq. 10}}$$
      to the loss. The SWD anchor keeps the representation intact; the
      disentanglement term removes group structure from latent,
@@ -479,7 +518,7 @@ This is the heart of the integration. Changes:
 
 ### 2.4 Additions: tests, demo, and evaluation harness
 
-- **`tests/test_flip_fairness.py`** — 30 unit tests covering every function
+- **`tests/test_flip_fairness.py`** — 71 unit tests covering every function
   in isolation: CKAᵀ identity/symmetry/boundedness-in-[0,1],
   disentanglement-loss sign and gradient flow, SWD identity and
   shift-sensitivity, $\mathcal{L}_S$ at uniform vs. skewed logits, sampler
@@ -499,6 +538,16 @@ This is the heart of the integration. Changes:
   of the real data using `fairlearn` (demographic parity
   difference/ratio, selection rates by group) that establishes the bias
   baseline FLIP is meant to reduce.
+- **`fairness_eval.py`** — the paper's task-agnostic fairness metrics
+  (Secs. 3.2.2 / 5.3.2), extended from binary to multi-group: **BER**
+  (balanced error predicting the protected attribute from all other
+  columns; ideal $1 - 1/|S|$), **A-NCB** (cluster balance of a 2-component
+  Gaussian mixture on FAMD components, against adversarially predicted
+  groups; groups the adversary assigns fewer than 30 rows are left out),
+  and **per-feature task fairness** (Eqs. 14/15). Computed for real and
+  synthetic data in both pipelines' console output and HTML reports.
+  Uses scikit-learn histogram gradient boosting in place of LightGBM.
+  `tests/test_metrics.py` (9 tests) covers it and the demo's metric fixes.
 
 ### 2.5 Summary table of changes
 
@@ -507,7 +556,8 @@ This is the heart of the integration. Changes:
 | `tabsyn/vae/flip_fairness.py` | **Added** | All paper math: CKAᵀ, disentanglement, multi-stage loss, SWD, L_S, balanced sampler, RDP accountant, DP grad samplers |
 | `tabsyn/vae/model.py` | **Modified** | `forward_with_stages()` added; `category_offsets` buffer → list (DP compatibility) |
 | `tabsyn/vae/main.py` | **Modified** | `s_idx` in loss; two-phase training; balanced sampler; DP-SGD wiring; 6 new CLI flags |
-| `tests/test_flip_fairness.py` | **Added** | 30 unit tests |
+| `tests/test_flip_fairness.py`, `tests/test_metrics.py` | **Added** | 71 + 9 unit tests |
+| `fairness_eval.py` | **Added** | Paper fairness metrics: BER, A-NCB, per-feature task fairness |
 | `run_flip_demo.py` | **Added** | End-to-end demo + 3-axis evaluation + HTML report (empirical-Gaussian latent sampling; see Parts 6–7) |
 | `run_flip_full_pipeline.py` | **Added** | Full two-stage pipeline: FLIP VAE + TabSyn's EDM latent diffusion prior, with the same evaluation and report |
 | `preprocess.py`, `fairness_audit.py`, `fairness_report.py` | **Added** | Data prep and bias-baseline audit |
@@ -634,6 +684,42 @@ deliberate deviations, all forced by engineering reality:
    smaller final batch so every minority-group sample is seen exactly
    once per epoch.
 
+6. **Per-row L_S instead of Eq. 3's batch mean.** Eq. 3 couples every
+   row in a batch, so DP-SGD cannot clip it per record; the per-row mean
+   is DP-decomposable but makes each row's protected-attribute
+   prediction uncertain, so the synthetic protected column is close to
+   random rather than a definite per-row assignment (see 2.1.5).
+
+7. **The diffusion stage is DP-trained.** The paper (Sec. 4) says only the
+   VAE needs DP because latents are post-processing of the private
+   encoder. Training the diffusion model on `encoder(real rows)` touches
+   the real data again, so it is not post-processing; the full pipeline
+   DP-trains it and composes its budget into the total ε.
+
+8. **One noise level at the worst-case sampling rate.** Eq. 13 derives a
+   global σ from per-group noise levels (IDP-SGD). The code accounts every
+   record at γ_max, the minority group's rate, which Prop. 1 shows is
+   valid but conservative.
+
+9. **The batch-coupled fairness gradient has its own DP mechanism.** CKAᵀ
+   and SWD mix rows within a batch, so their gradient is clipped as a
+   whole and noised by `GroupLevelDPMechanism` rather than by DP-SGD; the
+   paper does not address this coupling.
+
+10. **Fixed β.** Sec. 4.3.1 decreases β adaptively as TabSyn does (on a
+    validation-loss plateau). The demo uses a fixed `BETA`; an adaptive
+    schedule driven by held-out loss would be a data-dependent choice
+    outside the privacy accounting.
+
+11. **Three protected groups.** The paper's protected attribute is binary.
+    The disentanglement loss averages CKAᵀ over all group pairs, and the
+    evaluation metrics generalize BER (ideal $1 - 1/|S|$), NCB (minimum
+    over group pairs) and Eq. 14 (largest gap across groups).
+
+12. **Gradient boosting from scikit-learn.** The paper's evaluation uses
+    LightGBM; `fairness_eval.py` uses scikit-learn's histogram gradient
+    boosting (same algorithm family) to avoid a new dependency.
+
 ---
 
 ## Part 6 — Post-Integration Bug: Negative Loan Amounts in the Synthetic Data
@@ -733,21 +819,27 @@ privacy** in acceptable ranges. Concretely, on the HMDA data:
 | Metric | Definition | Good | Why |
 |---|---|---|---|
 | **DP difference** (demographic parity difference) | max−min of the outcome (loan-origination) rate across protected groups in the *synthetic* data | **Much lower than the real data's** (real ≈ 0.17–0.30 here; synthetic should approach 0) | This is the paper's headline claim: the synthetic data should not encode the real data's group disparity. The uniform-attribute loss equalizes predicted group rates; the disentanglement loss prevents other features from carrying group information that could re-create the disparity downstream. |
-| **DP ratio** | min/max group outcome rate | **→ 1.0** (real data ≈ 0.53–0.70 here; the demo achieved ≈ 0.89) | Scale-free version of the same claim; 1.0 = perfect parity. |
+| **DP ratio** | min/max group outcome rate | **→ 1.0** (real data ≈ 0.70–0.72 for the three groups used) | Scale-free version of the same claim; 1.0 = perfect parity. |
+| **BER** (paper Def. 1) | Balanced error of a classifier predicting the protected attribute from all other synthetic columns | **→ 1 − 1/\|S\|** (0.667 for 3 groups) | The paper's task-agnostic test: if the other columns cannot predict the group, no downstream task can recover it. Read with fidelity: a collapsed generator also scores near ideal. |
+| **A-NCB** (paper Def. 2, adversarial) | Group balance of a 2-cluster split of the other columns, with groups predicted adversarially | **→ 1.0** | Catches what randomizing the protected column hides: if clusters still align with predicted groups, the bias lives in the other columns. |
 | **Numeric W1** (normalized Wasserstein-1) | Per-column earth-mover distance between real and synthetic marginals, divided by the real column's std | **≤ 0.2** (moderate ≤ 0.4) | The synthetic data must still *be useful*: marginals should match. W1 is the standard marginal-fidelity metric; normalizing by std makes it dimensionless and comparable across columns. |
 | **Categorical TV** (total variation) | ½·ℓ1 distance between real and synthetic frequency distributions per column | **≤ 0.15** (moderate ≤ 0.3) | The categorical analogue of W1. TV = 0 means identical frequency tables. |
 | **Correlation delta** | Mean absolute difference between real and synthetic numeric correlation matrices | **≤ 0.05** (moderate ≤ 0.15) | Marginals matching is not enough; the *joint* structure (loan amount ↔ income) is what makes synthetic data usable for downstream modeling. |
-| **DCR ratio** (distance-to-closest-record) | mean min-distance(synthetic→real) ÷ mean min-distance(real holdout→real train) | **≥ 1.0** (the demo achieved ≈ 5.5) | The standard privacy *empirical* check: synthetic records should be no closer to real records than real records are to each other. < 1.0 suggests memorization (overfitting); ≫ 1 can also indicate the synthetic data is too diffuse — values in the 1–10 band with good fidelity are healthy. |
+| **DCR ratio** (distance-to-closest-record) | mean min-distance(synthetic→real) ÷ mean min-distance(real holdout→real train) | **≥ 1.0** | The standard privacy *empirical* check: synthetic records should be no closer to real records than real records are to each other. < 1.0 suggests memorization (overfitting); ≫ 1 can also indicate the synthetic data is too diffuse — values in the 1–10 band with good fidelity are healthy. |
 | **ε (DP guarantee)** | Rényi-DP-converted privacy budget at the chosen δ | **Small, and reported** | The formal guarantee. ε ≤ 1 is strong; ε ≤ 5–10 is typical research-grade. **Caveat:** the guarantee applies to the DP-SGD-trained VAE stage only, and only to the per-sample-decomposable portion of the loss (see *Limitations* below). The demo's original ε ≈ 0.52 was an artifact of an incorrect accountant; the corrected accountant reports ε ≈ 80 at the demo's settings. |
 
-The demo run's actual results — DP difference 0.1699 → 0.0490, DP ratio
-0.697 → 0.889, fairness gain +0.121, DCR ratio 5.5, with moderate
-fidelity costs (W1 0.35, TV 0.22, corr Δ 0.07) — are a representative
-outcome: a ~70% reduction in outcome disparity at a moderate fidelity
-cost, with no memorization. (The originally reported ε = 0.52 was an
-artifact of the broken accountant — see Part 4, item 2; the corrected
-accountant reports ε ≈ 80 at these settings, and the DP-difference
-headline should be read alongside the anti-gaming probes below.)
+**No current results.** Numbers previously quoted here came from runs
+made before the fixes listed in `CHANGELOG.md` (clip at the standardized
+mean, summed L_S, CKAᵀ centering, report crash) and do not describe the
+current code. The recorded HMDA runs in ARCHITECTURE.md also predate
+them. Rerun an experiment (`run_experiment.py`, see EXPERIMENTS.md) and
+quote its report. A post-fix check without DP (`no_dp`, demo) no longer
+collapses (overall origination 0.61 vs 0.59 real; W1 0.19, TV 0.18) and
+raises the approval parity ratio from 0.72 to 0.80, but on the paper's
+metrics race is *more* predictable from the other synthetic columns than
+from the real ones (BER 0.55 vs 0.59), so at those settings the
+disentanglement is not yet removing group information; see
+`CHANGELOG.md`.
 
 ### 8.2 Why these results should look this way
 
@@ -780,7 +872,8 @@ headline should be read alongside the anti-gaming probes below.)
 | **SMOTE** (and other resampling baselines) | None | None (worse: interpolates between real records) | Poor on joint structure | Interpolated points can sit *between* two real records, leaking both. |
 | **Post-hoc fairness fixes** (reweight/repair the real data, then generate) | Partial | None | Degrades with intervention strength | Post-hoc approaches change the data, not the model; the generator can re-learn bias from residual correlations, and there is no privacy story at all. |
 | **DP-only training** (DP-SGD on a standard generator) | None | Yes | Moderate–good | Privacy without fairness: the synthetic data is private *and* biased. |
-| **FLIP (this repo)** | **Yes — explicit, measurable** | **Yes — formal (ε, δ)** | Good (moderate cost) | The only option here that addresses both axes simultaneously, and the fairness intervention is *certified under* the privacy noise (the paper's core result: HSIC-based disentanglement remains effective under Rényi-DP training). |
+| **PreFair, TabularARGN** (the paper's fair + private baselines) | Yes — for one predefined target | Yes | Paper: higher AUC than FLIP | Optimize fairness for a single target attribute; the paper reports smaller BER / A-NCB gains than FLIP (Table 3). |
+| **FLIP (this repo)** | **Yes — task-agnostic, explicit** | **Yes — formal (ε, δ)** | Moderate cost (paper: ≈ −10% AUC) | Targets every column, not one task. The paper finds DP noise *weakens* the fairness intervention, so stronger λ is needed under DP (Secs. 6.3, 7.2). |
 
 **Why FLIP should improve over the alternatives on the fairness axis:**
 every non-FLIP approach either ignores fairness (leaving the full real
@@ -795,21 +888,16 @@ uncontrollably.
 **Why FLIP should improve on the privacy axis:** methods without DP-SGD
 offer no guarantee at all — their empirical DCR can look fine while still
 permitting membership-inference attacks in the worst case. FLIP's
-guarantee holds unconditionally. And crucially, the paper's central
-technical contribution — and the reason this integration works — is that
-the HSIC/CKAᵀ disentanglement objective is *robust to DP noise*: the
-fairness gain survives privacy training, whereas naive fairness penalties
-(e.g., adversarial debiasing) are known to degrade badly under DP noise
-because they rely on a discriminator whose gradients the noise destroys.
-CKAᵀ compares *second-moment structure* across groups, which is a much
-lower-variance statistical target than per-sample discrimination, so the
-fairness signal survives the noise that DP-SGD injects.
+guarantee holds unconditionally. The paper does **not** find the
+fairness intervention immune to DP noise: under stricter privacy, BER
+and A-NCB improve more slowly as λ grows, so stronger disentanglement
+(and more fidelity loss) is needed for the same fairness (Secs. 6.3,
+7.2).
 
 **Expected headline comparison:** against vanilla TabSyn on the same
 data, FLIP should show a near-identical privacy *failure* → formal
-guarantee upgrade, and a large DP-difference reduction (e.g., the demo's
-0.17 → 0.05), at a moderate fidelity cost (the demo's W1 0.35 / TV 0.22
-sit in the "moderate" band of the thresholds above) — exactly the trade
+guarantee upgrade, and a lower DP difference with better BER / A-NCB,
+at a moderate fidelity cost — exactly the trade
 the knob panel (`LAMBDA_FAIR`, `NOISE_MULTIPLIER`, `MAX_GRAD_NORM`) lets
 a practitioner tune for their application. **These comparisons are
 expectations, not measurements:** no vanilla-TabSyn or DP-only baseline
@@ -971,12 +1059,18 @@ These are the honest boundaries of what the implementation supports.
    clip keeps values near the data's support, and the zero clamp
    guarantees the domain invariant.
 
-8. **CKAᵀ = 1 does not mean independence.** CKAᵀ is invariant to group
-   mean shifts and overall scale, so a latent that encodes the protected
-   attribute purely through a mean shift scores as perfectly
-   disentangled. "The latent is independent of the protected attribute"
-   overstates what the metric measures (this limitation comes from the
-   paper; it is repeated here so it is not lost).
+8. **CKAᵀ = 1 does not mean independence.** CKAᵀ compares second-moment
+   matrices $A^\top A$ and is invariant to overall scale and to a shift
+   applied equally to every activation, so groups that differ only in
+   higher-order structure, or only in scale, still score 1. "The latent
+   is independent of the protected attribute" overstates what it
+   measures. (An earlier version centered each activation over samples,
+   which also hid per-activation group-mean shifts; that came from the
+   code, not the paper, and is fixed: see 2.1.1.) In practice on HMDA the
+   paper's CKAᵀ is still near 1 while race is decodable: AᵀA is ~92%
+   shared mean and dominated by a few high-variance dimensions, race lives
+   in low-variance ones, and Phase 2 can match group patterns by using the
+   race input itself. See `CHANGELOG.md`, "Diagnosis".
 
 9. **The DP-difference headline can be gamed.** L_S pushes the synthetic
    protected column toward uniform; a generator that merely *shuffled*
@@ -1006,24 +1100,20 @@ These are the honest boundaries of what the implementation supports.
 
 ## Running everything
 
-```powershell
-# Unit tests (61 tests)
-c:/Users/db234/OneDrive/Documents/Vector/.venv/Scripts/python.exe -m pytest tests/test_flip_fairness.py -q
+```bash
+# Unit tests (80 tests)
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests -q -p no:cacheprovider
 
-# Quick demo: FLIP VAE + empirical-Gaussian latent sampling
-# (fast; fidelity is a lower bound — see Parts 6-7)
-c:/Users/db234/OneDrive/Documents/Vector/.venv/Scripts/python.exe run_flip_demo.py
+# Experiments from configs/flip.yaml (see EXPERIMENTS.md)
+.venv/bin/python run_experiment.py --experiment smoke                  # every stage, ~1-2 min
+.venv/bin/python run_experiment.py --experiment eps_10 --predict-eps   # composed ε, no training
+.venv/bin/python run_experiment.py --experiment eps_10 --stages demo   # FLIP VAE + Gaussian latent prior
+.venv/bin/python run_experiment.py --experiment eps_10 --stages full   # FLIP VAE + DP latent diffusion (slow)
 
-# FULL pipeline: FLIP VAE + TabSyn's latent diffusion prior
-# (the honest fidelity numbers; emits flip_full_report.html and
-#  Data/flip_full_synthetic_bmo_nationwide.csv)
-c:/Users/db234/OneDrive/Documents/Vector/.venv/Scripts/python.exe run_flip_full_pipeline.py
-
-# Full TabSyn VAE training with FLIP (fairness + privacy)
-cd tabsyn-main/tabsyn-main
-python -m tabsyn.vae.main --dataname <dataset> --sensitive_idx <col> `
-    --phase1_epochs 2000 --lambda_fair 1.0 `
-    --dp --noise_multiplier 1.0 --max_grad_norm 1.0 --dp_delta 1e-5
-
-# Omit --dp for fairness-only; omit --sensitive_idx for vanilla TabSyn.
+# The scripts also run standalone with their built-in defaults
+.venv/bin/python run_flip_demo.py
+.venv/bin/python run_flip_full_pipeline.py
 ```
+
+`python -m tabsyn.vae.main` (TabSyn's own VAE trainer with an older FLIP
+loop) is **not supported**: it does not run (see 2.3).

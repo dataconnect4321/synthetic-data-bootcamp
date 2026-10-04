@@ -5,6 +5,7 @@ combinations), writes per-metric conclusions, and saves a styled HTML report.
 """
 
 import numpy as np
+import os
 import pandas as pd
 from scipy import stats
 from fairlearn.metrics import (
@@ -14,8 +15,9 @@ from fairlearn.metrics import (
     demographic_parity_ratio,
 )
 
-DATA_PATH = r"c:\Users\db234\OneDrive\Documents\Vector\Data\bmo_nationwide_preprocessed.csv"
-REPORT_PATH = r"c:\Users\db234\OneDrive\Documents\Vector\fairness_report.html"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(_HERE, "Data", "bmo_nationwide_preprocessed.csv")
+REPORT_PATH = os.path.join(_HERE, "fairness_report.html")
 SENSITIVE_COLS = ["derived_ethnicity", "derived_race", "derived_sex"]
 
 
