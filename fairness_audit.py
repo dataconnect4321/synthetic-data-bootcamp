@@ -5,6 +5,7 @@ race, sex) individually and in combination, then draws conclusions
 about potential bias in loan origination outcomes.
 """
 
+import os
 import pandas as pd
 import numpy as np
 from fairlearn.metrics import (
@@ -19,7 +20,8 @@ from fairlearn.metrics import (
 )
 from sklearn.metrics import accuracy_score, balanced_accuracy_score
 
-DATA_PATH = r"c:\Users\db234\OneDrive\Documents\Vector\Data\bmo_nationwide_preprocessed.csv"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(_HERE, "Data", "bmo_nationwide_preprocessed.csv")
 SENSITIVE_COLS = ["derived_ethnicity", "derived_race", "derived_sex"]
 
 

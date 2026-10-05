@@ -49,6 +49,7 @@ from tabsyn.vae.flip_fairness import (
     get_dp_trainable_parameters,
 )
 from tabsyn.vae.main import compute_loss
+from fairness_eval import paper_fairness_metrics
 
 # ==========================================================================
 # TRADEOFF PARAMETERS - the fidelity / privacy / fairness knob panel
@@ -89,6 +90,26 @@ TRADEOFF_PARAMS = {
     # KL-divergence weight (beta-VAE). Lower beta -> better reconstruction
     # (fidelity) at the cost of a less regular latent space.
     'BETA': 1e-3,
+    # 'fixed' uses BETA throughout. 'decay' follows the paper (Sec. 4.3.1,
+    # after TabSyn): start at BETA_MAX and multiply by BETA_DECAY every
+    # BETA_DECAY_EVERY epochs, floored at BETA_MIN. TabSyn triggers the
+    # decay on a training-loss plateau; that reads raw training data
+    # outside the DP accounting, so this schedule is fixed in advance.
+    'BETA_SCHEDULE': 'fixed',
+    'BETA_MAX': 1e-2,
+    'BETA_MIN': 1e-5,
+    'BETA_DECAY': 0.7,
+    'BETA_DECAY_EVERY': 100,
+    # Uniform attribute loss L_S. 'batch_mean' is the paper's Eq. 3: only
+    # the batch-average softmax of S must be uniform, so rows keep a
+    # definite group. It couples the batch, so under DP it goes through
+    # the GroupLevelDPMechanism in BOTH phases. 'per_sample' pushes every
+    # row to uniform (DP-decomposable, but argmax decoding then collapses
+    # the synthetic S column to one group).
+    'LS_VARIANT': 'per_sample',
+    # Path of a Phase-1 checkpoint (non-DP only): written at the phase
+    # boundary; if it exists, Phase 1 is skipped. None disables it.
+    'PHASE1_CHECKPOINT': None,
 
     # ---- STABILITY knobs -------------------------------------------------
     # Cap on the SWD divergence penalty. Without this, the penalty grows
@@ -173,6 +194,7 @@ TRADEOFF_PARAMS = {
     'POISSON_STEPS_PER_EPOCH': None,  # None -> ceil(m / per_group)
     'D_TOKEN': 8,
     'NUM_LAYERS': 2,
+    'FACTOR': 8,               # transformer FFN width factor (TabSyn: 32)
     'LR': 1e-3,
     'SEED': 42,
 
@@ -243,12 +265,21 @@ def load_sample(params):
 # ==========================================================================
 # FLIP training (two-phase, balanced sampling, optional DP-SGD)
 # ==========================================================================
+def beta_at(epoch, params):
+    """KL weight for this epoch (see BETA_SCHEDULE)."""
+    if params.get('BETA_SCHEDULE', 'fixed') != 'decay':
+        return params['BETA']
+    steps = epoch // params['BETA_DECAY_EVERY']
+    return max(params['BETA_MAX'] * params['BETA_DECAY'] ** steps,
+               params['BETA_MIN'])
+
+
 def train_flip(X_num, X_cat, categories, s_idx, params, device):
     torch.manual_seed(params['SEED'])
     n, d_numerical = X_num.shape
 
     model = Model_VAE(params['NUM_LAYERS'], d_numerical, categories,
-                      params['D_TOKEN'], n_head=1, factor=8,
+                      params['D_TOKEN'], n_head=1, factor=params.get('FACTOR', 8),
                       bias=True).to(device)
 
     groups = X_cat[:, s_idx].long().numpy()
@@ -321,12 +352,31 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                                      weight_decay=params['WEIGHT_DECAY'])
 
     raw = model._module if params['USE_DP'] else model
-    beta = params['BETA']
     total_epochs = params['PHASE1_EPOCHS'] + params['PHASE2_EPOCHS']
-    reference_encoder = None
+    reference_vae = None  # frozen Phase-1 VAE (encoder + decoder)
+    ls_batch = params.get('LS_VARIANT', 'per_sample') == 'batch_mean'
 
-    for epoch in range(total_epochs):
+    # Optional Phase-1 checkpoint for fast Phase-2 experiments: saved at
+    # the phase boundary, and when the file already exists Phase 1 is
+    # skipped. Without DP only - skipping Phase 1 would also skip its
+    # privacy accounting.
+    ckpt = params.get('PHASE1_CHECKPOINT')
+    start_epoch = 0
+    if ckpt:
+        if params['USE_DP']:
+            raise ValueError('PHASE1_CHECKPOINT is only supported with USE_DP=False')
+        if os.path.exists(ckpt):
+            state = torch.load(ckpt, map_location=device)
+            raw.load_state_dict(state['model'])
+            optimizer.load_state_dict(state['optimizer'])
+            start_epoch = params['PHASE1_EPOCHS']
+            print(f'Loaded Phase-1 checkpoint {ckpt}; starting at epoch {start_epoch}')
+
+    for epoch in range(start_epoch, total_epochs):
         phase = 1 if epoch < params['PHASE1_EPOCHS'] else 2
+        if ckpt and start_epoch == 0 and epoch == params['PHASE1_EPOCHS']:
+            save_phase1_checkpoint(ckpt, raw, optimizer)
+        beta = beta_at(epoch, params)
 
         # Phase-2 LR drop: shrink the step size once disentanglement
         # starts so fairness updates perturb the quality representation
@@ -363,51 +413,63 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                 Recon_S_logits=recon_cat_clamped[s_idx])
 
             # ---- Pass 1: per-sample-decomposable loss (record-level DP) --
-            # mse + ce + kld + L_S are all sums/means of per-sample terms
-            # (L_S uses the per-sample variant), so Opacus's per-sample
-            # clipping bounds each record's influence on this gradient.
-            loss_private = mse + ce + beta * kld + loss_s
-            loss_private.backward(retain_graph=phase == 2)
+            # mse + ce + kld (+ the per-sample L_S) are means of per-sample
+            # terms, so Opacus's per-sample clipping bounds each record's
+            # influence on this gradient.
+            # With the batch-mean L_S (pass 2), the per-sample one stays at
+            # weight 0: S has no CE term, so without it the S head would
+            # get no per-sample gradient and Opacus's pre_step() raises.
+            loss_private = mse + ce + beta * kld + (0.0 if ls_batch else 1.0) * loss_s
+            has_coupled = ls_batch or phase == 2
+            loss_private.backward(retain_graph=has_coupled)
 
-            # ---- Pass 2: batch-coupled fairness terms (group-level DP) --
-            # The SWD anchor and CKA^T disentanglement mix samples across
-            # the batch; their gradient cannot be attributed per sample.
-            # Under DP they are handled by the GroupLevelDPMechanism
-            # (clip to a fixed norm, add group-calibrated noise) instead
-            # of Opacus, giving a group-level rather than record-level
-            # guarantee for these terms.
+            # ---- Pass 2: batch-coupled terms (group-level DP) -----------
+            # The paper's batch-mean L_S (Eq. 3), the SWD anchor and CKA^T
+            # disentanglement mix samples across the batch; their gradient
+            # cannot be attributed per sample. Under DP they are handled by
+            # the GroupLevelDPMechanism (clip to a fixed norm, add
+            # calibrated noise) instead of Opacus.
             fair_grads = None
+            loss_coupled = (uniform_attribute_loss(recon_cat_clamped[s_idx])
+                            if ls_batch else None)
             if phase == 2:
                 mu_flat = stages['mu_z'].reshape(bnum.shape[0], -1)
-                # Divergence penalty vs. the frozen Phase-1 encoder:
-                # at the phase boundary, snapshot the encoder weights into
-                # a separate frozen module (no in-place weight swapping).
-                if reference_encoder is None:
-                    from tabsyn.vae.model import Encoder_model
-                    reference_encoder = Encoder_model(
+                h_flat = stages['h'].reshape(bnum.shape[0], -1)
+                # Divergence penalty vs. the frozen Phase-1 model (Eq. 10;
+                # Sec. 4.3.2 applies SWD at the latent AND decoder stages).
+                # At the phase boundary, snapshot the whole VAE into a fresh
+                # module via state_dict (a deepcopy would also copy Opacus's
+                # per-sample hooks).
+                if reference_vae is None:
+                    reference_vae = Model_VAE(
                         params['NUM_LAYERS'],
                         model.Reconstructor.d_numerical,
                         categories, params['D_TOKEN'],
-                        n_head=1, factor=8).to(device)
-                    reference_encoder.Tokenizer.load_state_dict(
-                        raw.VAE.Tokenizer.state_dict())
-                    reference_encoder.VAE_Encoder.load_state_dict(
-                        raw.VAE.encoder_mu.state_dict())
-                    reference_encoder.eval()
-                    for p_ in reference_encoder.parameters():
+                        n_head=1, factor=params.get('FACTOR', 8), bias=True).to(device)
+                    reference_vae.load_state_dict(raw.state_dict())
+                    reference_vae.eval()
+                    for p_ in reference_vae.parameters():
                         p_.requires_grad_(False)
                 with torch.no_grad():
-                    ref_mu = reference_encoder(bnum, bcat)
+                    ref_h, ref_mu, _ = reference_vae.VAE(bnum, bcat)
                 ref_mu_flat = ref_mu.reshape(bnum.shape[0], -1)
+                ref_h_flat = ref_h.reshape(bnum.shape[0], -1)
                 disent = multi_stage_disentanglement_loss(
                     stages, bcat[:, s_idx].long(), s_idx=s_idx)
-                # Clamp the divergence penalty: without a cap the SWD term
-                # grows unboundedly as the encoder drifts from the frozen
+                # Clamp each stage's penalty: without a cap the SWD term
+                # grows unboundedly as the model drifts from the frozen
                 # reference under DP noise, exploding the loss.
-                div = sliced_wasserstein_distance(ref_mu_flat, mu_flat)
-                div = torch.clamp(div, max=params['MAX_DIV_PENALTY'])
+                cap = params['MAX_DIV_PENALTY']
+                div = 0.5 * (
+                    torch.clamp(sliced_wasserstein_distance(
+                        ref_mu_flat, mu_flat), max=cap)
+                    + torch.clamp(sliced_wasserstein_distance(
+                        ref_h_flat, h_flat), max=cap))
                 loss_fair = div + params['LAMBDA_FAIR'] * disent
+                loss_coupled = (loss_fair if loss_coupled is None
+                                else loss_coupled + loss_fair)
 
+            if has_coupled:
                 if group_mech is not None:
                     # Capture the fairness gradient WITHOUT Opacus's hooks:
                     # they would try to pop activation buffers already
@@ -422,7 +484,7 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                     model.disable_hooks()
                     try:
                         fair_grads = torch.autograd.grad(
-                            loss_fair, dp_params, allow_unused=True)
+                            loss_coupled, dp_params, allow_unused=True)
                     finally:
                         model.enable_hooks()
                     fair_grads = {
@@ -430,7 +492,7 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                         if g is not None}
                 else:
                     # Non-DP: accumulate into the same graph
-                    loss_fair.backward()
+                    loss_coupled.backward()
 
             # Safety-net clip on the aggregated update: Opacus's
             # max_grad_norm only bounds each per-sample gradient before
@@ -450,11 +512,11 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                 optimizer.step()
             if accountant is not None:
                 accountant.step()
-            epoch_loss += (loss_private + (loss_fair if phase == 2 else 0)).item()
+            epoch_loss += (loss_private + (loss_coupled if has_coupled else 0)).item()
             n_batches += 1
 
         if epoch % 10 == 0 or epoch == total_epochs - 1:
-            msg = f'epoch {epoch:3d} [phase {phase}] loss={epoch_loss/max(1,n_batches):.4f}'
+            msg = f'epoch {epoch:3d} [phase {phase}] loss={epoch_loss/max(1,n_batches):.4f}  beta={beta:.1e}'
             if accountant is not None:
                 eps, alpha = accountant.get_privacy_spent()
                 msg += f'  eps_record={eps:.2f}'
@@ -463,7 +525,15 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                 msg += f'  eps_group={geps:.2f}'
             print(msg)
 
+    if ckpt and start_epoch == 0 and params['PHASE2_EPOCHS'] == 0:
+        save_phase1_checkpoint(ckpt, raw, optimizer)  # loop never reached Phase 2
     return raw, accountant, group_mech
+
+
+def save_phase1_checkpoint(path, model, optimizer):
+    torch.save({'model': model.state_dict(),
+                'optimizer': optimizer.state_dict()}, path)
+    print(f'Saved Phase-1 checkpoint {path}')
 
 
 # ==========================================================================
@@ -471,7 +541,7 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
 # ==========================================================================
 @torch.no_grad()
 def generate(model, n_gen, device, params, X_num=None, X_cat=None,
-             stats_release=None):
+             stats_release=None, num_means=None, num_stds=None):
     """Sample latents from a per-dimension Gaussian fit to the encoded
     training latents, then decode. (The full TabSyn pipeline trains a
     diffusion prior on latents; a Gaussian stand-in keeps this demo
@@ -561,9 +631,23 @@ def generate(model, n_gen, device, params, X_num=None, X_cat=None,
     # proxy above can still dip below zero for skewed columns (the
     # committed report showed an income of -31.15); clamping at 0 uses
     # only PUBLIC knowledge about the domain, so it costs no privacy.
-    syn_num = np.clip(syn_num, 0.0, None)
+    syn_num = clip_nonnegative(syn_num, num_means, num_stds)
 
     return syn_num, syn_cat, stats_budgets
+
+
+def clip_nonnegative(syn_num, num_means, num_stds):
+    """Clamp standardized numerics at the standardized value of 0.
+
+    syn_num is still in standardized units ((x - mean) / std), where 0 is
+    the column MEAN, not zero - clipping at 0 there floors every column at
+    its mean. Real-unit 0 is -mean/std in standardized units.
+    """
+    if num_means is None or num_stds is None:
+        return syn_num
+    floor = (-np.asarray(num_means, dtype=float)
+             / np.asarray(num_stds, dtype=float))
+    return np.maximum(syn_num, floor[None, :])
 
 
 # ==========================================================================
@@ -673,7 +757,29 @@ def fairness_metrics(real_cat, syn_cat, t_idx, s_idx, cat_encoders,
         out['downstream_fairness'] = _downstream_fairness(
             real_num, real_cat, syn_num, syn_cat, t_idx, s_idx,
             cat_encoders)
+        # The paper's task-agnostic fairness metrics (Secs. 3.2.2, 5.3.2)
+        out['paper'] = paper_fairness_metrics(
+            real_num, real_cat, syn_num, syn_cat,
+            [len(cat_encoders[c]) for c in CATEGORICAL_COLS], s_idx,
+            NUMERIC_COLS, CATEGORICAL_COLS)
     return out
+
+
+def print_paper_metrics(fair):
+    """Console block for the paper's fairness metrics (if computed)."""
+    pm = fair.get('paper')
+    if pm is None:
+        return
+    r, s = pm['real'], pm['syn']
+    print(f'\n--- PAPER FAIRNESS METRICS (task-agnostic, real -> syn) ---')
+    print(f'  BER   (ideal {s["ber_ideal"]:.3f} = protected attr. '
+          f'unpredictable): {r["ber"]:.4f} -> {s["ber"]:.4f}')
+    print(f'  A-NCB (1 = clusters group-balanced):           '
+          f'{r["a_ncb"]:.4f} -> {s["a_ncb"]:.4f}')
+    print(f'  Task fairness per feature (lower = fairer; Eq. 14 categorical '
+          f'rate gap, Eq. 15 numeric W1 in std units):')
+    for col, v in pm['task_fairness'].items():
+        print(f'    {col:<28} [{v["kind"]}] {v["real"]:.4f} -> {v["syn"]:.4f}')
 
 
 def _attribute_probe_auc(syn_num, syn_cat, s_idx, cat_encoders):
@@ -690,7 +796,7 @@ def _attribute_probe_auc(syn_num, syn_cat, s_idx, cat_encoders):
     for j in range(syn_cat.shape[1]):
         if j == s_idx:
             continue
-        k = syn_cat[:, j].max() + 1
+        k = len(cat_encoders[CATEGORICAL_COLS[j]])
         onehot = np.eye(k)[syn_cat[:, j]]
         feats.append(onehot)
     X = np.concatenate(feats, axis=1)
@@ -745,9 +851,11 @@ def _downstream_fairness(real_num, real_cat, syn_num, syn_cat, t_idx,
     def feats(cat, num):
         parts = [num]
         for j in range(cat.shape[1]):
-            if j == s_idx:
-                continue  # the protected attribute is NOT a model feature
-            k = int(cat[:, j].max()) + 1
+            if j in (s_idx, t_idx):
+                continue  # neither the protected attribute nor the label is a feature
+            # Width from the encoder, not max()+1: synthetic data can miss
+            # a category, and real/synthetic widths must match for X_real @ w.
+            k = len(cat_encoders[CATEGORICAL_COLS[j]])
             parts.append(np.eye(k)[cat[:, j]])
         return np.concatenate(parts, axis=1)
 
@@ -883,6 +991,35 @@ def generate_html_report(params, fid, priv, fair, eps, encoders, synthetic_df,
                         f'Downstream DP ratio (real eval)</span><span class="card-value">'
                         f'{dwn["dp_ratio"]:.4f} ({dwn_v})</span></div>')
 
+    paper_html = ''
+    if 'paper' in fair:
+        pm = fair['paper']
+        tf_rows = ''.join(
+            f'<tr><td>{c}</td><td>{v["kind"]}</td><td>{v["real"]:.4f}</td>'
+            f'<td>{v["syn"]:.4f}</td></tr>'
+            for c, v in pm['task_fairness'].items())
+        paper_html = f'''
+    <div class="explanation" style="margin-top:15px;">
+      <p><strong>Paper metrics (task-agnostic, Secs. 3.2.2 / 5.3.2).</strong>
+      <strong>BER</strong>: balanced error of a classifier predicting the
+      protected attribute from all other columns; ideal
+      {pm["syn"]["ber_ideal"]:.3f} (unpredictable). <strong>A-NCB</strong>:
+      group balance of a 2-cluster split of the other columns against
+      adversarially predicted groups; 1 = balanced. <strong>Task
+      fairness</strong>: for each column, a model trained without the
+      protected attribute predicts it on real rows; the largest gap between
+      real groups (class-rate gap, Eq. 14; W1 in std units, Eq. 15). Lower
+      is fairer.</p>
+    </div>
+    <div class="cards">
+      <div class="card"><span class="card-label">BER (real &rarr; syn)</span><span class="card-value">{pm["real"]["ber"]:.4f} &rarr; {pm["syn"]["ber"]:.4f}</span></div>
+      <div class="card"><span class="card-label">A-NCB (real &rarr; syn)</span><span class="card-value">{pm["real"]["a_ncb"]:.4f} &rarr; {pm["syn"]["a_ncb"]:.4f}</span></div>
+    </div>
+    <table>
+      <thead><tr><th>Feature as task</th><th>Type</th><th>Real</th><th>Synthetic</th></tr></thead>
+      <tbody>{tf_rows}</tbody>
+    </table>'''
+
     param_rows = ''.join(f'<tr><td>{k}</td><td>{v}</td></tr>' for k, v in params.items())
 
     sample = synthetic_df.head(10)
@@ -1011,6 +1148,7 @@ def generate_html_report(params, fid, priv, fair, eps, encoders, synthetic_df,
     <div class="cards">
       {probe_cards}
     </div>
+    {paper_html}
   </section>
 
   <section>
@@ -1058,7 +1196,7 @@ def main():
     if device.type == 'cuda':
         print(f'Using GPU: {torch.cuda.get_device_name(0)}')
     else:
-        print('Using CPU (GPU not available)')
+        print(f'Using {device.type.upper()}')
     print('=' * 70)
     print('FLIP demo on bmo_nationwide.csv - fidelity/privacy/fairness')
     print('=' * 70)
@@ -1079,7 +1217,9 @@ def main():
     print('\nGenerating synthetic data...')
     syn_num, syn_cat, stats_budgets = generate(model, len(X_num), device,
                                                params, X_num=X_num,
-                                               X_cat=X_cat)
+                                               X_cat=X_cat,
+                                               num_means=num_means,
+                                               num_stds=num_stds)
     synthetic_df = save_synthetic_data(syn_num, syn_cat, num_means, num_stds, encoders)
 
     fid = fidelity_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat,
@@ -1144,6 +1284,7 @@ def main():
         print(f'  Downstream model (trained on synthetic, evaluated on real): '
               f'DP diff={df_["dp_diff"]:.4f}, DP ratio={df_["dp_ratio"]:.4f}')
         print(f'    per-group prediction rates: {df_["rates"]}')
+    print_paper_metrics(fair)
 
     generate_html_report(params, fid, priv, fair, eps, encoders, synthetic_df,
                          eps_group=eps_group)

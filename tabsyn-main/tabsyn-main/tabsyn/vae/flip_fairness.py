@@ -252,19 +252,20 @@ class RDPAccountant:
 def linear_cka_t(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     """Transposed linear CKA between two representation matrices.
 
-    FLIP compares feature covariance patterns across protected groups:
-    CKA^T(A, B) := CKA(A^T, B^T)  (Eq. 7 of the paper). With centered
-    inputs and a linear kernel this reduces to the cosine similarity of
-    the two groups' feature covariance matrices:
+    FLIP compares activation patterns across protected groups:
+    CKA^T(A, B) := CKA(A^T, B^T)  (Sec. 4.2.2 of the paper). Inside
+    CKA(A^T, B^T) the "samples" are the p activations, so with a linear
+    kernel K = A^T A and L = B^T B (both p x p), and the centering
+    matrix H of Eq. 5 is p x p:
 
-        CKA^T(A, B) = <A^T A, B^T B>_F / (||A^T A||_F * ||B^T B||_F)
+        CKA^T(A, B) = tr(K H L H) / sqrt(tr(K H K H) tr(L H L H))
 
-    NOTE: the numerator is the Frobenius inner product of the two
-    within-group covariances, NOT ||A^T B||^2_F. The latter pairs row i
-    of group A with row i of group B - an arbitrary pairing (batch
-    order) that measures nothing meaningful - and forced the old
-    implementation to truncate groups to a common size. The correct
-    form needs no equal group sizes.
+    A @ H subtracts each ROW's mean across the activations, so centering
+    rows (dim=1) and taking <A^T A, B^T B>_F / (||A^T A|| ||B^T B||)
+    is exactly Eqs. 5-6 (the (n-1)^2 factors cancel). Groups may differ
+    in size. Centering columns instead (dim=0) would turn A^T A into a
+    within-group covariance and discard each group's mean, so a group
+    whose activations are merely shifted would still score ~1.
 
     Args:
         A: (n_A, p) activations of group A (rows = samples).
@@ -275,8 +276,8 @@ def linear_cka_t(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
         structure; disentanglement *maximizes* this (equivalently
         minimizes its negative).
     """
-    A = A - A.mean(dim=0, keepdim=True)
-    B = B - B.mean(dim=0, keepdim=True)
+    A = A - A.mean(dim=1, keepdim=True)  # = A @ H: centre across activations
+    B = B - B.mean(dim=1, keepdim=True)
 
     AA = A.t() @ A
     BB = B.t() @ B
@@ -295,9 +296,14 @@ def disentanglement_loss(rep: torch.Tensor, group: torch.Tensor) -> torch.Tensor
         group: (n,) integer protected-group labels for the batch.
 
     Returns:
-        Scalar loss; minimizing it makes the feature covariance patterns
-        of all protected groups converge (HSIC-style independence).
+        Scalar loss; minimizing it makes the activation patterns of all
+        protected groups converge (HSIC-style independence). None when
+        rep has <= 2 columns: after centering across activations, two
+        columns leave a rank-1 Gram proportional to [[1,-1],[-1,1]] for
+        every group, so CKA^T is constant (no signal).
     """
+    if rep.shape[1] <= 2:
+        return None
     unique = torch.unique(group)
     group_reps = []
     for g in unique:
@@ -327,7 +333,8 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
 
       1. Latent space:   mu_z (flattened over tokens) - primary objective.
       2. Detokenizer:   feature-wise on the pre-aggregation logits
-                        (numerical logits + each categorical logit),
+                        (each numerical feature's h_num * weight, plus
+                        each categorical logit; <= 2-column inputs skipped),
                         mean-aggregated so features with more unique
                         values are not disproportionately weighted.
       3. Decoder:       decoder output h (flattened over tokens), whose
@@ -347,28 +354,37 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
     device = stages['mu_z'].device
     losses = []
 
+    def add(target, loss):
+        if loss is not None:  # None = too few columns for CKA^T
+            target.append(loss)
+
     # Stage 1: latent space
     mu_flat = stages['mu_z'].reshape(stages['mu_z'].shape[0], -1)
-    losses.append(disentanglement_loss(mu_flat, group))
+    add(losses, disentanglement_loss(mu_flat, group))
 
-    # Stage 2: detokenizer - feature-wise, mean-aggregated
+    # Stage 2: detokenizer - feature-wise, mean-aggregated. Numerical
+    # features use the pre-aggregation logits h_num * weight (n, d_token)
+    # per feature, as Sec. 4.3.2 specifies, not the summed output.
     feature_losses = []
-    num_logits = stages['recon_x_num']
-    if num_logits is not None:
-        feature_losses.append(disentanglement_loss(num_logits, group))
+    num_pre = stages.get('recon_num_pre')
+    if num_pre is not None:
+        for j in range(num_pre.shape[1]):
+            add(feature_losses, disentanglement_loss(num_pre[:, j, :], group))
     for i, cat_logits in enumerate(stages['recon_x_cat']):
         if cat_logits is None:
             continue
         if s_idx is not None and i == s_idx:
             continue  # protected attribute handled by L_S
-        feature_losses.append(disentanglement_loss(cat_logits, group))
+        add(feature_losses, disentanglement_loss(cat_logits, group))
     if feature_losses:
         losses.append(torch.stack(feature_losses).mean())
 
     # Stage 3: decoder output
     h_flat = stages['h'].reshape(stages['h'].shape[0], -1)
-    losses.append(disentanglement_loss(h_flat, group))
+    add(losses, disentanglement_loss(h_flat, group))
 
+    if not losses:
+        return torch.tensor(0.0, device=device)
     return torch.stack(losses).mean()
 
 
@@ -434,17 +450,24 @@ def uniform_attribute_loss_per_sample(s_logits: torch.Tensor) -> torch.Tensor:
 
         l_i = || softmax(s_i) - uniform ||_2
 
-    summed over the batch. Minimizing the sum pushes every individual
+    averaged over the batch. Minimizing it pushes every individual
     reconstruction toward uniform protected-attribute logits, which is a
     strictly stronger condition than a uniform batch mean (the mean can
     be uniform while individual rows are confidently wrong). Because it
-    is a sum of per-sample terms, per-sample gradients are isolated and
+    is a mean of per-sample terms, per-sample gradients are isolated and
     clipping bounds each record's influence - the DP guarantee covers it.
+
+    DEVIATION from Eq. 3: the paper only makes the batch-mean softmax
+    uniform, so the decoder still assigns a definite group per row; this
+    variant makes each row uncertain, so the synthetic protected column
+    is close to random. It is a MEAN (like MSE/CE), not a sum - a sum
+    outweighed the reconstruction loss by ~batch size and, under Opacus's
+    mean-reduction scaling, dominated every row's clipped gradient.
     """
     n, n_groups = s_logits.shape
     probs = torch.softmax(s_logits, dim=1)
     uniform = torch.full_like(probs, 1.0 / n_groups)
-    return torch.norm(probs - uniform, p=2, dim=1).sum()
+    return torch.norm(probs - uniform, p=2, dim=1).mean()
 
 
 class GroupLevelDPMechanism:

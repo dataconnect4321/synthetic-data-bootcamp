@@ -1,0 +1,290 @@
+# FLIP synthetic-data pipeline: configuration and experiments.
+#
+# Run with:   .venv/bin/python run_experiment.py --experiment <name> [--stages ...]
+# List:       .venv/bin/python run_experiment.py --list
+# Predict ε:  .venv/bin/python run_experiment.py --experiment <name> --predict-eps
+#
+# The base config below reproduces the repo's built-in defaults exactly
+# (TRADEOFF_PARAMS in run_flip_demo.py, DIFFUSION_PARAMS in
+# run_flip_full_pipeline.py). Each entry under `experiments:` overrides only
+# the keys it lists; `extends:` layers one experiment on another.
+#
+# Keys under `stage1:` map to TRADEOFF_PARAMS (upper-cased) and keys under
+# `diffusion:` map to DIFFUSION_PARAMS. The subsections inside `stage1:` are
+# for readability only. Unknown keys raise an error, so typos fail fast.
+
+paths:
+  raw_data: hmda_bmo_data.csv                        # raw HMDA extract (repo-relative)
+  preprocessed_data: Data/bmo_nationwide_preprocessed.csv
+  output_dir: runs/{experiment}                      # reports, synthetic CSVs, resolved config
+
+data:
+  sensitive_col: derived_race                        # protected attribute
+  target_col: target                                 # 1 = originated, 0 = denied (from preprocess)
+  groups: [White, Black or African American, Asian]  # protected groups kept for training
+  numeric_cols: [loan_amount, income, loan_to_value_ratio, property_value, tract_population]
+  categorical_cols: [conforming_loan_limit, derived_loan_product_type]  # besides sensitive + target
+  audit_sensitive_cols: [derived_ethnicity, derived_race, derived_sex]  # preprocess filter + real-data audit
+
+stage1:                     # FLIP VAE (both pipelines)
+  fairness:
+    lambda_fair: 2.0        # weight of −CKA^T disentanglement (Phase 2); 0 disables it
+    phase1_epochs: 100      # quality-only epochs
+    phase2_epochs: 60       # disentanglement epochs
+    phase2_lr_scale: 0.2    # LR multiplier when Phase 2 starts
+    max_div_penalty: 10.0   # cap on the SWD anchor term
+  privacy:
+    use_dp: true
+    noise_multiplier: 0.8   # DP-SGD σ for per-row losses
+    max_grad_norm: 1.0      # per-row clip norm
+    dp_delta: 1.0e-5
+    max_group_grad_norm: 0.5      # clip for the batch-coupled fairness gradient
+    group_noise_multiplier: 3.0   # σ for that gradient
+    stats_max_norm: 10.0          # row clip for DP generation statistics
+    stats_noise_multiplier: 1.0
+    stats_range_k: 4.0            # clip synthetic numerics to mean ± k·std (DP-released)
+    sampler: poisson              # poisson (valid accounting) | balanced
+    poisson_steps_per_epoch: null # null → ceil(smallest group / per-group batch)
+  fidelity:
+    beta: 0.001             # KL weight
+  stability:
+    adam_eps: 0.0001
+    max_optimizer_grad_norm: 5.0
+    weight_decay: 0.01
+    logit_clamp: 15.0
+    num_recon_clamp: 8.0
+  training:
+    sample_size: 12000      # rows drawn after filtering; null = all rows (~24.7k)
+    batch_size: 1024        # split evenly across groups; the main privacy lever
+    d_token: 8
+    num_layers: 2
+    lr: 0.001
+    seed: 42
+    device: auto            # auto (cuda if available, else cpu) | cpu | cuda | mps
+
+diffusion:                  # Stage 2 (run_flip_full_pipeline.py only)
+  epochs: 3000              # ~1.3 h/epoch with DP on a laptop CPU; see experiments
+  batch_size: 256
+  lr: 0.001
+  dim_t: 1024               # MLPDiffusion hidden width
+  sample_steps: 50
+  n_gen: null               # null → same as training rows
+  use_dp: true
+  noise_multiplier: 1.0
+  max_grad_norm: 1.0
+  dp_delta: 1.0e-5
+
+experiments:
+  # Repo defaults. Predicted composed ε ≈ 197 (demo) / ≈ 261 (full, 3000 diffusion epochs).
+  baseline: {}
+
+  # Exactly what ran on 2026-09-29 (see ARCHITECTURE.md). Composed ε ≈ 194 (full).
+  hmda_2026_09_29:
+    diffusion: {epochs: 10}
+
+  # Minutes-long end-to-end check of every stage; results are meaningless.
+  smoke:
+    stage1:
+      fairness: {phase1_epochs: 2, phase2_epochs: 2}
+      training: {sample_size: 2000}
+    diffusion: {epochs: 1, dim_t: 128}
+
+  # Fairness only: no DP anywhere. Fastest; isolates the fairness effect.
+  no_dp:
+    stage1:
+      privacy: {use_dp: false}
+    diffusion: {use_dp: false, epochs: 10}
+
+  # Fairness only, with enough Phase-2 training for the CKA term to act.
+  # An epoch is ceil(smallest group / per-group batch) = 2 steps here, so
+  # no_dp's 60 Phase-2 epochs are only 120 steps at 0.2x LR - too few to
+  # move the representation. With the demo's Gaussian prior this gave
+  # synthetic BER 0.65 (ideal 0.667, real 0.59), but the full pipeline
+  # (diffusion, 1000 epochs) gave BER 0.59 - no gain. Single runs; see
+  # CHANGELOG.md "Fairness focus" before relying on it.
+  fairness_only:
+    extends: no_dp
+    stage1:
+      fairness: {lambda_fair: 8.0, phase2_epochs: 600, phase2_lr_scale: 1.0}
+
+  # Composed ε ≈ 9.6 (demo) / 9.7 (full) at δ = 1e-5, from --predict-eps.
+  # Smaller batches cut the smallest group's per-step inclusion rate from 0.59 to 0.056.
+  eps_10:
+    stage1:
+      privacy:
+        noise_multiplier: 2.0
+        group_noise_multiplier: 8.0
+        stats_noise_multiplier: 10.0
+      training: {batch_size: 96}
+    diffusion: {epochs: 10, noise_multiplier: 2.0}
+
+  # Composed ε ≈ 6.3 (demo) / 6.4 (full).
+  eps_6:
+    extends: eps_10
+    stage1:
+      privacy: {noise_multiplier: 3.0}
+
+  # Stronger disentanglement on the ε ≈ 10 budget (same ε: only the loss weight changes).
+  eps_10_strong_fairness:
+    extends: eps_10
+    stage1:
+      fairness: {lambda_fair: 5.0}
+
+  # Every filtered row (~24.7k) instead of the 12k sample. Composed ε ≈ 6.5 (lower inclusion rate).
+  eps_10_full_data:
+    extends: eps_10
+    stage1:
+      training: {sample_size: null}
+
+  # ---- UCI Adult: reproduce the FLIP paper's headline result (Fig. 3, Table 3) ----
+  # Preprocess first:  .venv/bin/python preprocess_adult.py
+  # Run with --stages demo[,full]; the preprocess/audit/report stages are HMDA-only.
+  # λ=0, no DP: the no-fairness reference (paper: BER 0.41, A-NCB 0.32).
+  adult:
+    paths: {preprocessed_data: Data/adult_preprocessed.csv}
+    data:
+      sensitive_col: sex
+      target_col: target                             # 1 = income >50K
+      groups: [Male, Female]
+      numeric_cols: [age, fnlwgt, education-num, capital-gain, capital-loss, hours-per-week]
+      categorical_cols: [workclass, education, marital-status, occupation,
+                         relationship, race, native-country]
+      audit_sensitive_cols: [sex]
+    stage1:
+      fairness: {lambda_fair: 0.0}
+      privacy: {use_dp: false}
+      training: {sample_size: null}                  # all 45,222 rows
+    diffusion: {use_dp: false, epochs: 10}
+
+  # Minutes-long end-to-end check on Adult; results are meaningless.
+  adult_smoke:
+    extends: adult
+    stage1:
+      fairness: {lambda_fair: 4.0, phase1_epochs: 2, phase2_epochs: 2}
+      training: {sample_size: 2000}
+    diffusion: {epochs: 1, dim_t: 128}
+
+  # The paper's λ=4, ε=∞ (paper: BER 0.50, A-NCB 0.92).
+  adult_lam4:
+    extends: adult
+    stage1:
+      fairness: {lambda_fair: 4.0}
+
+  # The paper's λ=4, ε=3 (paper: BER 0.49, A-NCB 0.91).
+  # Composed ε ≈ 2.8 (demo) / 2.6 (full) at δ = 1e-5, from --predict-eps.
+  adult_lam4_eps3:
+    extends: adult_lam4
+    stage1:
+      privacy:
+        use_dp: true
+        noise_multiplier: 3.0
+        group_noise_multiplier: 8.0
+        stats_noise_multiplier: 10.0
+      training: {batch_size: 256}
+    diffusion: {use_dp: true, noise_multiplier: 2.0}
+
+  # ---- UCI Adult, following the paper (see EXPERIMENTS.md "Adult: paper setup") ----
+  # The paper gives no hyperparameters; unstated ones follow TabSyn, which
+  # it adapts: 4000 VAE epochs (phase split 3000 + 1000 is our assumption),
+  # batch 4096, d_token 4, factor 32, beta decayed 1e-2 -> 1e-5, diffusion up
+  # to 10000 epochs with patience 500. DP on the VAE only (paper Sec. 4).
+  # Run per fold:  --experiment adult_paper --fold 0 --stages full,eval
+  # Then:          --experiment adult_paper --summarize
+  adult_paper:
+    extends: adult
+    data: {paper_reference: adult}
+    stage1:
+      fairness: {lambda_fair: 0.0, phase1_epochs: 3000, phase2_epochs: 1000,
+                 phase2_lr_scale: 1.0, ls_variant: batch_mean}  # paper Eq. 3
+      fidelity: {beta_schedule: decay, beta_max: 0.01, beta_min: 1.0e-5,
+                 beta_decay: 0.7, beta_decay_every: 150}
+      training: {batch_size: 4096, d_token: 4, factor: 32, device: mps}  # ~2x faster than CPU here
+    diffusion: {epochs: 10000, batch_size: 4096, early_stop_patience: 500,
+                use_dp: false}
+
+  adult_paper_lam4:
+    extends: adult_paper
+    stage1:
+      fairness: {lambda_fair: 4.0}
+
+  # ε ≈ 2.9 (full) / 3.1 (demo) at δ = 1e-5 on a fold's ~30k training rows,
+  # from --predict-eps. 4000 epochs need heavy noise; at batch 4096 the
+  # noise per averaged gradient (σ/batch = 0.016) is 4x lower than the
+  # batch-256 option with the same ε (σ 16 -> 0.0625). The group σ is high
+  # because the batch-mean L_S runs through the group mechanism in both
+  # phases; that mechanism's noise (0.5 x 256 per parameter) swamps the
+  # L_S/CKA signal (ARCHITECTURE.md issue #11).
+  adult_paper_eps3:
+    extends: adult_paper
+    stage1:
+      privacy: {use_dp: true, noise_multiplier: 64.0, group_noise_multiplier: 256.0,
+                stats_noise_multiplier: 10.0}
+
+  adult_paper_lam4_eps3:
+    extends: adult_paper_eps3
+    stage1:
+      fairness: {lambda_fair: 4.0}
+
+  # Minutes-long check of the fold + eval plumbing; results are meaningless.
+  adult_paper_smoke:
+    extends: adult_paper_lam4
+    stage1:
+      fairness: {phase1_epochs: 3, phase2_epochs: 2}
+      fidelity: {beta_decay_every: 1}
+    diffusion: {epochs: 3, dim_t: 128, early_stop_patience: 2}
+
+  # TEMPLATE: every setting spelled out, starting from the eps_10 values
+  # (composed ε ≈ 9.6 demo / 9.7 full). To make a new experiment, copy this
+  # block, rename it, and edit values. Lines you leave unchanged can be deleted.
+  #   Check ε first:  .venv/bin/python run_experiment.py --experiment my_experiment --predict-eps
+  #   Then run:       .venv/bin/python run_experiment.py --experiment my_experiment --stages demo,full
+  my_experiment:
+    # data:                          # uncomment to change the protected attribute / columns
+    #   sensitive_col: derived_race
+    #   groups: [White, Black or African American, Asian]
+    stage1:
+      fairness:
+        lambda_fair: 2.0             # ↑ more bias removal, ↓ fidelity
+        phase1_epochs: 100           # changes ε (more steps)
+        phase2_epochs: 60            # changes ε (more steps)
+        phase2_lr_scale: 0.2
+        max_div_penalty: 10.0
+      privacy:
+        use_dp: true
+        noise_multiplier: 2.0        # ↑ stronger privacy (lower ε), ↓ fidelity
+        max_grad_norm: 1.0
+        dp_delta: 1.0e-5
+        max_group_grad_norm: 0.5
+        group_noise_multiplier: 8.0  # changes ε
+        stats_max_norm: 10.0
+        stats_noise_multiplier: 10.0 # changes ε
+        stats_range_k: 4.0
+        sampler: poisson
+        poisson_steps_per_epoch: null
+      fidelity:
+        beta: 0.001
+      stability:
+        adam_eps: 0.0001
+        max_optimizer_grad_norm: 5.0
+        weight_decay: 0.01
+        logit_clamp: 15.0
+        num_recon_clamp: 8.0
+      training:
+        sample_size: 12000           # null = all ~24.7k rows (changes ε)
+        batch_size: 96               # biggest privacy lever: ↓ batch → ↓ ε
+        d_token: 8
+        num_layers: 2
+        lr: 0.001
+        seed: 42
+        device: auto
+    diffusion:
+      epochs: 10                     # ~1.3 h/epoch on this Mac with DP; changes ε
+      batch_size: 256                # changes ε
+      lr: 0.001
+      dim_t: 1024                    # smaller (e.g. 256) = much faster
+      sample_steps: 50
+      n_gen: null
+      use_dp: true                   # false = diffusion stage NOT private
+      noise_multiplier: 2.0          # changes ε
+      max_grad_norm: 1.0
+      dp_delta: 1.0e-5

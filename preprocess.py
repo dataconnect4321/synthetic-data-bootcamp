@@ -1,10 +1,12 @@
 """Preprocess HMDA loan data: create binary target, drop 'other' outcomes,
 and exclude rows missing sensitive demographic attributes."""
 
+import os
 import pandas as pd
 
-DATA_PATH = r"c:\Users\db234\OneDrive\Documents\Vector\Data\bmo_nationwide.csv"
-OUTPUT_PATH = r"c:\Users\db234\OneDrive\Documents\Vector\Data\bmo_nationwide_preprocessed.csv"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(_HERE, "hmda_bmo_data.csv")
+OUTPUT_PATH = os.path.join(_HERE, "Data", "bmo_nationwide_preprocessed.csv")
 
 SENSITIVE_COLS = ["derived_ethnicity", "derived_race", "derived_sex"]
 

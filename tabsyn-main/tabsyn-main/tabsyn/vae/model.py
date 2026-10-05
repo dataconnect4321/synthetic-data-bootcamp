@@ -376,14 +376,20 @@ class Model_VAE(nn.Module):
             h:             (n, tokens, d) decoder output        [decoder stage]
             recon_x_num:   (n, d_numerical) numerical logits    [detokenizer stage]
             recon_x_cat:   list of (n, |cat_i|) category logits [detokenizer stage]
+            recon_num_pre: (n, d_numerical, d_token) pre-aggregation numerical
+                           logits h_num * weight; recon_x_num is its sum
+                           over the last dim                  [detokenizer stage]
         """
         h, mu_z, std_z = self.VAE(x_num, x_cat)
         recon_x_num, recon_x_cat = self.Reconstructor(h)
+        d_num = self.Reconstructor.d_numerical
+        recon_num_pre = h[:, :d_num] * self.Reconstructor.weight.unsqueeze(0)
         return {
             'mu_z': mu_z,
             'h': h,
             'recon_x_num': recon_x_num,
             'recon_x_cat': recon_x_cat,
+            'recon_num_pre': recon_num_pre,
             'std_z': std_z,
         }
 
