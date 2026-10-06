@@ -12,8 +12,9 @@ Pipeline:
   4. Score the result:
        Fidelity:  per-column Wasserstein-1 (numeric) / TV distance (cat),
                   correlation-matrix preservation.
-       Privacy:   DCR ratio - nearest-neighbor distance from synthetic to
-                  real vs. real (holdout) to real. ~1.0 is healthy.
+       Privacy:   eps-identifiability - share of real records whose nearest
+                  synthetic record is closer than their nearest other real
+                  record (Gower distance). Lower is more private.
        Fairness:  demographic parity difference/ratio of the synthetic
                  origination rate across protected groups, compared to
                  the real data's disparity.
@@ -35,10 +36,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 from tabsyn.vae.model import Model_VAE
 from tabsyn.vae.flip_fairness import (
+    linear_cka_t,
     multi_stage_disentanglement_loss,
     sliced_wasserstein_distance,
     uniform_attribute_loss,
     uniform_attribute_loss_per_sample,
+    adversary_loss,
+    proxy_sublabel,
+    proxy_independence_loss,
+    proxy_adversary_loss,
+    marginal_matching_penalty,
     BalancedGroupSampler,
     PoissonGroupSampler,
     RDPAccountant,
@@ -49,6 +56,7 @@ from tabsyn.vae.flip_fairness import (
     get_dp_trainable_parameters,
 )
 from tabsyn.vae.main import compute_loss
+from tabsyn.vae.paper_metrics import fairness_scores, epsilon_identifiability
 
 # ==========================================================================
 # TRADEOFF PARAMETERS - the fidelity / privacy / fairness knob panel
@@ -60,6 +68,49 @@ TRADEOFF_PARAMS = {
     # degrades reconstruction fidelity (paper Fig. 3: fairness-quality
     # trade-off). 0 disables explicit disentanglement.
     'LAMBDA_FAIR': 2.0,
+
+    # Weight of the normalized group mean-difference term added to CKA^T
+    # at the latent, detokenizer and decoder stages (CKA^T's per-group
+    # centering cannot see mean offsets). 0 = paper's pure CKA^T.
+    'MEAN_SHIFT_WEIGHT': 1.0,
+    # Score binary non-protected columns at the detokenizer stage with the
+    # W1 logit-gap term instead of CKA^T (which has nothing to compare for
+    # 2 logits).
+    'BINARY_W1': True,
+    # Weight of the RBF-kernel MMD^2 between the two groups' latents.
+    # Targets nonlinear separability, which neither CKA^T (covariance shape)
+    # nor the mean term (first moments) can see.
+    'MMD_WEIGHT': 0.0,
+    # In-model adversary: gradient-reversal head from the decoded
+    # non-protected logits to S, per-record CE (DP-safe, pass 1). Ramped
+    # linearly over Phase 2 so the representation is established before
+    # the scrubbing pressure peaks.
+    'ADV_WEIGHT': 0.0,
+    # Lambda ramp: LAMBDA_FAIR ramps linearly from 0 over the first
+    # LAMBDA_RAMP_FRAC of Phase 2, so the fairness pressure grows after the
+    # Phase-2 representation has stabilized (guards against collapse).
+    'LAMBDA_RAMP_FRAC': 0.25,
+    # Marginal-matching penalty (category shares + numeric quantiles),
+    # batch-coupled (pass 2 under DP).
+    'MARGINAL_WEIGHT': 0.0,
+    # In-model proxy decoupling: weight (lambda) of a term making a merged
+    # column's sex-specific label (PROXY_CODES = (pos, neg) codes in
+    # categorical column PROXY_IDX, e.g. relationship Husband/Wife)
+    # independent of the other tokens. 'hsic' is batch-coupled (pass 2);
+    # 'adv' is a per-record gradient-reversal adversary (pass 1). Ramped
+    # like LAMBDA_FAIR. PROXY_EXCLUDE_DISENT drops the proxy token from the
+    # CKA^T/MMD terms so they act on the non-proxy representation only.
+    'PROXY_WEIGHT': 0.0,
+    'PROXY_MODE': 'hsic',
+    'PROXY_IDX': None,
+    'PROXY_CODES': None,
+    'PROXY_EXCLUDE_DISENT': False,
+
+    # L_S variant: 'per_sample' (DP-safe) or 'batch_mean' (paper Eq. 3).
+    'LS_MODE': 'per_sample',
+    # Keep the protected attribute in the reconstruction CE (paper-literal).
+    # Default False: this repo's random-assignment design.
+    'RECON_S': False,
 
     # Epochs of quality-only training before disentanglement starts.
     # More Phase-1 epochs -> better representation first, gentler
@@ -243,13 +294,23 @@ def load_sample(params):
 # ==========================================================================
 # FLIP training (two-phase, balanced sampling, optional DP-SGD)
 # ==========================================================================
-def train_flip(X_num, X_cat, categories, s_idx, params, device):
+def train_flip(X_num, X_cat, categories, s_idx, params, device,
+              phase1_checkpoint=None, factor=None):
+    """Two-phase FLIP VAE training. phase1_checkpoint: load a banked
+    Phase-1 model and skip its Phase-1 epochs, but still build the sampler,
+    optimizer/Opacus wrapping and the frozen reference encoder, and still
+    run Phase 2 - so per-setting sweeps only pay for Phase 2."""
     torch.manual_seed(params['SEED'])
     n, d_numerical = X_num.shape
 
+    factor = factor if factor is not None else params.get('FACTOR', 8)
     model = Model_VAE(params['NUM_LAYERS'], d_numerical, categories,
-                      params['D_TOKEN'], n_head=1, factor=8,
+                      params['D_TOKEN'], n_head=1, factor=factor,
                       bias=True).to(device)
+    if phase1_checkpoint and os.path.exists(phase1_checkpoint):
+        model.load_state_dict(torch.load(phase1_checkpoint,
+                                         map_location=device))
+        print(f'loaded Phase-1 checkpoint: {phase1_checkpoint}')
 
     groups = X_cat[:, s_idx].long().numpy()
     per_group = params['BATCH_SIZE'] // len(np.unique(groups))
@@ -321,17 +382,68 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                                      weight_decay=params['WEIGHT_DECAY'])
 
     raw = model._module if params['USE_DP'] else model
-    beta = params['BETA']
-    total_epochs = params['PHASE1_EPOCHS'] + params['PHASE2_EPOCHS']
+    # Beta decay (paper/TabSyn setup): PLATEAU-BASED - beta starts at
+    # BETA_MAX and is multiplied by BETA_LAMBDA when the epoch loss hasn't
+    # improved for BETA_PATIENCE epochs, down to BETA_MIN. Fixed BETA when
+    # BETA_MAX is unset.
+    beta_max = params.get('BETA_MAX')
+    beta = beta_max if beta_max is not None else params['BETA']
+    best_loss, stall = float('inf'), 0
+    # A banked Phase-1 model skips its Phase-1 epochs; Phase 2 always runs.
+    phase1_epochs = 0 if (phase1_checkpoint
+                          and os.path.exists(phase1_checkpoint)) \
+        else params['PHASE1_EPOCHS']
+    total_epochs = phase1_epochs + params['PHASE2_EPOCHS']
     reference_encoder = None
 
+    # In-model adversary head (Phase 2 only): gradient reversal from the
+    # decoded non-protected logits to S. Its loss is per-record, so under DP
+    # it rides Opacus's pass 1 with the other per-sample losses.
+    adv_head = None
+    adv_params = []
+    if params.get('ADV_WEIGHT', 0):
+        from tabsyn.vae.flip_fairness import AdversaryHead
+        d_in = d_numerical + sum(categories) - categories[s_idx]
+        adv_head = AdversaryHead(d_in, categories[s_idx]).to(device)
+        adv_params = list(adv_head.parameters())
+        if params['USE_DP']:
+            # adversary parameters get per-sample grads like everything else
+            pass
+        else:
+            optimizer.add_param_group({'params': adv_params})
+    if params.get('ADV_WEIGHT', 0) and params['USE_DP']:
+        # Opacus wrapped the model BEFORE the head existed; add its params as
+        # a plain group - the head is a standard MLP, so Opacus's native
+        # samplers cover it once it is inside the wrapped module. Simplest
+        # correct route: attach to the wrapped model's module tree.
+        raw.add_module('adv_head', adv_head)
+        optimizer.add_param_group({'params': adv_params})
+
+    # Proxy decoupling setup (Phase 2 only).
+    proxy_w = params.get('PROXY_WEIGHT', 0) or 0
+    proxy_idx = params.get('PROXY_IDX')
+    if proxy_w and (proxy_idx is None or params.get('PROXY_CODES') is None):
+        raise ValueError('PROXY_WEIGHT needs PROXY_IDX and PROXY_CODES')
+    exclude_cat = (proxy_idx,) if (params.get('PROXY_EXCLUDE_DISENT')
+                                   and proxy_idx is not None) else ()
+    proxy_head = None
+    if proxy_w and params.get('PROXY_MODE', 'hsic') == 'adv':
+        from tabsyn.vae.flip_fairness import (AdversaryHead,
+                                              proxy_adversary_input_dim)
+        n_tok = 1 + d_numerical + len(categories)
+        proxy_head = AdversaryHead(
+            proxy_adversary_input_dim(n_tok, params['D_TOKEN']), 2).to(device)
+        if params['USE_DP']:
+            raw.add_module('proxy_head', proxy_head)
+        optimizer.add_param_group({'params': list(proxy_head.parameters())})
+
     for epoch in range(total_epochs):
-        phase = 1 if epoch < params['PHASE1_EPOCHS'] else 2
+        phase = 1 if epoch < phase1_epochs else 2
 
         # Phase-2 LR drop: shrink the step size once disentanglement
         # starts so fairness updates perturb the quality representation
         # gently instead of destroying it.
-        if phase == 2 and epoch == params['PHASE1_EPOCHS']:
+        if phase == 2 and epoch == phase1_epochs:
             new_lr = params['LR'] * params['PHASE2_LR_SCALE']
             for g in optimizer.param_groups:
                 g['lr'] = new_lr
@@ -339,6 +451,7 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
 
         epoch_loss = 0.0
         n_batches = 0
+        cur_beta = beta
 
         for bnum, bcat in loader:
             bnum, bcat = bnum.to(device), bcat.to(device)
@@ -360,13 +473,31 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
             mse, ce, kld, acc, loss_s = compute_loss(
                 bnum, bcat, recon_num_clamped, recon_cat_clamped,
                 stages['mu_z'], stages['std_z'], s_idx=s_idx,
-                Recon_S_logits=recon_cat_clamped[s_idx])
+                Recon_S_logits=recon_cat_clamped[s_idx],
+                ls_mode=params.get('LS_MODE', 'per_sample'),
+                recon_s=params.get('RECON_S', False))
 
             # ---- Pass 1: per-sample-decomposable loss (record-level DP) --
-            # mse + ce + kld + L_S are all sums/means of per-sample terms
-            # (L_S uses the per-sample variant), so Opacus's per-sample
-            # clipping bounds each record's influence on this gradient.
-            loss_private = mse + ce + beta * kld + loss_s
+            # mse + ce + kld + L_S (+ adversary CE) are all sums/means of
+            # per-sample terms, so Opacus's per-sample clipping bounds each
+            # record's influence on this gradient.
+            loss_private = mse + ce + cur_beta * kld + loss_s
+            if adv_head is not None and phase == 2:
+                # linear ramp over Phase 2: 0 -> ADV_WEIGHT
+                ramp = (epoch - phase1_epochs + 1) / max(1, params['PHASE2_EPOCHS'])
+                adv_w = params['ADV_WEIGHT'] * min(1.0, ramp)
+                loss_adv = adversary_loss(adv_head, stages,
+                                          bcat[:, s_idx].long(), s_idx,
+                                          lambd=1.0)
+                loss_private = loss_private + adv_w * loss_adv
+            if proxy_head is not None and phase == 2:
+                p2 = (epoch - phase1_epochs) / max(1, params['PHASE2_EPOCHS'])
+                pw = proxy_w * min(1.0, p2 / max(
+                    1e-9, params.get('LAMBDA_RAMP_FRAC', 0.25)))
+                pmask, plab = proxy_sublabel(bcat, proxy_idx,
+                                             *params['PROXY_CODES'])
+                loss_private = loss_private + pw * proxy_adversary_loss(
+                    proxy_head, stages, plab, pmask, proxy_idx, s_idx)
             loss_private.backward(retain_graph=phase == 2)
 
             # ---- Pass 2: batch-coupled fairness terms (group-level DP) --
@@ -388,7 +519,7 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                         params['NUM_LAYERS'],
                         model.Reconstructor.d_numerical,
                         categories, params['D_TOKEN'],
-                        n_head=1, factor=8).to(device)
+                        n_head=1, factor=factor).to(device)
                     reference_encoder.Tokenizer.load_state_dict(
                         raw.VAE.Tokenizer.state_dict())
                     reference_encoder.VAE_Encoder.load_state_dict(
@@ -400,13 +531,37 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                     ref_mu = reference_encoder(bnum, bcat)
                 ref_mu_flat = ref_mu.reshape(bnum.shape[0], -1)
                 disent = multi_stage_disentanglement_loss(
-                    stages, bcat[:, s_idx].long(), s_idx=s_idx)
+                    stages, bcat[:, s_idx].long(), s_idx=s_idx,
+                    mean_weight=params.get('MEAN_SHIFT_WEIGHT', 1.0),
+                    binary_w1=params.get('BINARY_W1', True),
+                    mmd_weight=params.get('MMD_WEIGHT', 0.0),
+                    exclude_cat=exclude_cat,
+                    t_idx=params.get('TARGET_IDX'),
+                    target_in_fairness=params.get('TARGET_IN_FAIRNESS',
+                                                   False))
+                # lambda ramp over the first LAMBDA_RAMP_FRAC of Phase 2
+                p2_frac = (epoch - phase1_epochs) / max(1, params['PHASE2_EPOCHS'])
+                lam_eff = params['LAMBDA_FAIR'] * min(
+                    1.0, p2_frac / max(1e-9, params.get('LAMBDA_RAMP_FRAC', 0.25)))
+                marg_pen = marginal_matching_penalty(
+                    stages, bnum, bcat, s_idx) \
+                    if params.get('MARGINAL_WEIGHT', 0) else torch.tensor(0.0,
+                        device=bnum.device)
                 # Clamp the divergence penalty: without a cap the SWD term
                 # grows unboundedly as the encoder drifts from the frozen
                 # reference under DP noise, exploding the loss.
                 div = sliced_wasserstein_distance(ref_mu_flat, mu_flat)
                 div = torch.clamp(div, max=params['MAX_DIV_PENALTY'])
-                loss_fair = div + params['LAMBDA_FAIR'] * disent
+                loss_fair = div + lam_eff * disent \
+                    + params.get('MARGINAL_WEIGHT', 0) * marg_pen
+                if proxy_w and proxy_head is None:
+                    # HSIC mode: batch-coupled -> group-level pass
+                    pmask, plab = proxy_sublabel(bcat, proxy_idx,
+                                                 *params['PROXY_CODES'])
+                    pw = proxy_w * min(1.0, p2_frac / max(
+                        1e-9, params.get('LAMBDA_RAMP_FRAC', 0.25)))
+                    loss_fair = loss_fair + pw * proxy_independence_loss(
+                        stages, plab, pmask, proxy_idx, s_idx)
 
                 if group_mech is not None:
                     # Capture the fairness gradient WITHOUT Opacus's hooks:
@@ -452,6 +607,36 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
                 accountant.step()
             epoch_loss += (loss_private + (loss_fair if phase == 2 else 0)).item()
             n_batches += 1
+            # Per-term Phase-2 diagnostics: is the fairness gradient drowned
+            # out by the marginal/SWD terms? Logged every 100 epochs.
+            if phase == 2 and epoch % 100 == 0 and bnum.shape[0] > 1:
+                with torch.no_grad():
+                    mu_flat_d = stages['mu_z'].reshape(bnum.shape[0], -1)
+                    g = bcat[:, s_idx].long()
+                    blocks = [mu_flat_d[torch.where(g == u)[0]]
+                              for u in torch.unique(g)]
+                    cka_val = float(np.mean([
+                        linear_cka_t(blocks[i], blocks[j]).item()
+                        for i in range(len(blocks))
+                        for j in range(i + 1, len(blocks))])) \
+                        if len(blocks) > 1 else float('nan')
+                    print(f'    terms: recon={loss_private.item():.4f} '
+                          f'div={div.item():.4f} disent={disent.item():.4f} '
+                          f'cka_t={cka_val:.4f} marg={float(marg_pen):.4f} '
+                          f'lam_eff={lam_eff:.2f}')
+
+        # Plateau-based beta decay (TabSyn): on a stalled epoch loss, halve
+        # patience; at BETA_PATIENCE stalls, beta *= BETA_LAMBDA (>= BETA_MIN).
+        if beta_max is not None and phase == 1:
+            if epoch_loss < best_loss:
+                best_loss, stall = epoch_loss, 0
+            else:
+                stall += 1
+                if stall >= params.get('BETA_PATIENCE', 10) \
+                        and beta > params.get('BETA_MIN', 1e-5):
+                    beta *= params.get('BETA_LAMBDA', 0.7)
+                    stall = 0
+                    print(f'--- beta decayed to {beta:.2e} ---')
 
         if epoch % 10 == 0 or epoch == total_epochs - 1:
             msg = f'epoch {epoch:3d} [phase {phase}] loss={epoch_loss/max(1,n_batches):.4f}'
@@ -471,7 +656,7 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device):
 # ==========================================================================
 @torch.no_grad()
 def generate(model, n_gen, device, params, X_num=None, X_cat=None,
-             stats_release=None):
+             stats_release=None, num_floor=None):
     """Sample latents from a per-dimension Gaussian fit to the encoded
     training latents, then decode. (The full TabSyn pipeline trains a
     diffusion prior on latents; a Gaussian stand-in keeps this demo
@@ -561,7 +746,11 @@ def generate(model, n_gen, device, params, X_num=None, X_cat=None,
     # proxy above can still dip below zero for skewed columns (the
     # committed report showed an income of -31.15); clamping at 0 uses
     # only PUBLIC knowledge about the domain, so it costs no privacy.
-    syn_num = np.clip(syn_num, 0.0, None)
+    # clamp is applied in STANDARDIZED units: num_floor = -mean/std is the
+    # standardized image of 0 (clipping standardized values at 0 would
+    # flatten every below-average value to the mean).
+    if num_floor is not None:
+        syn_num = np.maximum(syn_num, num_floor[None, :])
 
     return syn_num, syn_cat, stats_budgets
 
@@ -593,26 +782,13 @@ def fidelity_metrics(real_num, syn_num, real_cat, syn_cat, cat_encoders):
             'corr_delta': corr_delta}
 
 
-def privacy_metrics(real_num, syn_num, params):
-    """DCR ratio: min dist(synthetic -> real) / min dist(real holdout ->
-    real train). Values near >= 1.0 mean synthetic records are no closer
-    to real records than real records are to each other."""
-    rng = np.random.default_rng(params['SEED'])
-    n = len(real_num)
-    hold = rng.choice(n, size=min(500, n), replace=False)
-    mask = np.ones(n, dtype=bool); mask[hold] = False
-    train_idx = np.where(mask)[0]
-
-    rt = torch.tensor(real_num[train_idx]).float()
-    rh = torch.tensor(real_num[hold]).float()
-    sy = torch.tensor(syn_num).float()
-
-    d_sr = torch.cdist(sy, rt).min(dim=1).values  # synthetic -> real
-    d_rr = torch.cdist(rh, rt).min(dim=1).values  # real holdout -> real train
-    ratio = float(d_sr.mean() / (d_rr.mean() + 1e-8))
-    return {'dcr_ratio': ratio,
-            'syn_to_real_min': float(d_sr.mean()),
-            'real_to_real_min': float(d_rr.mean())}
+def privacy_metrics(real_num, syn_num, real_cat, syn_cat):
+    """eps-identifiability (Yoon et al. 2020): share of real records whose
+    nearest synthetic record is closer than their nearest other real
+    record, under entropy-weighted Gower distance. Lower is more private;
+    replaces the DCR ratio."""
+    return {'eps_identifiability': epsilon_identifiability(
+        real_num, real_cat, syn_num, syn_cat)}
 
 
 def fairness_metrics(real_cat, syn_cat, t_idx, s_idx, cat_encoders,
@@ -673,6 +849,13 @@ def fairness_metrics(real_cat, syn_cat, t_idx, s_idx, cat_encoders,
         out['downstream_fairness'] = _downstream_fairness(
             real_num, real_cat, syn_num, syn_cat, t_idx, s_idx,
             cat_encoders)
+        # Paper metrics: BER (own protected column) and A-NCB (adversary
+        # trained on the real data), with the real data as the reference.
+        out['paper_metrics'] = {
+            'syn': fairness_scores(syn_num, syn_cat, s_idx,
+                                   ref=(real_num, real_cat)),
+            'real': fairness_scores(real_num, real_cat, s_idx),
+        }
     return out
 
 
@@ -745,9 +928,10 @@ def _downstream_fairness(real_num, real_cat, syn_num, syn_cat, t_idx,
     def feats(cat, num):
         parts = [num]
         for j in range(cat.shape[1]):
-            if j == s_idx:
-                continue  # the protected attribute is NOT a model feature
-            k = int(cat[:, j].max()) + 1
+            if j == s_idx or j == t_idx:
+                continue  # neither the protected attribute nor the label is a feature
+            # width from the encoder, not the data: a table may lack rare categories
+            k = len(cat_encoders[CATEGORICAL_COLS[j]])
             parts.append(np.eye(k)[cat[:, j]])
         return np.concatenate(parts, axis=1)
 
@@ -847,7 +1031,7 @@ def generate_html_report(params, fid, priv, fair, eps, encoders, synthetic_df,
     fid_w1_v, fid_w1_c = _verdict(fid['num_w1_mean'], 0.2, 0.4, higher_is_better=False)
     fid_tv_v, fid_tv_c = _verdict(fid['cat_tv_mean'], 0.15, 0.3, higher_is_better=False)
     fid_cr_v, fid_cr_c = _verdict(fid['corr_delta'], 0.05, 0.15, higher_is_better=False)
-    priv_v, priv_c = _verdict(priv['dcr_ratio'], 1.0, 0.5, higher_is_better=True)
+    priv_v, priv_c = _verdict(priv['eps_identifiability'], 0.10, 0.20, higher_is_better=False)
     fair_v, fair_c = _verdict(fair['syn_dp_ratio'], 0.8, 0.6, higher_is_better=True)
 
     eps_html = (f'<span class="card-value">{eps:.2f}</span>'
@@ -884,6 +1068,16 @@ def generate_html_report(params, fid, priv, fair, eps, encoders, synthetic_df,
                         f'{dwn["dp_ratio"]:.4f} ({dwn_v})</span></div>')
 
     param_rows = ''.join(f'<tr><td>{k}</td><td>{v}</td></tr>' for k, v in params.items())
+
+    if 'paper_metrics' in fair:
+        pm = fair['paper_metrics']
+        probe_cards += (
+            f'<div class="card"><span class="card-label">BER (real &rarr; syn; '
+            f'chance {pm["syn"]["ber_chance"]:.3f})</span><span class="card-value">'
+            f'{pm["real"]["ber"]:.3f} &rarr; {pm["syn"]["ber"]:.3f}</span></div>'
+            f'<div class="card"><span class="card-label">A-NCB (real &rarr; syn; '
+            f'ideal 1)</span><span class="card-value">'
+            f'{pm["real"]["a_ncb"]:.3f} &rarr; {pm["syn"]["a_ncb"]:.3f}</span></div>')
 
     sample = synthetic_df.head(10)
     sample_header = ''.join(f'<th>{c}</th>' for c in sample.columns)
@@ -950,21 +1144,19 @@ def generate_html_report(params, fid, priv, fair, eps, encoders, synthetic_df,
   <section>
     <h2>Privacy - could synthetic records leak real training data?</h2>
     <div class="explanation">
-      <p><strong>DCR ratio</strong> (distance-to-closest-record) compares how
-      close synthetic records sit to the real training data versus how close a
-      held-out real record sits to that same training data. A ratio near or
-      above 1.0 means synthetic records are no closer to individual training
-      records than other real records naturally are - i.e. no evidence of
-      memorization. A ratio well below 0.5 would suggest the model copied
-      training examples rather than generalizing.</p>
+      <p><strong>&epsilon;-identifiability</strong> is the share of real
+      training records whose nearest synthetic record is closer than their
+      nearest other real record (entropy-weighted Gower distance). Lower is
+      more private; 0 means no real record is nearer to a synthetic one than
+      to its real neighbors.</p>
       <p><strong>DP guarantee (epsilon, delta)</strong> is the formal
       differential-privacy bound from DP-SGD training, tracked by a Renyi-DP
       accountant across every training step. It holds regardless of what any
-      attacker does with the trained model - unlike DCR, which is only an
+      attacker does with the trained model - unlike the empirical identifiability check, which is only an
       empirical check on this one generated batch.</p>
     </div>
     <div class="cards">
-      <div class="card {priv_c}-card"><span class="card-label">DCR ratio</span><span class="card-value">{priv['dcr_ratio']:.4f} ({priv_v})</span></div>
+      <div class="card {priv_c}-card"><span class="card-label">&epsilon;-identifiability</span><span class="card-value">{priv['eps_identifiability']:.4f} ({priv_v})</span></div>
       <div class="card"><span class="card-label">DP guarantee</span>{eps_html}</div>
     </div>
     <p style="font-size:0.9em; color:#555;">{eps_note}</p>
@@ -1079,12 +1271,13 @@ def main():
     print('\nGenerating synthetic data...')
     syn_num, syn_cat, stats_budgets = generate(model, len(X_num), device,
                                                params, X_num=X_num,
-                                               X_cat=X_cat)
+                                               X_cat=X_cat,
+                                               num_floor=(-num_means / num_stds).values)
     synthetic_df = save_synthetic_data(syn_num, syn_cat, num_means, num_stds, encoders)
 
     fid = fidelity_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat,
                            encoders)
-    priv = privacy_metrics(X_num.numpy(), syn_num, params)
+    priv = privacy_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat)
     fair = fairness_metrics(X_cat.numpy(), syn_cat, t_idx, s_idx, encoders,
                            real_num=X_num.numpy(), syn_num=syn_num)
 
@@ -1115,8 +1308,8 @@ def main():
     print(f'  Categorical TV distance:            {fid["cat_tv_mean"]:.4f}')
     print(f'  Correlation-matrix delta:            {fid["corr_delta"]:.4f}')
     print(f'\n--- PRIVACY ---')
-    print(f'  DCR ratio (syn->real / real->real):  {priv["dcr_ratio"]:.4f}')
-    print(f'    (>= 1.0 healthy; < 0.5 = memorization risk)')
+    print(f'  eps-identifiability (lower = more private): '
+          f'{priv["eps_identifiability"]:.4f}')
     if eps is not None:
         print(f'  DP guarantee (record-level, per-sample losses): '
               f'(epsilon={eps:.2f}, delta={params["DP_DELTA"]})')
@@ -1136,6 +1329,12 @@ def main():
           f'(gain {fair["fairness_gain"]:+.4f})')
     print(f'  DP ratio       real={fair["real_dp_ratio"]:.4f} -> '
           f'syn={fair["syn_dp_ratio"]:.4f}')
+    if 'paper_metrics' in fair:
+        pm = fair['paper_metrics']
+        print(f'  BER   real={pm["real"]["ber"]:.4f} -> syn={pm["syn"]["ber"]:.4f}'
+              f'  (chance = {pm["syn"]["ber_chance"]:.4f})')
+        print(f'  A-NCB real={pm["real"]["a_ncb"]:.4f} -> syn={pm["syn"]["a_ncb"]:.4f}'
+              f'  (ideal = 1)')
     if 'attribute_probe_auc' in fair:
         print(f'  Attribute probe AUC (0.5 = no group signal in other '
               f'features): {fair["attribute_probe_auc"]:.4f}')

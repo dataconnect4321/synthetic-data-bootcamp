@@ -7,6 +7,31 @@
 /Data/bmo_*
 /__pycache__/
 /secrets.txt
+/*.csv
 
 
 
+
+**/__pycache__/
+*.pyc
+*.csv
+*.log
+*.pt
+Data/
+adult_results/
+
+**/__pycache__/
+*.pyc
+*.csv
+*.log
+*.pt
+Data/
+test_flip_fairness.cpython-312*
+
+**/__pycache__/
+*.pyc
+*.csv
+*.log
+*.pt
+Data/
+**cpython*

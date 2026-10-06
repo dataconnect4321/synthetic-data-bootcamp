@@ -1,0 +1,429 @@
+"""The FLIP paper's task-agnostic fairness and privacy metrics
+(arXiv:2508.21815, Sec. 3.2.2 and 5.3).
+
+  - BER:               balanced error rate of a nonlinear classifier that
+                       predicts the protected attribute from all OTHER
+                       columns. Ideal = chance = (K-1)/K for K groups
+                       (0.5 for 2, 2/3 for 3).
+  - A-NCB:             adversarial normalized cluster balance. A classifier
+                       trained on the REAL data (features -> protected
+                       attribute) infers the protected attribute of each
+                       synthetic record from its other columns; the
+                       synthetic non-protected columns are embedded with FAMD
+                       and clustered with a Gaussian mixture; NCB is then
+                       computed on the inferred labels. Ideal = 1. The
+                       synthetic protected column is never used, so
+                       randomizing it cannot change the score.
+  - eps-identifiability: share of real records whose nearest synthetic record
+                       is closer than their nearest other real record
+                       (entropy-weighted Gower distance, after Yoon et al.
+                       2020 / SynthEval). Lower is more private.
+
+Every function takes the table as (num, cat): `num` is an (n, d_num) float
+array, `cat` an (n, d_cat) array of integer category codes, and `s_idx` the
+protected column's position within `cat`.
+"""
+
+import numpy as np
+import torch
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.mixture import GaussianMixture
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
+
+def _split_features(num, cat, s_idx):
+    """Feature matrix of all columns except the protected one, plus the
+    protected labels and a mask of which feature columns are categorical."""
+    keep = [j for j in range(cat.shape[1]) if j != s_idx]
+    cat_f = cat[:, keep]
+    X = np.concatenate([num.astype(np.float64), cat_f.astype(np.float64)],
+                       axis=1)
+    is_cat = np.array([False] * num.shape[1] + [True] * cat_f.shape[1])
+    return X, cat[:, s_idx].astype(int), is_cat, num, cat_f
+
+
+def _classifier(is_cat, seed):
+    # Balanced class weights: a majority-class guess must not score a
+    # trivially perfect BER on imbalanced groups.
+    return HistGradientBoostingClassifier(
+        categorical_features=is_cat, class_weight='balanced',
+        max_iter=100, random_state=seed)
+
+
+def predict_protected(num, cat, s_idx, n_splits=3, seed=0):
+    """Out-of-fold predictions of the table's own protected column from
+    its other columns with a nonlinear (gradient-boosted tree) classifier."""
+    X, y, is_cat, _, _ = _split_features(num, cat, s_idx)
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    return cross_val_predict(_classifier(is_cat, seed), X, y, cv=cv)
+
+
+def infer_protected_scores(ref_num, ref_cat, num, cat, s_idx, seed=0):
+    """Real-trained adversary's P(group=max) scores for each row of (num, cat)."""
+    Xr, yr, is_cat, _, _ = _split_features(ref_num, ref_cat, s_idx)
+    X, _, _, _, _ = _split_features(num, cat, s_idx)
+    clf = _classifier(is_cat, seed).fit(Xr, yr)
+    # predict_proba needs the classifier's class order; take the column of
+    # the largest class label
+    classes = clf.classes_
+    col = int(np.where(classes == classes.max())[0][0])
+    return clf.predict_proba(X)[:, col]
+
+
+def infer_protected(ref_num, ref_cat, num, cat, s_idx, seed=0):
+    """Adversary: fit on the reference (real) table's non-protected columns
+    -> protected column, then infer the protected attribute of every row of
+    (num, cat) from its non-protected columns alone."""
+    Xr, yr, is_cat, _, _ = _split_features(ref_num, ref_cat, s_idx)
+    X, _, _, _, _ = _split_features(num, cat, s_idx)
+    return _classifier(is_cat, seed).fit(Xr, yr).predict(X)
+
+
+def balanced_error_rate(y_true, y_pred):
+    """Mean per-group error rate (generalizes the paper's Eq. 1 to K
+    groups). Chance level is (K-1)/K."""
+    groups = np.unique(y_true)
+    return float(np.mean([(y_pred[y_true == g] != g).mean() for g in groups]))
+
+
+def chance_ber(n_groups):
+    return (n_groups - 1) / n_groups
+
+
+def famd_coordinates(num, cat_features):
+    """Factorial analysis of mixed data: PCA over standardized numeric
+    columns and centered one-hot indicators scaled by 1/sqrt(p_k).
+    Returns all component scores (rows x components)."""
+    blocks = []
+    if num.shape[1]:
+        sd = num.std(axis=0)
+        ok = sd > 1e-12
+        blocks.append((num[:, ok] - num[:, ok].mean(axis=0)) / sd[ok])
+    for j in range(cat_features.shape[1]):
+        col = cat_features[:, j]
+        levels, inv = np.unique(col, return_inverse=True)
+        if len(levels) < 2:
+            continue
+        onehot = np.eye(len(levels))[inv]
+        p = onehot.mean(axis=0)
+        blocks.append((onehot - p) / np.sqrt(p))
+    Z = np.concatenate(blocks, axis=1)
+    U, S, _ = np.linalg.svd(Z, full_matrices=False)
+    keep = S > 1e-8
+    return U[:, keep] * S[keep]
+
+
+def normalized_cluster_balance(clusters, groups):
+    """NCB (Def. 2): min over clusters of the min over group pairs of
+    min(P[c|a]/P[c|b], P[c|b]/P[c|a]). 1 = every cluster holds the same
+    share of each group; 0 = some cluster contains only one group."""
+    labels = np.unique(groups)
+    worst = 1.0
+    for c in np.unique(clusters):
+        p = [(clusters[groups == g] == c).mean() for g in labels]
+        for i in range(len(p)):
+            for j in range(i + 1, len(p)):
+                hi, lo = max(p[i], p[j]), min(p[i], p[j])
+                if hi == 0:
+                    continue  # cluster empty for both groups
+                worst = min(worst, lo / hi)
+    return float(worst)
+
+
+def adversarial_ncb(num, cat, s_idx, pred_groups, n_clusters=2, seed=0):
+    """A-NCB: NCB of a GMM clustering of the FAMD-embedded non-protected
+    columns, scored against the ADVERSARIALLY INFERRED protected labels
+    (`pred_groups`) rather than the stored column.
+
+    A diagonal-covariance mixture is used on the full set of FAMD
+    components; FAMD scores are globally decorrelated, so this loses little
+    and keeps the fit stable."""
+    clusters = cluster_features(num, cat, s_idx, n_clusters, seed)
+    return normalized_cluster_balance(clusters, pred_groups)
+
+
+def cluster_features(num, cat, s_idx, n_clusters=2, seed=0):
+    """GMM cluster ids of the FAMD-embedded non-protected columns."""
+    _, _, _, num_f, cat_f = _split_features(num, cat, s_idx)
+    coords = famd_coordinates(num_f.astype(np.float64), cat_f)
+    gmm = GaussianMixture(n_components=n_clusters, covariance_type='diag',
+                          n_init=3, random_state=seed)
+    return gmm.fit_predict(coords)
+
+
+def label_validity_auc(ref_num, ref_cat, num, cat, s_idx, seed=0):
+    """AUC of a real-trained protected-attribute classifier's PROBABILITY
+    scores against the table's own protected column. ~0.5 = labels unrelated
+    to real-looking profiles; < 0.5 = inverted; ~1 = labels track real group
+    structure. Flags the unsupervised-labeling failure mode of the batch-mean
+    L_S."""
+    p = infer_protected_scores(ref_num, ref_cat, num, cat, s_idx, seed=seed)
+    y = cat[:, s_idx].astype(int)
+    if len(np.unique(y)) < 2:
+        return float('nan')
+    order = np.argsort(p)
+    ranks = np.empty(len(p)); ranks[order] = np.arange(1, len(p) + 1)
+    pos = y == y.max()
+    n_pos, n_neg = pos.sum(), (~pos).sum()
+    if n_pos == 0 or n_neg == 0:
+        return float('nan')
+    return float((ranks[pos].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def inferred_group_gap(num, cat, s_idx, t_idx, ref, seed=0):
+    """Target-rate gap across groups INFERRED by the real-trained adversary,
+    immune to an invented/inverted synthetic protected column."""
+    g = infer_protected(ref[0], ref[1], num, cat, s_idx, seed=seed)
+    rates = [(cat[g == k, t_idx] == cat[:, t_idx].max()).mean()
+             for k in np.unique(g)]
+    return float(max(rates) - min(rates))
+
+
+def infer_protected_proba(ref_num, ref_cat, num, cat, s_idx, seed=0):
+    """Real-trained adversary's full (n, K) probability matrix, columns
+    aligned to sorted group labels."""
+    Xr, yr, is_cat, _, _ = _split_features(ref_num, ref_cat, s_idx)
+    X, _, _, _, _ = _split_features(num, cat, s_idx)
+    clf = _classifier(is_cat, seed).fit(Xr, yr)
+    P = clf.predict_proba(X)
+    order = np.argsort(clf.classes_)
+    return P[:, order]
+
+
+def _rank_auc(scores, y_bin):
+    n_pos, n_neg = int(y_bin.sum()), int((~y_bin).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float('nan')
+    order = np.argsort(scores)
+    ranks = np.empty(len(scores)); ranks[order] = np.arange(1, len(scores) + 1)
+    return float((ranks[y_bin].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def label_validity_auc(ref_num, ref_cat, num, cat, s_idx, seed=0):
+    """MACRO one-vs-rest AUC of the real-trained adversary's group
+    probabilities against the table's own protected column, averaged over
+    all K groups (works for any K; the old version scored only the
+    highest-coded group). ~0.5 = labels unrelated to real-looking profiles;
+    < 0.5 = inverted; ~1 = labels track real group structure."""
+    P = infer_protected_proba(ref_num, ref_cat, num, cat, s_idx, seed=seed)
+    y = cat[:, s_idx].astype(int)
+    groups = np.unique(y)
+    aucs = [_rank_auc(P[:, g], y == g) for g in groups]
+    return float(np.nanmean(aucs))
+
+
+def group_share_tv(syn_cat, ref_cat, s_idx):
+    """Total variation between the synthetic protected column's group shares
+    and the reference (real) shares."""
+    k = int(max(ref_cat[:, s_idx].max(), syn_cat[:, s_idx].max())) + 1
+    p = np.bincount(syn_cat[:, s_idx], minlength=k) / len(syn_cat)
+    q = np.bincount(ref_cat[:, s_idx], minlength=k) / len(ref_cat)
+    return float(0.5 * np.abs(p - q).sum())
+
+
+def categorical_share_tv_all(syn_cat, ref_cat):
+    """Per-column share TV for EVERY categorical column. Catches any
+    Wife->Husband-style collapse, not just the protected column."""
+    out = {}
+    for j in range(ref_cat.shape[1]):
+        k = int(max(ref_cat[:, j].max(), syn_cat[:, j].max())) + 1
+        p = np.bincount(syn_cat[:, j], minlength=k) / len(syn_cat)
+        q = np.bincount(ref_cat[:, j], minlength=k) / len(ref_cat)
+        out[j] = float(0.5 * np.abs(p - q).sum())
+    return out
+
+
+def tier1_group_agreement(syn_s, true_s):
+    """Balanced per-group agreement of the synthetic protected column with
+    the SOURCE rows' true groups (tier-1 only). Chance = 1/K."""
+    syn_s, true_s = np.asarray(syn_s), np.asarray(true_s)
+    return float(np.mean([(syn_s[true_s == g] == g).mean()
+                          for g in np.unique(true_s)]))
+
+
+def true_group_target_gap(syn_cat, true_cat, t_idx, s_idx, t_pos=None):
+    """Target-rate gap across the TRUE groups of the source rows (tier-1):
+    immune to an invented synthetic protected column."""
+    if t_pos is None:
+        t_pos = int(true_cat[:, t_idx].max())
+    rates = [(syn_cat[true_cat[:, s_idx] == g, t_idx] == t_pos).mean()
+              for g in np.unique(true_cat[:, s_idx])]
+    return float(max(rates) - min(rates))
+
+
+def downstream_sp_eo(syn_num, syn_cat, real_num, real_cat, t_idx, s_idx,
+                     seed=0):
+    """Train a target classifier on SYNTHETIC data (protected column
+    excluded), evaluate on REAL data by real group: statistical parity
+    (selection-rate gap) and equalized odds (TPR gap among real positives)."""
+    def feats(num, cat):
+        keep = [j for j in range(cat.shape[1]) if j not in (s_idx, t_idx)]
+        X = np.concatenate([num.astype(np.float64),
+                             cat[:, keep].astype(np.float64)], axis=1)
+        return X, np.array([False] * num.shape[1] + [True] * len(keep))
+    Xs, is_cat = feats(syn_num, syn_cat)
+    ys = syn_cat[:, t_idx]
+    Xr, _ = feats(real_num, real_cat)
+    yr = real_cat[:, t_idx]
+    t_pos = int(max(ys.max(), yr.max()))
+    clf = HistGradientBoostingClassifier(categorical_features=is_cat,
+                                         random_state=seed)
+    clf.fit(Xs, (ys == t_pos).astype(int))
+    pred = clf.predict(Xr) == 1
+    pos, grp = (yr == t_pos), real_cat[:, s_idx]
+    sp = [pred[grp == g].mean() for g in np.unique(grp)]
+    eo = [pred[pos & (grp == g)].mean() for g in np.unique(grp)]
+    return {'sp_diff': float(max(sp) - min(sp)),
+            'eo_diff': float(max(eo) - min(eo)),
+            'sp_rates': {int(g): float(r) for g, r in zip(np.unique(grp), sp)}}
+
+
+def proxy_ranking(real_num, real_cat, s_idx, syn_num, syn_cat, ref,
+                  top_k=5, seed=0):
+    """Rank proxy columns by permutation importance for predicting S on the
+    REAL data, then measure each top proxy's dependence on S in the SYNTHETIC
+    data (using the real-trained adversary's inferred groups, since the
+    synthetic S column may be invented).
+
+    Returns a list of (column_index, is_cat, importance, syn_dependence):
+    importance = balanced-accuracy drop when the column is permuted;
+    syn_dependence = share TV between inferred groups (cat) or pooled-std
+    normalized W1 between inferred groups (num)."""
+    from scipy.stats import wasserstein_distance
+    X, y, is_cat, num_f, cat_f = _split_features(real_num, real_cat, s_idx)
+    n = len(y)
+    rng = np.random.default_rng(seed)
+    idx = rng.permutation(n)
+    tr, te = idx[: n // 2], idx[n // 2:]
+    clf = _classifier(is_cat, seed).fit(X[tr], y[tr])
+    base = float(np.mean([(clf.predict(X[te])[y[te] == g] == g).mean()
+                          for g in np.unique(y)]))
+    # feature layout: [num cols][kept cat cols]
+    kept = [j for j in range(real_cat.shape[1]) if j != s_idx]
+    importances = []
+    for j in range(X.shape[1]):
+        Xp = X[te].copy()
+        Xp[:, j] = rng.permutation(Xp[:, j])
+        acc = float(np.mean([(clf.predict(Xp)[y[te] == g] == g).mean()
+                             for g in np.unique(y)]))
+        importances.append((j, base - acc))
+    importances.sort(key=lambda t: -t[1])
+    # inferred groups on the synthetic table
+    g_syn = infer_protected(ref[0], ref[1], syn_num, syn_cat, s_idx, seed)
+    out = []
+    for j, imp in importances[:top_k]:
+        if j < num_f.shape[1]:
+            col, is_c = j, False
+            a = syn_num[g_syn == np.unique(g_syn)[0], col]
+            b = syn_num[g_syn == np.unique(g_syn)[1], col]
+            sd = real_num[:, col].std() + 1e-9
+            dep = float(wasserstein_distance(a, b) / sd)
+        else:
+            col, is_c = kept[j - num_f.shape[1]], True
+            k = int(max(syn_cat[:, col].max(), real_cat[:, col].max())) + 1
+            pa = np.bincount(syn_cat[g_syn == np.unique(g_syn)[0], col],
+                             minlength=k) / max(1, (g_syn == np.unique(g_syn)[0]).sum())
+            pb = np.bincount(syn_cat[g_syn == np.unique(g_syn)[1], col],
+                             minlength=k) / max(1, (g_syn == np.unique(g_syn)[1]).sum())
+            dep = float(0.5 * np.abs(pa - pb).sum())
+        out.append({'col': int(col), 'is_cat': is_c, 'importance': imp,
+                    'syn_dependence': dep})
+    return out
+
+
+def fairness_scores(num, cat, s_idx, ref=None, n_splits=3, n_clusters=2,
+                    seed=0):
+    """BER and A-NCB of a table.
+
+    BER uses the table's own protected column (out-of-fold classifier), as
+    in the paper's Def. 1 - randomizing that column fools it. A-NCB uses an
+    adversary trained on `ref` = (real_num, real_cat) and never reads the
+    table's protected column. With ref=None (scoring the real data itself)
+    the adversary is the same out-of-fold predictor used for BER."""
+    y = cat[:, s_idx].astype(int)
+    own = predict_protected(num, cat, s_idx, n_splits, seed)
+    adv = own if ref is None else infer_protected(ref[0], ref[1], num, cat,
+                                                  s_idx, seed)
+    n_groups = len(np.unique(y))
+    clusters = cluster_features(num, cat, s_idx, n_clusters, seed)
+    return {
+        'ber': balanced_error_rate(y, own),
+        'ber_chance': chance_ber(n_groups),
+        'a_ncb': normalized_cluster_balance(clusters, adv),
+        # NCB on the stored protected column, for contrast with A-NCB
+        'ncb_stored': normalized_cluster_balance(clusters, y),
+    }
+
+
+# --------------------------------------------------------------------------
+# eps-identifiability
+# --------------------------------------------------------------------------
+
+def _entropy_weights(num, cat, bins=10):
+    """Yoon et al.'s per-column weights 1/H(column), normalized to sum 1.
+    Numeric columns are histogrammed into `bins` equal-width bins first;
+    constant columns (H = 0) get weight 0."""
+    ents = []
+    for j in range(num.shape[1]):
+        counts, _ = np.histogram(num[:, j], bins=bins)
+        ents.append(counts)
+    for j in range(cat.shape[1]):
+        ents.append(np.bincount(cat[:, j] - cat[:, j].min()))
+    w = []
+    for counts in ents:
+        p = counts[counts > 0] / counts.sum()
+        h = float(-(p * np.log(p)).sum())
+        w.append(1.0 / h if h > 1e-12 else 0.0)
+    w = np.array(w)
+    return w / w.sum()
+
+
+def _nearest_gower(query, ref, ranges, weights, n_num, exclude_self=False,
+                   chunk=1024, device='cpu'):
+    """Per-row minimum weighted Gower distance from `query` to `ref`.
+    Both are (n, d) float tensors with numeric columns first. With
+    exclude_self, query is ref and each row's zero self-distance is
+    ignored."""
+    out = torch.empty(query.shape[0], device=device)
+    m = ref.shape[0]
+    for start in range(0, query.shape[0], chunk):
+        q = query[start:start + chunk]
+        d = torch.zeros(q.shape[0], m, device=device)
+        for k in range(query.shape[1]):
+            if weights[k] == 0:
+                continue
+            diff = q[:, k:k + 1] - ref[None, :, k]
+            if k < n_num:
+                d += weights[k] * (diff.abs() / ranges[k]).clamp(max=1.0)
+            else:
+                d += weights[k] * (diff != 0).float()
+        if exclude_self:
+            rows = torch.arange(q.shape[0], device=device)
+            d[rows, start + rows] = float('inf')
+        out[start:start + chunk] = d.min(dim=1).values
+    return out
+
+
+def epsilon_identifiability(real_num, real_cat, syn_num, syn_cat,
+                            device=None):
+    """Share of real records whose nearest synthetic record is strictly
+    closer than their nearest other real record (entropy-weighted Gower
+    distance; numeric ranges taken from the real data). 0 = no real record
+    is closer to a synthetic one than to its real neighbors."""
+    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    n_num = real_num.shape[1]
+    weights = _entropy_weights(real_num, real_cat)
+    ranges = torch.tensor(
+        np.maximum(real_num.max(axis=0) - real_num.min(axis=0), 1e-12),
+        dtype=torch.float32, device=device)
+
+    def to_t(num, cat):
+        return torch.tensor(np.concatenate([num, cat], axis=1),
+                            dtype=torch.float32, device=device)
+
+    real_t, syn_t = to_t(real_num, real_cat), to_t(syn_num, syn_cat)
+    d_rr = _nearest_gower(real_t, real_t, ranges, weights, n_num,
+                          exclude_self=True, device=device)
+    d_rs = _nearest_gower(real_t, syn_t, ranges, weights, n_num,
+                          device=device)
+    return float((d_rs < d_rr).float().mean())

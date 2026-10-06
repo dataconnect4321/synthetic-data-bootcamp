@@ -196,7 +196,18 @@ def train_diffusion(latents, params, device):
             num_workers=0, drop_last=False)
 
     model.train()
-    for epoch in range(params['EPOCHS']):
+    # Diffusion length in OPTIMIZER STEPS when DIFF_STEPS is set: a smaller
+    # training sample must not silently undertrain the prior (an undertrained
+    # prior generates latents near the mean, which decode to near-identical
+    # low-income rows). Falls back to EPOCHS otherwise.
+    max_steps = params.get('DIFF_STEPS')
+    steps_done = 0
+    epoch = 0
+    while True:
+        if max_steps is not None and steps_done >= max_steps:
+            break
+        if max_steps is None and epoch >= params['EPOCHS']:
+            break
         epoch_loss, n_seen = 0.0, 0
         for (batch,) in loader:
             inputs = batch.to(device)
@@ -213,15 +224,19 @@ def train_diffusion(latents, params, device):
 
             epoch_loss += loss.item() * len(inputs)
             n_seen += len(inputs)
+            steps_done += 1
 
         scheduler.step(epoch_loss / max(1, n_seen))
-        if epoch % 100 == 0 or epoch == params['EPOCHS'] - 1:
+        if epoch % 100 == 0 or (max_steps is None and epoch == params['EPOCHS'] - 1) \
+                or (max_steps is not None and steps_done >= max_steps):
             msg = (f'  diffusion epoch {epoch:5d}  '
-                   f'loss={epoch_loss / max(1, n_seen):.6f}')
+                   f'loss={epoch_loss / max(1, n_seen):.6f}  '
+                   f'steps={steps_done}')
             if accountant is not None and accountant.steps > 0:
                 eps_d, _ = accountant.get_privacy_spent()
                 msg += f'  eps_diffusion={eps_d:.2f}'
             print(msg)
+        epoch += 1
 
     return model, mean, accountant
 
@@ -239,7 +254,8 @@ def sample_from_diffusion(diffusion_model, mean, n_gen, latent_shape,
 
 
 @torch.no_grad()
-def decode_latents(vae_model, latents, device, X_num=None, params=None):
+def decode_latents(vae_model, latents, device, X_num=None, params=None,
+                   num_floor=None, sample_idx=None):
     """Decode sampled latents back to data space through the frozen VAE
     decoder + Reconstructor, with a DP-released range-clip backstop.
 
@@ -258,6 +274,11 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None):
     syn_num = recon_num.cpu().numpy()
     syn_cat = np.stack([c.argmax(dim=-1).cpu().numpy() for c in recon_cat],
                        axis=1)
+    if sample_idx is not None:
+        # L_S drives this column's logits to uniform, so argmax would emit one
+        # constant class; drawing from the softmax gives the random assignment.
+        probs = torch.softmax(recon_cat[sample_idx], dim=-1)
+        syn_cat[:, sample_idx] = torch.multinomial(probs, 1).squeeze(1).cpu().numpy()
 
     if X_num is not None and params is not None:
         Xn = X_num.to(device)
@@ -271,7 +292,10 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None):
     # Domain-knowledge clamp: all numeric columns in this dataset (loan
     # amount, income, LTV, property value, tract population) are
     # non-negative by definition. Public knowledge, no privacy cost.
-    syn_num = np.clip(syn_num, 0.0, None)
+    # num_floor is -mean/std, the standardized image of 0 (clipping
+    # standardized values at 0 would flatten every below-average value).
+    if num_floor is not None:
+        syn_num = np.maximum(syn_num, num_floor[None, :])
     if X_num is not None and params is not None:
         return syn_num, syn_cat, [stats_budget]
     return syn_num, syn_cat, []
@@ -352,7 +376,9 @@ def main():
                                     latent_shape, dparams, device)
     syn_num, syn_cat, stats_budgets = decode_latents(vae_model, sampled,
                                                       device, X_num=X_num,
-                                                      params=params)
+                                                      params=params,
+                                                      num_floor=(-num_means / num_stds).values,
+                                                      sample_idx=s_idx)
 
     # ---- Export ----------------------------------------------------------
     synthetic_df = decode_synthetic_data(syn_num, syn_cat, num_means,
@@ -364,7 +390,7 @@ def main():
     # ---- Evaluate ---------------------------------------------------------
     fid = fidelity_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat,
                            encoders)
-    priv = privacy_metrics(X_num.numpy(), syn_num, params)
+    priv = privacy_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat)
     fair = fairness_metrics(X_cat.numpy(), syn_cat, t_idx, s_idx, encoders,
                            real_num=X_num.numpy(), syn_num=syn_num)
 
@@ -400,8 +426,8 @@ def main():
     print(f'  Categorical TV distance:            {fid["cat_tv_mean"]:.4f}')
     print(f'  Correlation-matrix delta:            {fid["corr_delta"]:.4f}')
     print(f'\n--- PRIVACY ---')
-    print(f'  DCR ratio (syn->real / real->real):  {priv["dcr_ratio"]:.4f}')
-    print(f'    (>= 1.0 healthy; < 0.5 = memorization risk)')
+    print(f'  eps-identifiability (lower = more private): '
+          f'{priv["eps_identifiability"]:.4f}')
     if eps is not None:
         print(f'  DP guarantee (record-level, per-sample losses): '
               f'(epsilon={eps:.2f}, delta={params["DP_DELTA"]})')
@@ -425,6 +451,12 @@ def main():
           f'(gain {fair["fairness_gain"]:+.4f})')
     print(f'  DP ratio       real={fair["real_dp_ratio"]:.4f} -> '
           f'syn={fair["syn_dp_ratio"]:.4f}')
+    if 'paper_metrics' in fair:
+        pm = fair['paper_metrics']
+        print(f'  BER   real={pm["real"]["ber"]:.4f} -> syn={pm["syn"]["ber"]:.4f}'
+              f'  (chance = {pm["syn"]["ber_chance"]:.4f})')
+        print(f'  A-NCB real={pm["real"]["a_ncb"]:.4f} -> syn={pm["syn"]["a_ncb"]:.4f}'
+              f'  (ideal = 1)')
 
     # ---- HTML report ------------------------------------------------------
     # Merge both parameter dicts so the report documents the full run.

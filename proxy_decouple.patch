@@ -1,0 +1,937 @@
+diff --git a/run_adult_flip.py b/run_adult_flip.py
+index 6a39b60..ce78950 100644
+--- a/run_adult_flip.py
++++ b/run_adult_flip.py
+@@ -38,6 +38,11 @@ from tabsyn.vae.paper_metrics import (fairness_scores, epsilon_identifiability,
+                                       tier1_group_agreement,
+                                       true_group_target_gap,
+                                       downstream_sp_eo, proxy_ranking)
++from tabsyn.vae.proxy_decouple import (detect_proxy_classes,
++                                       describe_classes, merge_proxies,
++                                       fit_member_tables, expand_merged,
++                                       impossible_combination_rate,
++                                       proxy_member_dependence)
+ 
+ ADULT_NAMES = ['age', 'workclass', 'fnlwgt', 'education', 'education-num',
+                'marital-status', 'occupation', 'relationship', 'race', 'sex',
+@@ -324,6 +329,30 @@ def main():
+                     help='post-processing baseline: temper the protected '
+                          'column sampling at this tau (requires --recon-s); '
+                          'sweeps the BER-vs-fidelity curve')
++    ap.add_argument('--proxy-decouple', choices=['none', 'posthoc', 'inmodel'],
++                    default='none',
++                    help='near-deterministic proxy handling. posthoc: merge '
++                         'proxy categories (e.g. Husband+Wife) before '
++                         'training and re-expand after generation with '
++                         'strength --proxy-tau. inmodel: keep the column, '
++                         'add a gradient-reversal term (--proxy-weight) '
++                         'that hides the member label from the other '
++                         'columns, and drop the proxy from the CKA/MMD terms')
++    ap.add_argument('--proxy-threshold', type=float, default=0.95,
++                    help='P(S | category) above which a category is a '
++                         'near-deterministic proxy (pre-register this)')
++    ap.add_argument('--proxy-min-support', type=float, default=0.01,
++                    help='minimum category share of rows to be flagged')
++    ap.add_argument('--proxy-tau', type=float, default=1.0,
++                    help='posthoc: decoupling strength for the main '
++                         'synthetic table (0 = member follows synthetic S, '
++                         '1 = independent of the row)')
++    ap.add_argument('--proxy-taus', default='0,0.25,0.5,0.75,1',
++                    help='posthoc: comma-separated tau curve to score '
++                         '(empty string to skip)')
++    ap.add_argument('--proxy-weight', type=float, default=1.0,
++                    help='inmodel: weight of the proxy-decoupling adversary '
++                         '(ramped over Phase 2); plays the role of tau')
+     ap.add_argument('--diagnose-only', action='store_true',
+                     help='train Phase 1 only and print the shared-mean check')
+     args = ap.parse_args()
+@@ -359,11 +388,38 @@ def main():
+     data = prepare(read_adult(), args.fold, args.folds, args.split_seed,
+                    sample=(8000, [SENSITIVE, TARGET]) if args.fast
+                    else None)
+-    X_num = torch.tensor(data['train_num'])
+-    X_cat = torch.tensor(data['train_cat'])
+     enc = data['encoders']
+     categories = [len(enc[c]) for c in CATEGORICAL]
+     s_idx, t_idx = CATEGORICAL.index(SENSITIVE), CATEGORICAL.index(TARGET)
++
++    # ---- Proxy decoupling setup (data-driven, dataset-agnostic) ----------
++    # Detection runs on the real TRAINING fold only. Its counts (and the
++    # member tables below) are an uncounted release under DP - see
++    # tabsyn/vae/proxy_decouple.py.
++    # Classes are always detected (for reporting the member-dependence and
++    # impossible-combination metrics on every run); they change training
++    # only when --proxy-decouple is set.
++    member_tables = None
++    model_cat = data['train_cat']          # what the VAE trains on / encodes
++    proxy_classes = detect_proxy_classes(
++        data['train_cat'], s_idx, threshold=args.proxy_threshold,
++        min_support=args.proxy_min_support, exclude=(t_idx,))
++    print('  proxy classes (threshold '
++          f'{args.proxy_threshold}): '
++          + ('; '.join(describe_classes(proxy_classes, CATEGORICAL, enc))
++             or 'none found'))
++    if args.proxy_decouple != 'none':
++        if args.proxy_decouple == 'posthoc' and proxy_classes:
++            model_cat = merge_proxies(data['train_cat'], proxy_classes)
++            member_tables = fit_member_tables(data['train_cat'], s_idx,
++                                              proxy_classes,
++                                              n_groups=len(enc[SENSITIVE]))
++        if args.proxy_decouple == 'inmodel' and proxy_classes:
++            params['PROXY_CLASSES'] = proxy_classes
++            params['PROXY_WEIGHT'] = args.proxy_weight
++
++    X_num = torch.tensor(data['train_num'])
++    X_cat = torch.tensor(model_cat)
+     print(f'[{tag}] train={len(X_num)} test={len(data["test_num"])} '
+           f'categories={categories} sex={list(enc[SENSITIVE])}')
+ 
+@@ -379,7 +435,7 @@ def main():
+     if args.save_phase1:
+         torch.save(vae.state_dict(), args.save_phase1)
+         print(f'  saved VAE checkpoint to {args.save_phase1}')
+-    diag = latent_diagnostic(vae, data['train_num'], data['train_cat'],
++    diag = latent_diagnostic(vae, data['train_num'], model_cat,
+                              s_idx, device)
+     print(f'  latent diagnostic: {diag}')
+     if args.diagnose_only:
+@@ -419,6 +475,16 @@ def main():
+             num_floor=(-data['means'] / data['stds']).values,
+             sample_idx=s_idx if args.s_decode == 'sample' else None)
+ 
++    # Post-hoc proxy decoupling: the model generated the merged class; expand
++    # it back into its members at strength --proxy-tau (the tau curve is
++    # scored separately below from the same merged table).
++    syn_cat_merged = None
++    if member_tables is not None:
++        syn_cat_merged = syn_cat.copy()
++        syn_cat = expand_merged(syn_cat_merged, syn_cat_merged[:, s_idx],
++                                proxy_classes, member_tables, args.proxy_tau,
++                                rng=np.random.default_rng(args.seed))
++
+     syn_df = demo.decode_synthetic_data(syn_num, syn_cat, data['means'],
+                                         data['stds'], enc)
+     os.makedirs(OUT_DIR, exist_ok=True)
+@@ -431,6 +497,7 @@ def main():
+     # the leakage check: training on tr_n/tr_c and predicting their decoded
+     # near-copies overstates separability).
+     ref_ho = (data['test_num'], data['test_cat'])
++    te_n, te_c = data['test_num'], data['test_cat']
+     syn = averaged_scores(syn_num, syn_cat, s_idx, ref=ref_ho,
+                           fast=args.fast)
+     real_test = averaged_scores(data['test_num'], data['test_cat'], s_idx,
+@@ -441,7 +508,7 @@ def main():
+     lv_auc = label_validity_auc(tr_n, tr_c, syn_num, syn_cat, s_idx)
+     inf_gap = inferred_group_gap(syn_num, syn_cat, s_idx, t_idx, ref_ho)
+     inf_gap_real = inferred_group_gap(tr_n, tr_c, s_idx, t_idx, ref_ho)
+-    probe = latent_probe(vae, tr_n, tr_c, s_idx, device)
++    probe = latent_probe(vae, tr_n, model_cat, s_idx, device)
+     ceiling = real_feature_ceiling(tr_n, tr_c, s_idx)
+     print(f'  latent sex-probe balanced acc: '
+           f'{probe["drop_s_token"]:.3f} (no sex token; '
+@@ -455,7 +522,6 @@ def main():
+     leak = rel_faith = ceiling_ho = s_agree = None
+     if args.tier1:
+         from tabsyn.vae.paper_metrics import infer_protected
+-        te_n, te_c = data['test_num'], data['test_cat']
+         true_s = tr_c[:, s_idx].astype(int)
+         def _bal(pred):
+             return float(np.mean([(pred[true_s == g] == g).mean()
+@@ -545,6 +611,69 @@ def main():
+                       f"{p['importance']:.3f}/{p['syn_dependence']:.3f}"
+                       for p in proxies))
+ 
++    # ---- Proxy decoupling metrics -----------------------------------------
++    # impossible-combination rate ('male wives', every column) and how well
++    # the other categorical columns predict each proxy class's member label
++    # (chance = 1 / n_members) - on the main synthetic table and the real data.
++    impossible = impossible_combination_rate(syn_cat, tr_c, s_idx,
++                                             exclude=(t_idx,))
++    impossible_real = impossible_combination_rate(tr_c, tr_c, s_idx,
++                                                  exclude=(t_idx,))
++    member_dep = proxy_member_dependence(syn_cat, proxy_classes,
++                                         exclude=(s_idx,)) \
++        if proxy_classes else []
++    member_dep_real = proxy_member_dependence(tr_c, proxy_classes,
++                                              exclude=(s_idx,)) \
++        if proxy_classes else []
++    print(f'  impossible-combination rate: {impossible["any"]:.4f} '
++          f'(real {impossible_real["any"]:.4f}); proxy member dependence '
++          f'(other cols -> member, chance 1/m): syn {member_dep} '
++          f'real {member_dep_real}')
++
++    # Post-hoc tau curve: re-expand the SAME merged synthetic table at each
++    # tau and score the decoupling trade-off. Fast 2-seed scoring.
++    proxy_curve = None
++    if member_tables is not None and args.proxy_taus.strip():
++        proxy_curve = []
++        taus = [float(t) for t in args.proxy_taus.split(',') if t.strip()]
++        k_cols = {cl['col'] for cl in proxy_classes}
++        true_s_c = tr_c[:, s_idx].astype(int)
++        for tau in taus:
++            exp = expand_merged(syn_cat_merged, syn_cat_merged[:, s_idx],
++                                proxy_classes, member_tables, tau,
++                                rng=np.random.default_rng(args.seed))
++            sc = averaged_scores(syn_num, exp, s_idx, ref=ref_ho, fast=True)
++            row = {'tau': tau, 'ber': sc['ber'], 'a_ncb': sc['a_ncb'],
++                   'ncb_stored': sc['ncb_stored'],
++                   'impossible_rate':
++                       impossible_combination_rate(exp, tr_c, s_idx,
++                                                   exclude=(t_idx,))['any'],
++                   'member_dependence':
++                       proxy_member_dependence(exp, proxy_classes,
++                                               exclude=(s_idx,)),
++                   'proxy_col_share_tv': {
++                       int(j): categorical_share_tv_all(exp, tr_c)[j]
++                       for j in k_cols}}
++            if args.tier1:
++                from tabsyn.vae.paper_metrics import infer_protected
++                pred = infer_protected(te_n, te_c, syn_num, exp, s_idx)
++                leak_t = float(np.mean([(pred[true_s_c == g] == g).mean()
++                                        for g in np.unique(true_s_c)]))
++                row['decoded_leakage'] = leak_t
++                row['ber_true'] = 1.0 - leak_t
++            clf_t = HistGradientBoostingClassifier(random_state=0)
++            clf_t.fit(_util_feats(syn_num, exp), exp[:, t_idx] == t_pos)
++            row['downstream_auc'] = float(roc_auc_score(
++                te_c[:, t_idx] == t_pos,
++                clf_t.predict_proba(_util_feats(te_n, te_c))[:, 1]))
++            proxy_curve.append(row)
++            print(f'  proxy tau={tau:.2f}: BER {row["ber"]:.3f}  A-NCB '
++                  f'{row["a_ncb"]:.3f}  NCB(stored) {row["ncb_stored"]:.3f}'
++                  + (f'  BER_true {row["ber_true"]:.3f}'
++                     if 'ber_true' in row else '')
++                  + f'  impossible {row["impossible_rate"]:.4f}  member-dep '
++                  f'{row["member_dependence"]}  AUC {row["downstream_auc"]:.3f}')
++
+     # ---- Tempered-sampling baseline ---------------------------------------
+     temper_results = None
+     if args.temper_tau is not None:
+@@ -627,6 +756,22 @@ def main():
+             'match_valid': match_valid,
+             'proxy_ranking': proxies,
+             'temper_curve': temper_results,
++            'proxy_decouple': {
++                'mode': args.proxy_decouple,
++                'classes': [{'col': CATEGORICAL[cl['col']],
++                             'members': [str(enc[CATEGORICAL[cl['col']]][c])
++                                         for c in cl['members']],
++                             'purity': [cl['purity'][c] for c in cl['members']],
++                             'support': [cl['support'][c] for c in cl['members']]}
++                            for cl in proxy_classes],
++                'tau': args.proxy_tau if member_tables is not None else None,
++                'weight': args.proxy_weight
++                if args.proxy_decouple == 'inmodel' else None,
++                'impossible_rate': impossible,
++                'impossible_rate_real': impossible_real,
++                'member_dependence': member_dep,
++                'member_dependence_real': member_dep_real,
++                'tau_curve': proxy_curve},
+             'promotion_gates': gate_pass,
+             'syn_income_rate': syn_income_rate,
+             'real_income_rate': real_income_rate},
+diff --git a/run_flip_demo.py b/run_flip_demo.py
+index d587aad..cc56091 100644
+--- a/run_flip_demo.py
++++ b/run_flip_demo.py
+@@ -43,6 +43,9 @@ from tabsyn.vae.flip_fairness import (
+     uniform_attribute_loss_per_sample,
+     adversary_loss,
+     marginal_matching_penalty,
++    AdversaryHead,
++    proxy_decoupling_loss,
++    proxy_decoupling_dim,
+     BalancedGroupSampler,
+     PoissonGroupSampler,
+     RDPAccountant,
+@@ -90,6 +93,19 @@ TRADEOFF_PARAMS = {
+     # Marginal-matching penalty (category shares + numeric quantiles),
+     # batch-coupled (pass 2 under DP).
+     'MARGINAL_WEIGHT': 0.0,
++    # In-model proxy decoupling (Phase 2). PROXY_CLASSES is the output of
++    # tabsyn.vae.proxy_decouple.detect_proxy_classes (near-deterministic
++    # proxy categories merged into classes, e.g. relationship {Husband,
++    # Wife}). PROXY_WEIGHT > 0 adds, per class, a gradient-reversal
++    # adversary that predicts the row's member (Husband vs Wife) from the
++    # OTHER columns' latent tokens and decoded logits; the proxy token keeps
++    # it, so the column is still reconstructed. Per-record -> DP pass 1.
++    # Ramped like ADV_WEIGHT. PROXY_EXCLUDE_FROM_FAIR drops the proxy
++    # columns from the CKA^T/mean/MMD stages (they cannot be made
++    # group-invariant without being destroyed).
++    'PROXY_CLASSES': None,
++    'PROXY_WEIGHT': 0.0,
++    'PROXY_EXCLUDE_FROM_FAIR': True,
+ 
+     # L_S variant: 'per_sample' (DP-safe) or 'batch_mean' (paper Eq. 3).
+     'LS_MODE': 'per_sample',
+@@ -297,6 +313,26 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
+                                          map_location=device))
+         print(f'loaded Phase-1 checkpoint: {phase1_checkpoint}')
+ 
++    # In-model proxy-decoupling heads. Built and attached BEFORE the Opacus
++    # wrap so GradSampleModule registers per-sample hooks on them; detached
++    # again before returning so saved checkpoints stay plain Model_VAE.
++    proxy_classes = params.get('PROXY_CLASSES') or []
++    proxy_heads = None
++    if params.get('PROXY_WEIGHT', 0) and proxy_classes:
++        n_tokens = 1 + d_numerical + len(categories)
++        proxy_heads = nn.ModuleList([
++            AdversaryHead(proxy_decoupling_dim(
++                n_tokens, params['D_TOKEN'], d_numerical, categories,
++                s_idx, cl['col']), len(cl['members']))
++            for cl in proxy_classes]).to(device)
++        model.add_module('proxy_heads', proxy_heads)
++        print('in-model proxy decoupling on: '
++              + '; '.join(f"col {cl['col']} members {cl['members']}"
++                          for cl in proxy_classes))
++    proxy_excl = [cl['col'] for cl in proxy_classes] \
++        if (proxy_heads is not None
++            and params.get('PROXY_EXCLUDE_FROM_FAIR', True)) else None
++
+     groups = X_cat[:, s_idx].long().numpy()
+     per_group = params['BATCH_SIZE'] // len(np.unique(groups))
+     if params.get('SAMPLER', 'poisson') == 'poisson':
+@@ -387,7 +423,6 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
+     adv_head = None
+     adv_params = []
+     if params.get('ADV_WEIGHT', 0):
+-        from tabsyn.vae.flip_fairness import AdversaryHead
+         d_in = d_numerical + sum(categories) - categories[s_idx]
+         adv_head = AdversaryHead(d_in, categories[s_idx]).to(device)
+         adv_params = list(adv_head.parameters())
+@@ -457,6 +492,18 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
+                                           bcat[:, s_idx].long(), s_idx,
+                                           lambd=1.0)
+                 loss_private = loss_private + adv_w * loss_adv
++            if proxy_heads is not None:
++                # Phase 1 uses weight 0 (not a skip): under DP every trainable
++                # parameter needs a per-sample gradient on every step, so the
++                # heads stay in the graph with a zero contribution.
++                ramp = (epoch - phase1_epochs + 1) / max(1, params['PHASE2_EPOCHS'])
++                prox_w = params['PROXY_WEIGHT'] * min(1.0, ramp) \
++                    if phase == 2 else 0.0
++                loss_prox = sum(
++                    proxy_decoupling_loss(head, stages, bcat.long(), s_idx,
++                                          cl['col'], cl['members'])
++                    for head, cl in zip(proxy_heads, proxy_classes))
++                loss_private = loss_private + prox_w * loss_prox
+             loss_private.backward(retain_graph=phase == 2)
+ 
+             # ---- Pass 2: batch-coupled fairness terms (group-level DP) --
+@@ -493,7 +540,8 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
+                     stages, bcat[:, s_idx].long(), s_idx=s_idx,
+                     mean_weight=params.get('MEAN_SHIFT_WEIGHT', 1.0),
+                     binary_w1=params.get('BINARY_W1', True),
+-                    mmd_weight=params.get('MMD_WEIGHT', 0.0))
++                    mmd_weight=params.get('MMD_WEIGHT', 0.0),
++                    exclude_cols=proxy_excl)
+                 # lambda ramp over the first LAMBDA_RAMP_FRAC of Phase 2
+                 p2_frac = (epoch - phase1_epochs) / max(1, params['PHASE2_EPOCHS'])
+                 lam_eff = params['LAMBDA_FAIR'] * min(
+@@ -567,10 +615,12 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
+                         for i in range(len(blocks))
+                         for j in range(i + 1, len(blocks))])) \
+                         if len(blocks) > 1 else float('nan')
++                    prox_msg = (f' proxy_ce={float(loss_prox):.4f}'
++                                if proxy_heads is not None else '')
+                     print(f'    terms: recon={loss_private.item():.4f} '
+                           f'div={div.item():.4f} disent={disent.item():.4f} '
+                           f'cka_t={cka_val:.4f} marg={float(marg_pen):.4f} '
+-                          f'lam_eff={lam_eff:.2f}')
++                          f'lam_eff={lam_eff:.2f}{prox_msg}')
+ 
+         # Plateau-based beta decay (TabSyn): on a stalled epoch loss, halve
+         # patience; at BETA_PATIENCE stalls, beta *= BETA_LAMBDA (>= BETA_MIN).
+@@ -595,6 +645,9 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
+                 msg += f'  eps_group={geps:.2f}'
+             print(msg)
+ 
++    if proxy_heads is not None:
++        # keep checkpoints loadable as plain Model_VAE
++        del raw._modules['proxy_heads']
+     return raw, accountant, group_mech
+ 
+ 
+diff --git a/tabsyn-main/tabsyn-main/tabsyn/vae/flip_fairness.py b/tabsyn-main/tabsyn-main/tabsyn/vae/flip_fairness.py
+index bb91b97..e879f39 100644
+--- a/tabsyn-main/tabsyn-main/tabsyn/vae/flip_fairness.py
++++ b/tabsyn-main/tabsyn-main/tabsyn/vae/flip_fairness.py
+@@ -503,6 +503,78 @@ def adversary_loss(adv_head, stages, group, s_idx, lambd=1.0):
+                                              reduction='sum')
+ 
+ 
++def proxy_token_indices(d_num, proxy_col):
++    """Token positions of categorical column `proxy_col`: in the latent mu_z
++    ([CLS, num_1..num_d, cat_1..cat_k]) and in the decoder output h
++    (decoder(z[:, 1:]) -> [num_1..num_d, cat_1..cat_k])."""
++    return 1 + d_num + proxy_col, d_num + proxy_col
++
++
++def proxy_decoupling_features(stages, s_idx, proxy_col):
++    """Inputs of the in-model proxy-decoupling adversary: everything the rest
++    of the representation offers about a row EXCEPT the proxy column itself
++    and the protected column - the latent tokens of the other columns
++    (flattened) and the decoded logits of the other columns."""
++    mu = stages['mu_z']
++    d_num = stages['recon_x_num'].shape[1]
++    lat_p, _ = proxy_token_indices(d_num, proxy_col)
++    lat_s, _ = proxy_token_indices(d_num, s_idx)
++    keep = [t for t in range(mu.shape[1]) if t not in (lat_p, lat_s)]
++    feats = [mu[:, keep].reshape(mu.shape[0], -1), stages['recon_x_num']]
++    for i, c in enumerate(stages['recon_x_cat']):
++        if i in (s_idx, proxy_col):
++            continue
++        feats.append(c)
++    return torch.cat(feats, dim=1)
++
++
++def proxy_decoupling_dim(n_tokens, d_token, d_num, categories, s_idx,
++                         proxy_col):
++    """Input width of proxy_decoupling_features (for building the head)."""
++    return ((n_tokens - 2) * d_token + d_num + sum(categories)
++            - categories[s_idx] - categories[proxy_col])
++
++
++def proxy_member_targets(x_cat, proxy_col, members):
++    """(labels, mask) for a batch: index of the row's category within
++    `members` (0 outside the class) and a 0/1 class-membership mask."""
++    col = x_cat[:, proxy_col]
++    lab = torch.zeros_like(col)
++    mask = torch.zeros_like(col, dtype=torch.bool)
++    for k, c in enumerate(members):
++        hit = col == c
++        lab[hit] = k
++        mask |= hit
++    return lab, mask
++
++
++def proxy_decoupling_loss(head, stages, x_cat, s_idx, proxy_col, members,
++                          lambd=1.0):
++    """In-model proxy decoupling: a gradient-reversal adversary predicts, for
++    rows in a merged proxy class (e.g. relationship in {Husband, Wife}),
++    WHICH member the row is from the other columns' latent tokens and
++    decoded logits. Reversing its gradient removes the protected-specific
++    label from the rest of the representation while the proxy token itself
++    keeps it (the column is still reconstructed faithfully). The
++    legitimate component ('is a spouse') is untouched: rows outside the
++    class are masked out.
++
++    Per-record CE masked to class rows, averaged over the BATCH (not summed):
++    the reconstruction/KL terms in compute_loss are batch means, so a summed
++    CE would be ~batch_size times larger and swamp them (an early smoke run
++    with a sum collapsed numeric fidelity at weight 1). Still a sum of
++    per-record terms over a batch-size constant -> DP-decomposable (Opacus
++    pass 1).
++    """
++    lab, mask = proxy_member_targets(x_cat, proxy_col, members)
++    if not bool(mask.any()):
++        return stages['mu_z'].sum() * 0.0
++    x = proxy_decoupling_features(stages, s_idx, proxy_col)
++    logits = head(x, lambd)
++    ce = torch.nn.functional.cross_entropy(logits, lab, reduction='none')
++    return (ce * mask.float()).sum() / x.shape[0]
++
++
+ def marginal_matching_penalty(stages, X_num, X_cat, s_idx,
+                               n_quantiles=8):
+     """Penalty pulling each column's decoded marginal toward the batch's real
+@@ -532,7 +604,8 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
+                                      s_idx=None,
+                                      mean_weight: float = 1.0,
+                                      binary_w1: bool = True,
+-                                     mmd_weight: float = 0.0) -> torch.Tensor:
++                                     mmd_weight: float = 0.0,
++                                     exclude_cols=None) -> torch.Tensor:
+     """FLIP multi-stage disentanglement (Sec. 4.3.2 of the paper).
+ 
+     Applies the negative-CKA^T disentanglement at three intervention
+@@ -560,15 +633,30 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
+                columns (its logits are skipped at the detokenizer stage
+                since they are supervised by the uniform attribute loss).
+ 
++        exclude_cols: optional categorical column indices (e.g. merged proxy
++               columns under in-model proxy decoupling) whose latent token,
++               decoder token and logits are left out of all three stages:
++               a near-deterministic proxy cannot be made group-invariant
++               without destroying it, so it is handled by
++               proxy_decoupling_loss instead of fighting the CKA^T term.
++
+     Returns:
+         Scalar mean disentanglement loss across the three stages.
+     """
+     device = stages['mu_z'].device
+     losses = []
++    exclude_cols = list(exclude_cols or [])
+ 
+     # Stage 1: latent space
+-    mu_flat = stages['mu_z'].reshape(stages['mu_z'].shape[0], -1)
+-    h_flat = stages['h'].reshape(stages['h'].shape[0], -1)
++    mu_z, h = stages['mu_z'], stages['h']
++    if exclude_cols:
++        d_num = stages['recon_x_num'].shape[1]
++        lat_drop = {proxy_token_indices(d_num, j)[0] for j in exclude_cols}
++        h_drop = {proxy_token_indices(d_num, j)[1] for j in exclude_cols}
++        mu_z = mu_z[:, [t for t in range(mu_z.shape[1]) if t not in lat_drop]]
++        h = h[:, [t for t in range(h.shape[1]) if t not in h_drop]]
++    mu_flat = mu_z.reshape(mu_z.shape[0], -1)
++    h_flat = h.reshape(h.shape[0], -1)
+     if mmd_weight:
+         # nonlinear-separability term at the latent stage
+         losses.append(disentanglement_loss(mu_flat, group, mean_weight)
+@@ -587,6 +675,8 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
+             continue
+         if s_idx is not None and i == s_idx:
+             continue  # protected attribute handled by L_S
++        if i in exclude_cols:
++            continue  # merged proxy handled by proxy_decoupling_loss
+         if binary_w1 and cat_logits.shape[1] == 2:
+             feature_losses.append(binary_logit_gap_w1(cat_logits, group))
+         else:
+diff --git a/tabsyn-main/tabsyn-main/tabsyn/vae/proxy_decouple.py b/tabsyn-main/tabsyn-main/tabsyn/vae/proxy_decouple.py
+new file mode 100644
+index 0000000..5e7c569
+--- /dev/null
++++ b/tabsyn-main/tabsyn-main/tabsyn/vae/proxy_decouple.py
+@@ -0,0 +1,265 @@
++"""Proxy decoupling for near-deterministic proxies of the protected attribute.
++
++Strict disentanglement is infeasible when a category nearly determines the
++protected attribute S (Adult: relationship=Husband -> male, Wife -> female):
++a decoder that must reproduce that category from a sex-free latent cannot
++(data-processing inequality). Instead each such proxy is factored into
++
++  * a legitimate component  - the MERGED class ("spouse"), modelled as usual
++  * a protected-specific label - WHICH member of the class ("Husband" vs
++    "Wife"), made independent of the row's other features with strength tau.
++
++Everything here is dataset-agnostic: proxy categories are found with a
++pre-registered threshold on P(S | category), and only categories pointing to
++DIFFERENT groups are merged (a column whose flagged categories all point to
++the same group has nothing to decouple).
++
++Two uses:
++  * post-hoc  : merge_proxies() before training, expand_merged() after
++                generation, sweeping tau (0 = member follows the synthetic
++                S, 1 = member independent of the row).
++  * in-model  : proxy_member_labels() supplies the per-row member label that
++                the gradient-reversal term in flip_fairness.proxy_decoupling_loss
++                hides from the other tokens / decoded columns.
++
++PRIVACY NOTE: detection and the P(member | merged, S) table are computed on
++the real training fold. They are a handful of category-level counts, not
++covered by the DP-SGD accounting - report them as an uncounted release (or
++add Laplace/Gaussian noise to the counts before use).
++"""
++
++import numpy as np
++
++
++# --------------------------------------------------------------------------
++# Detection
++# --------------------------------------------------------------------------
++
++def detect_proxy_classes(cat, s_idx, threshold=0.95, min_support=0.01,
++                         exclude=()):
++    """Find near-deterministic proxy categories and group them into classes.
++
++    A category c of column j is a proxy if it has at least
++    min_support * n rows and max_g P(S=g | c) >= threshold. Within a column,
++    the flagged categories are merged into one class only if they point to
++    at least two different groups.
++
++    Args:
++        cat: (n, k) int array of categorical codes (real training data).
++        s_idx: column index of the protected attribute.
++        threshold: P(S | category) threshold (pre-register; default 0.95).
++        min_support: minimum category share of rows (default 1%).
++        exclude: column indices never treated as proxies (e.g. the target).
++
++    Returns:
++        list of dicts, one per merged class:
++          {'col': j, 'members': [codes...], 'rep': representative code,
++           'group_of': {code: group}, 'purity': {code: P(S=group | code)},
++           'support': {code: share of rows}}
++    """
++    cat = np.asarray(cat)
++    n = len(cat)
++    s = cat[:, s_idx]
++    groups = np.unique(s)
++    classes = []
++    for j in range(cat.shape[1]):
++        if j == s_idx or j in exclude:
++            continue
++        flagged = {}
++        for c in np.unique(cat[:, j]):
++            m = cat[:, j] == c
++            if m.sum() < min_support * n:
++                continue
++            p = np.array([(s[m] == g).mean() for g in groups])
++            g_star = int(groups[p.argmax()])
++            if p.max() >= threshold:
++                flagged[int(c)] = (g_star, float(p.max()), float(m.mean()))
++        pointed = {v[0] for v in flagged.values()}
++        if len(flagged) >= 2 and len(pointed) >= 2:
++            members = sorted(flagged)
++            classes.append({
++                'col': j,
++                'members': members,
++                'rep': members[0],
++                'group_of': {c: flagged[c][0] for c in members},
++                'purity': {c: flagged[c][1] for c in members},
++                'support': {c: flagged[c][2] for c in members},
++            })
++    return classes
++
++
++def describe_classes(classes, col_names=None, labels=None):
++    """Human-readable one-line summary per class (for logs / reports)."""
++    out = []
++    for cl in classes:
++        j = cl['col']
++        name = col_names[j] if col_names is not None else f'c{j}'
++        def lab(c):
++            return str(labels[name][c]) if labels is not None else str(c)
++        mem = ', '.join(f"{lab(c)}->S={cl['group_of'][c]} "
++                        f"(purity {cl['purity'][c]:.3f}, "
++                        f"support {cl['support'][c]:.3f})"
++                        for c in cl['members'])
++        out.append(f'{name}: [{mem}]')
++    return out
++
++
++# --------------------------------------------------------------------------
++# Post-hoc: merge before training, expand after generation
++# --------------------------------------------------------------------------
++
++def merge_proxies(cat, classes):
++    """Copy of `cat` with each class's members mapped to its representative
++    code. The category count is unchanged (non-representative members just
++    never occur), so the model architecture is untouched."""
++    out = np.array(cat, copy=True)
++    for cl in classes:
++        j = cl['col']
++        out[np.isin(out[:, j], cl['members']), j] = cl['rep']
++    return out
++
++
++def fit_member_tables(cat, s_idx, classes, n_groups=None, alpha=1.0):
++    """P(member | merged class, S=g) and the marginal P(member | class),
++    from the real training data, with add-alpha smoothing.
++
++    Returns a list aligned with `classes` of dicts
++      {'cond': (n_groups, n_members) array, 'marg': (n_members,) array}.
++    """
++    cat = np.asarray(cat)
++    s = cat[:, s_idx]
++    if n_groups is None:
++        n_groups = int(s.max()) + 1
++    tables = []
++    for cl in classes:
++        j, mem = cl['col'], cl['members']
++        in_cls = np.isin(cat[:, j], mem)
++        cond = np.zeros((n_groups, len(mem)))
++        for g in range(n_groups):
++            for k, c in enumerate(mem):
++                cond[g, k] = ((s == g) & (cat[:, j] == c)).sum() + alpha
++        cond /= cond.sum(1, keepdims=True)
++        marg = np.array([(cat[in_cls, j] == c).sum() + alpha for c in mem],
++                        dtype=float)
++        marg /= marg.sum()
++        tables.append({'cond': cond, 'marg': marg})
++    return tables
++
++
++def expand_merged(syn_cat, s_syn, classes, tables, tau, rng=None):
++    """Expand each merged class back into its members.
++
++    For each synthetic row in a merged class: with probability 1 - tau the
++    member is drawn from P(member | S = the row's synthetic S) - consistent
++    labels, the proxy follows S; with probability tau it is drawn from the
++    marginal P(member | class) - independent of the row (tau = 1 yields the
++    paper's 'male wives' at the real member shares).
++
++    Args:
++        syn_cat: (n, k) synthetic codes (merged classes at their rep code).
++        s_syn: (n,) synthetic protected values used for the consistent draw.
++        tau: decoupling strength in [0, 1].
++    Returns:
++        new (n, k) array; syn_cat is not modified.
++    """
++    rng = rng or np.random.default_rng(0)
++    out = np.array(syn_cat, copy=True)
++    s_syn = np.asarray(s_syn).astype(int)
++    for cl, tb in zip(classes, tables):
++        j, mem = cl['col'], np.array(cl['members'])
++        rows = np.where(np.isin(out[:, j], mem))[0]
++        if len(rows) == 0:
++            continue
++        decouple = rng.random(len(rows)) < tau
++        probs = np.where(decouple[:, None], tb['marg'][None, :],
++                         tb['cond'][np.clip(s_syn[rows], 0,
++                                            len(tb['cond']) - 1)])
++        u = rng.random((len(rows), 1))
++        pick = (probs.cumsum(1) > u).argmax(1)
++        out[rows, j] = mem[pick]
++    return out
++
++
++def proxy_member_labels(cat, classes):
++    """Per-row member label for the in-model decoupling term.
++
++    Returns a list aligned with `classes` of (labels, mask) int arrays:
++    labels[i] = index of the row's category within cl['members'] (0 for rows
++    outside the class), mask[i] = 1 if the row belongs to the class.
++    """
++    cat = np.asarray(cat)
++    out = []
++    for cl in classes:
++        j, mem = cl['col'], cl['members']
++        lab = np.zeros(len(cat), dtype=np.int64)
++        for k, c in enumerate(mem):
++            lab[cat[:, j] == c] = k
++        out.append((lab, np.isin(cat[:, j], mem).astype(np.int64)))
++    return out
++
++
++# --------------------------------------------------------------------------
++# Metrics
++# --------------------------------------------------------------------------
++
++def impossible_combination_rate(syn_cat, real_cat, s_idx, rare=0.01,
++                                min_support=0.005, exclude=()):
++    """Share of synthetic rows carrying a (protected value, category) pair
++    that is essentially absent from the real data - the 'male wife' rate,
++    generalized to every categorical column.
++
++    A pair (g, c) in column j is 'impossible' if category c has at least
++    min_support of the real rows and P_real(S=g | c) < rare.
++
++    Returns {'any': share of rows with >= 1 impossible pair,
++             'by_col': {j: share of rows impossible in column j}}.
++    """
++    real_cat, syn_cat = np.asarray(real_cat), np.asarray(syn_cat)
++    s_r, s_y = real_cat[:, s_idx], syn_cat[:, s_idx]
++    n_r = len(real_cat)
++    groups = np.unique(np.concatenate([s_r, s_y]))
++    any_bad = np.zeros(len(syn_cat), dtype=bool)
++    by_col = {}
++    for j in range(real_cat.shape[1]):
++        if j == s_idx or j in exclude:
++            continue
++        bad = np.zeros(len(syn_cat), dtype=bool)
++        for c in np.unique(real_cat[:, j]):
++            m = real_cat[:, j] == c
++            if m.sum() < min_support * n_r:
++                continue
++            for g in groups:
++                if (s_r[m] == g).mean() < rare:
++                    bad |= (syn_cat[:, j] == c) & (s_y == g)
++        by_col[j] = float(bad.mean())
++        any_bad |= bad
++    return {'any': float(any_bad.mean()), 'by_col': by_col}
++
++
++def proxy_member_dependence(cat, classes, exclude=(), seed=0):
++    """How well the OTHER categorical columns predict each class's member
++    label among the class's rows (balanced accuracy, 3-fold, gradient
++    boosting; chance 1 / n_members). Pass the protected column (and anything
++    else to ignore) in `exclude`. tau = 1 should drive this to chance; it is
++    the direct readout of the decoupling, independent of the protected
++    column."""
++    from sklearn.ensemble import HistGradientBoostingClassifier
++    from sklearn.model_selection import cross_val_predict, StratifiedKFold
++    cat = np.asarray(cat)
++    res = []
++    for cl, (lab, mask) in zip(classes, proxy_member_labels(cat, classes)):
++        rows = mask.astype(bool)
++        cols = [k for k in range(cat.shape[1]) if k != cl['col']
++                and k not in exclude]
++        X, y = cat[rows][:, cols], lab[rows]
++        if len(np.unique(y)) < 2 or min(np.bincount(y)) < 3:
++            res.append(float('nan'))
++            continue
++        clf = HistGradientBoostingClassifier(
++            categorical_features=[True] * len(cols),
++            class_weight='balanced', max_iter=100, random_state=seed)
++        pred = cross_val_predict(clf, X, y, cv=StratifiedKFold(
++            3, shuffle=True, random_state=seed))
++        res.append(float(np.mean([(pred[y == g] == g).mean()
++                                  for g in np.unique(y)])))
++    return res
+diff --git a/tests/test_proxy_decouple.py b/tests/test_proxy_decouple.py
+new file mode 100644
+index 0000000..032783f
+--- /dev/null
++++ b/tests/test_proxy_decouple.py
+@@ -0,0 +1,171 @@
++"""Tests for proxy decoupling (post-hoc merge/expand and the in-model term).
++
++Run:  python -m pytest tests/test_proxy_decouple.py -v
++"""
++
++import os
++import sys
++import numpy as np
++import torch
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
++                                '..', 'tabsyn-main', 'tabsyn-main'))
++
++from tabsyn.vae.proxy_decouple import (detect_proxy_classes, merge_proxies,
++                                       fit_member_tables, expand_merged,
++                                       proxy_member_labels,
++                                       impossible_combination_rate,
++                                       proxy_member_dependence)
++from tabsyn.vae.flip_fairness import (AdversaryHead, proxy_decoupling_loss,
++                                      proxy_decoupling_dim,
++                                      proxy_decoupling_features,
++                                      multi_stage_disentanglement_loss)
++from tabsyn.vae.model import Model_VAE
++
++
++def toy_table(n=4000, seed=0):
++    """col0 = S (0/1), col1 = relationship-like proxy:
++    0=husband (S=1), 1=wife (S=0), 2=other (mixed); col2 = a feature that
++    depends on the proxy member (husband -> 1 more often)."""
++    rng = np.random.default_rng(seed)
++    s = rng.integers(0, 2, n)
++    spouse = rng.random(n) < 0.5
++    rel = np.where(spouse, np.where(s == 1, 0, 1), 2)
++    feat = np.where(rel == 0, rng.random(n) < 0.8,
++                    rng.random(n) < 0.2).astype(int)
++    return np.stack([s, rel, feat], axis=1)
++
++
++# --------------------------------------------------------------------------
++# Detection / merge / expand
++# --------------------------------------------------------------------------
++
++def test_detect_finds_cross_group_class_only():
++    cat = toy_table()
++    cls = detect_proxy_classes(cat, s_idx=0)
++    assert len(cls) == 1
++    assert cls[0]['col'] == 1 and cls[0]['members'] == [0, 1]
++    assert cls[0]['group_of'] == {0: 1, 1: 0}
++
++
++def test_detect_skips_same_group_and_excluded():
++    cat = toy_table()
++    # an excluded column is never a proxy
++    assert detect_proxy_classes(cat, s_idx=0, exclude=(1,)) == []
++    # only ONE flagged category (cat 1 is pure S=0; cat 0 is mixed): nothing
++    # to decouple, so no class
++    s = cat[:, 0]
++    one_sided = np.where(s == 1, 0,
++                         np.random.default_rng(1).integers(0, 2, len(s)))
++    cat2 = np.stack([s, one_sided], axis=1)
++    cls = detect_proxy_classes(cat2, s_idx=0)
++    assert cls == []
++
++
++def test_merge_and_expand_tau0_is_consistent():
++    cat = toy_table()
++    cls = detect_proxy_classes(cat, s_idx=0)
++    tb = fit_member_tables(cat, 0, cls)
++    merged = merge_proxies(cat, cls)
++    assert set(np.unique(merged[:, 1])) == {0, 2}
++    out = expand_merged(merged, cat[:, 0], cls, tb, tau=0.0)
++    # tau=0: member follows S -> reproduces the real column almost exactly
++    assert (out[:, 1] == cat[:, 1]).mean() > 0.99
++    assert impossible_combination_rate(out, cat, 0)['any'] < 0.01
++
++
++def test_expand_tau1_decouples_member_from_features():
++    cat = toy_table()
++    cls = detect_proxy_classes(cat, s_idx=0)
++    tb = fit_member_tables(cat, 0, cls)
++    out = expand_merged(merge_proxies(cat, cls), cat[:, 0], cls, tb, tau=1.0)
++    # rows outside the class are untouched
++    other = cat[:, 1] == 2
++    assert (out[other, 1] == 2).all()
++    # member shares within the class match the real marginal
++    in_cls = out[:, 1] != 2
++    real_share = (cat[cat[:, 1] != 2, 1] == 0).mean()
++    assert abs((out[in_cls, 1] == 0).mean() - real_share) < 0.04
++    # 'male wives' appear (about half the spouse rows)
++    assert impossible_combination_rate(out, cat, 0)['any'] > 0.15
++    # and the member is no longer predictable from the other feature
++    dep = proxy_member_dependence(out, cls, exclude=(0,))[0]
++    dep_real = proxy_member_dependence(cat, cls, exclude=(0,))[0]
++    assert dep_real > 0.7 and dep < 0.56
++
++
++def test_member_labels():
++    cat = toy_table(200)
++    cls = detect_proxy_classes(cat, s_idx=0, min_support=0.0)
++    (lab, mask), = proxy_member_labels(cat, cls)
++    assert (mask == (cat[:, 1] != 2)).all()
++    assert (lab[cat[:, 1] == 1] == 1).all() and (lab[cat[:, 1] == 0] == 0).all()
++
++
++# --------------------------------------------------------------------------
++# In-model term
++# --------------------------------------------------------------------------
++
++def _model_and_stages(n=64, seed=0):
++    torch.manual_seed(seed)
++    categories = [2, 3, 2]          # S, proxy, feature
++    d_num, d_token = 2, 4
++    m = Model_VAE(1, d_num, categories, d_token, n_head=1, factor=4)
++    cat = torch.tensor(toy_table(n, seed))
++    num = torch.randn(n, d_num)
++    return m, num, cat, categories, d_num, d_token
++
++
++def test_proxy_feature_dim_matches_head():
++    m, num, cat, categories, d_num, d_token = _model_and_stages()
++    st = m.forward_with_stages(num, cat)
++    x = proxy_decoupling_features(st, s_idx=0, proxy_col=1)
++    n_tokens = st['mu_z'].shape[1]
++    assert x.shape[1] == proxy_decoupling_dim(n_tokens, d_token, d_num,
++                                              categories, 0, 1)
++
++
++def test_proxy_loss_masks_rows_outside_class():
++    m, num, cat, categories, d_num, d_token = _model_and_stages()
++    st = m.forward_with_stages(num, cat)
++    head = AdversaryHead(proxy_decoupling_dim(st['mu_z'].shape[1], d_token,
++                                              d_num, categories, 0, 1), 2)
++    assert proxy_decoupling_loss(head, st, cat, 0, 1, [0, 1]).item() > 0
++    cat_none = cat.clone()
++    cat_none[:, 1] = 2
++    st2 = m.forward_with_stages(num, cat_none)
++    assert proxy_decoupling_loss(head, st2, cat_none, 0, 1, [0, 1]).item() == 0
++
++
++def test_proxy_loss_reverses_gradient_into_encoder():
++    m, num, cat, categories, d_num, d_token = _model_and_stages()
++    W = m.VAE.encoder_mu.layers[0]['linear0'].weight
++    torch.manual_seed(123)
++    st = m.forward_with_stages(num, cat)
++    head = AdversaryHead(proxy_decoupling_dim(st['mu_z'].shape[1], d_token,
++                                              d_num, categories, 0, 1), 2)
++    proxy_decoupling_loss(head, st, cat, 0, 1, [0, 1]).backward()
++    g_rev = W.grad.clone()
++    m.zero_grad(); head.zero_grad()
++    torch.manual_seed(123)              # same reparameterization noise
++    st3 = m.forward_with_stages(num, cat)
++    x = proxy_decoupling_features(st3, 0, 1)
++    lab = (cat[:, 1] == 1).long()
++    mask = (cat[:, 1] != 2).float()
++    ((torch.nn.functional.cross_entropy(head.net(x), lab, reduction='none')
++      * mask).sum() / x.shape[0]).backward()
++    assert g_rev.abs().max() > 0
++    assert torch.allclose(g_rev, -W.grad, atol=1e-6)
++
++
++def test_disentanglement_exclude_cols_drops_proxy():
++    m, num, cat, categories, d_num, d_token = _model_and_stages(256)
++    st = m.forward_with_stages(num, cat)
++    g = cat[:, 0].long()
++    full = multi_stage_disentanglement_loss(st, g, s_idx=0)
++    excl = multi_stage_disentanglement_loss(st, g, s_idx=0, exclude_cols=[1])
++    assert torch.isfinite(full) and torch.isfinite(excl)
++    assert not torch.allclose(full, excl)
++    # excluding nothing == default
++    assert torch.allclose(full, multi_stage_disentanglement_loss(
++        st, g, s_idx=0, exclude_cols=[]))

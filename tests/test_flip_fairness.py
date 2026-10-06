@@ -28,6 +28,12 @@ from tabsyn.vae.flip_fairness import (
     linear_cka_t,
     disentanglement_loss,
     multi_stage_disentanglement_loss,
+    group_mean_shift,
+    wasserstein_1d,
+    binary_logit_gap_w1,
+    shared_mean_ratio,
+    rbf_mmd,
+    pairwise_mmd,
     sliced_wasserstein_distance,
     uniform_attribute_loss,
     uniform_attribute_loss_per_sample,
@@ -246,8 +252,178 @@ def test_multi_stage_mean_of_stages():
     expected = (disentanglement_loss(mu_flat, groups)
                 + torch.stack(feat_losses).mean()
                 + disentanglement_loss(h_flat, groups)) / 3.0
-    got = multi_stage_disentanglement_loss(stages, groups, s_idx=s_idx)
+    got = multi_stage_disentanglement_loss(stages, groups, s_idx=s_idx,
+                                           mean_weight=0.0)
     assert torch.isclose(got, expected, atol=1e-6)
+
+
+def test_cka_blind_to_group_mean_shift_but_mean_term_is_not():
+    """Per-group centering makes pure CKA^T score a mean shift as
+    'identical'; the mean-shift term must see it."""
+    base = torch.randn(200, 16)
+    rep = torch.cat([base, base + 3.0], dim=0)
+    groups = torch.cat([torch.zeros(200), torch.ones(200)]).long()
+    assert disentanglement_loss(rep, groups).item() < -0.99
+    with_mean = disentanglement_loss(rep, groups, mean_weight=1.0)
+    assert with_mean.item() > 1.0
+    # no shift -> mean term ~0, loss stays ~ -1
+    same = torch.cat([base, base], dim=0)
+    assert disentanglement_loss(same, groups, mean_weight=1.0).item() < -0.99
+
+
+def test_group_mean_shift_scale_invariant():
+    A, B = torch.randn(100, 8), torch.randn(80, 8) + 1.0
+    assert torch.isclose(group_mean_shift(A, B),
+                         group_mean_shift(10 * A, 10 * B), rtol=1e-4)
+
+
+def test_wasserstein_1d_known_values():
+    a = torch.arange(10, dtype=torch.float32)
+    assert wasserstein_1d(a, a).item() == 0.0
+    assert torch.isclose(wasserstein_1d(a, a + 2.5), torch.tensor(2.5), atol=1e-5)
+    # unequal sizes: same distribution sampled at different resolution
+    b = torch.linspace(0, 9, 37)
+    assert wasserstein_1d(a, b).item() < 0.3
+
+
+def test_binary_w1_detects_rate_gap_with_equal_mean_gap():
+    """Both groups have mean logit gap 0, but group 0 is always
+    approved (d > 0) and group 1 is 50/50: a mean comparison is blind,
+    W1 is not."""
+    n = 400
+    d0 = torch.rand(n) * 2.0 + 0.1                      # all > 0
+    d1 = torch.cat([torch.rand(n // 2) * 2.0 + 0.1,
+                    -(torch.rand(n // 2) * 2.0 + 0.1)])
+    d0 = d0 - d0.mean()                                  # equalize means
+    d1 = d1 - d1.mean()
+    logits = torch.stack([torch.cat([d0, d1]), torch.zeros(2 * n)], dim=1)
+    groups = torch.cat([torch.zeros(n), torch.ones(n)]).long()
+    assert abs(d0.mean() - d1.mean()) < 1e-5
+    assert binary_logit_gap_w1(logits, groups).item() > 0.1
+    same = torch.stack([torch.cat([d1, d1.flip(0)]), torch.zeros(2 * n)], dim=1)
+    assert binary_logit_gap_w1(same, groups).item() < 0.02
+
+
+def test_binary_w1_gradient_flows():
+    logits = torch.randn(64, 2, requires_grad=True)
+    groups = torch.randint(0, 2, (64,))
+    binary_logit_gap_w1(logits, groups).backward()
+    assert torch.isfinite(logits.grad).all() and logits.grad.abs().sum() > 0
+
+
+def test_multi_stage_paper_literal_matches_plain_cka():
+    """mean_weight=0 and binary_w1=False (the --paper-literal setting) must
+    reduce to pure -CKA^T on every stage, binary columns included."""
+    stages = _make_stages(categories=(3, 2))
+    groups = torch.randint(0, 2, (64,))
+    mu_flat = stages['mu_z'].reshape(64, -1)
+    h_flat = stages['h'].reshape(64, -1)
+    feat = torch.stack([
+        disentanglement_loss(stages['recon_x_num'], groups),
+        disentanglement_loss(stages['recon_x_cat'][1], groups)]).mean()
+    expected = (disentanglement_loss(mu_flat, groups) + feat
+                + disentanglement_loss(h_flat, groups)) / 3.0
+    got = multi_stage_disentanglement_loss(stages, groups, s_idx=0,
+                                           mean_weight=0.0, binary_w1=False)
+    assert torch.isclose(got, expected, atol=1e-6)
+
+
+def test_multi_stage_binary_column_uses_w1():
+    """A binary non-protected column is scored by W1, not CKA^T: with
+    mean_weight=0 the result must equal the explicit W1 composition."""
+    stages = _make_stages(categories=(3, 2))
+    groups = torch.randint(0, 2, (64,))
+    mu_flat = stages['mu_z'].reshape(64, -1)
+    h_flat = stages['h'].reshape(64, -1)
+    feat = torch.stack([
+        disentanglement_loss(stages['recon_x_num'], groups),
+        binary_logit_gap_w1(stages['recon_x_cat'][1], groups)]).mean()
+    expected = (disentanglement_loss(mu_flat, groups) + feat
+                + disentanglement_loss(h_flat, groups)) / 3.0
+    got = multi_stage_disentanglement_loss(stages, groups, s_idx=0,
+                                           mean_weight=0.0)
+    assert torch.isclose(got, expected, atol=1e-6)
+
+
+def test_shared_mean_ratio():
+    x = torch.randn(500, 8)
+    assert shared_mean_ratio(x) < 0.05
+    assert shared_mean_ratio(x + 50.0) > 100
+
+
+# --------------------------------------------------------------------------
+# rbf_mmd / pairwise_mmd
+# --------------------------------------------------------------------------
+
+def test_mmd_zero_for_identical_positive_for_scale():
+    """MMD^2 ~ 0 for identical groups and positive for a pure scale
+    difference - the case CKA^T scores as identical (same covariance shape
+    up to scale) and the mean term misses (same mean)."""
+    torch.manual_seed(0)
+    A = torch.randn(128, 80)
+    same = rbf_mmd(A, A.clone())
+    scaled = rbf_mmd(A, A * 1.5)
+    assert abs(same.item()) < 0.05
+    assert scaled.item() > 0.05
+    # CKA^T is blind to it
+    assert linear_cka_t(A, A * 1.5).item() > 0.99
+
+
+def test_mmd_positive_for_bimodal_difference():
+    """A bimodal group difference invisible to both CKA^T and the mean
+    term must still give positive MMD^2."""
+    torch.manual_seed(0)
+    A = torch.randn(128, 80)
+    B = torch.cat([torch.randn(64, 80) + 2.0, torch.randn(64, 80) - 2.0])
+    assert rbf_mmd(A, B).item() > 0.05
+
+
+def test_pairwise_mmd_three_groups():
+    torch.manual_seed(0)
+    rep = torch.randn(90, 16)
+    rep[30:60] += 1.0
+    rep[60:] -= 1.0
+    groups = torch.repeat_interleave(torch.arange(3), 30)
+    val = pairwise_mmd(rep, groups)
+    assert val.item() > 0.0
+    # all-same groups -> ~0
+    same = pairwise_mmd(torch.randn(90, 16), groups)
+    assert abs(same.item()) < 0.1
+
+
+def test_mmd_gradient_flows():
+    torch.manual_seed(0)
+    A = torch.randn(64, 16, requires_grad=True)
+    B = torch.randn(64, 16) + 0.5
+    rbf_mmd(A, B).backward()
+    assert A.grad is not None and torch.isfinite(A.grad).all()
+    assert A.grad.abs().sum() > 0
+
+
+def test_mmd_routed_through_group_level_pass_under_dp():
+    """Under DP the MMD term is batch-coupled (one record changes every
+    other record's kernel row), so it must ride pass 2's GroupLevelDPMechanism
+    with the SWD/CKA^T terms - never Opacus's per-sample pass. The training
+    loop routes it there because multi_stage_disentanglement_loss is called
+    inside the pass-2 block; this test pins that the loss is a single scalar
+    whose gradient cannot be decomposed per sample (kernel rows mix records)."""
+    torch.manual_seed(0)
+    n = 32
+    rep = torch.randn(n, 8, requires_grad=True)
+    other = torch.randn(n, 8)
+    groups = torch.randint(0, 2, (n,))
+    # emulate the batch coupling: changing row 0's group-mate changes row 0's
+    # gradient through the kernel, unlike a per-sample loss
+    loss = pairwise_mmd(rep, groups)
+    loss.backward()
+    g1 = rep.grad.clone()
+    rep.grad = None
+    rep2 = rep.detach().clone()
+    rep2[1] += 1.0  # perturb one OTHER row
+    rep3 = rep2.clone().requires_grad_(True)
+    pairwise_mmd(rep3, groups).backward()
+    assert not torch.allclose(g1[0], rep3.grad[0], atol=1e-8), \
+        'row 0 gradient should depend on other rows (batch-coupled)'
 
 
 # --------------------------------------------------------------------------
