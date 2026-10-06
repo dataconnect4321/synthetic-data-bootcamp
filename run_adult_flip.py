@@ -312,10 +312,6 @@ def main():
                          'the per-sample L_S produces')
     ap.add_argument('--diff-epochs', type=int, default=2000)
     ap.add_argument('--diff-batch', type=int, default=4096)
-    ap.add_argument('--fast', action='store_true',
-                    help='proportional 8k-row stratified subsample (sex x '
-                         'income), shorter VAE training, diffusion sized '
-                         'in optimizer steps, 2-seed scoring')
     ap.add_argument('--paper-config', action='store_true',
                     help='the paper\'s training setup: full data, batch '
                          '4096, 3000+1000 epochs, d_token 4, factor 32, '
@@ -381,11 +377,6 @@ def main():
     tag = args.tag or f'lam{args.lam:g}_fold{args.fold}'
     t0 = time.time()
     configure_demo()
-    if args.paper_config and args.fast:
-        raise SystemExit('--paper-config and --fast are mutually exclusive')
-    if args.decouple_curve and not args.tier1:
-        # the curve is scored against each decoded row's SOURCE sex
-        raise SystemExit('--decouple-curve needs --tier1')
     params, dparams = build_params(args)
     if args.paper_config:
         # Paper training setup: full data, large batch (the fairness terms
@@ -398,20 +389,11 @@ def main():
                       BETA_MAX=1e-2, BETA_MIN=1e-5, BETA_LAMBDA=0.7,
                       BETA_PATIENCE=10, PHASE2_LR_SCALE=1.0,
                       MARGINAL_WEIGHT=1.0)
-    if args.fast:
-        # NOTE: only Phase 1 defaults are overridden here; PHASE2_EPOCHS
-        # comes from --phase2-epochs so sweeps of Phase-2 length work.
-        params.update(PHASE1_EPOCHS=150, BATCH_SIZE=512)
-        # diffusion length in OPTIMIZER STEPS (~15k, matching the full run)
-        # so a smaller sample doesn't silently undertrain the prior
-        dparams.update(DIFF_STEPS=15000, BATCH_SIZE=2048)
     device = torch.device(params['DEVICE'])
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    data = prepare(read_adult(), args.fold, args.folds, args.split_seed,
-                   sample=(8000, [SENSITIVE, TARGET]) if args.fast
-                   else None)
+    data = prepare(read_adult(), args.fold, args.folds, args.split_seed)
     X_num = torch.tensor(data['train_num'])
     X_cat = torch.tensor(data['train_cat'])
     enc = data['encoders']
@@ -513,15 +495,14 @@ def main():
     # the leakage check: training on tr_n/tr_c and predicting their decoded
     # near-copies overstates separability).
     ref_ho = (data['test_num'], data['test_cat'])
-    syn = averaged_scores(syn_num, syn_cat, s_idx, ref=ref_ho,
-                          fast=args.fast)
+    syn = averaged_scores(syn_num, syn_cat, s_idx, ref=ref_ho)
     # A-NCB real reference: the SAME procedure as the synthetic score - an
     # adversary trained on the real TRAINING fold, applied to the real TEST
     # fold (previously the synthetic-scored adversary was reused, which is
     # a different procedure). ncb_stored is reported alongside.
     real_test = averaged_scores(data['test_num'], data['test_cat'], s_idx,
-                                ref=(tr_n, tr_c), fast=args.fast)
-    real_train = averaged_scores(tr_n, tr_c, s_idx, fast=args.fast)
+                                ref=(tr_n, tr_c))
+    real_train = averaged_scores(tr_n, tr_c, s_idx)
     eps_id = None if args.tier1 else epsilon_identifiability(tr_n, tr_c,
                                                             syn_num, syn_cat)
     lv_auc = label_validity_auc(tr_n, tr_c, syn_num, syn_cat, s_idx)
