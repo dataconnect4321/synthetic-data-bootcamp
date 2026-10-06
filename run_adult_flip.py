@@ -516,6 +516,14 @@ def main():
     # near-copies overstates separability).
     ref_ho = (data['test_num'], data['test_cat'])
     syn = averaged_scores(syn_num, syn_cat, s_idx, ref=ref_ho)
+    # A-NCB (paper-style): adversary trained out-of-fold on the SYNTHETIC
+    # table's own S column (ref=None). Under the paper's design S is largely
+    # invented, so this adversary learns an S that barely follows the
+    # features - its labels look balanced in every cluster and A-NCB rises
+    # BY CONSTRUCTION. Reported alongside the strict version (adversary
+    # trained on real data, ref=ref_ho above) so the two readings of
+    # 'inferred from all other features' are distinguishable.
+    syn_paper = averaged_scores(syn_num, syn_cat, s_idx, ref=None)
     # A-NCB real reference: the SAME procedure as the synthetic score - an
     # adversary trained on the real TRAINING fold, applied to the real TEST
     # fold (previously the synthetic-scored adversary was reused, which is
@@ -749,6 +757,7 @@ def main():
         'n_test': len(data['test_num']),
         'paper_metrics': {
             'syn': syn, 'real_test': real_test, 'real_train': real_train,
+            'syn_paper_style': syn_paper,
             'eps_identifiability': eps_id,
             'label_validity_auc': lv_auc,
             'inferred_group_gap': inf_gap,
@@ -806,7 +815,11 @@ def main():
 
     print(f'  BER   syn={syn["ber"]:.3f}  real(test)={real_test["ber"]:.3f}  '
           f'(chance {syn["ber_chance"]:.2f})')
-    print(f'  A-NCB syn={syn["a_ncb"]:.3f}  real(test)={real_test["a_ncb"]:.3f}')
+    print(f'  A-NCB (strict, real-trained adversary) '
+          f'syn={syn["a_ncb"]:.3f}  real(test)={real_test["a_ncb"]:.3f}')
+    print(f'  A-NCB (paper-style, own-S adversary) '
+          f'syn={syn_paper["a_ncb"]:.3f}  real(train, own-S)='
+          f'{real_train["a_ncb"]:.3f}')
     if eps_id is None:
         print('  eps-identifiability: n/a (tier-1 decode is near-copies)')
     else:
