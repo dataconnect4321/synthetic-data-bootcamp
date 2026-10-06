@@ -409,20 +409,40 @@ def main():
     if detected:
         print('  auto-detected proxy classes: '
               + '; '.join(describe_classes(detected, CATEGORICAL, enc)))
+    # Proxy decoupling is optional: a plain baseline (no --proxy-weight,
+    # no --decouple-curve) must run on datasets without a near-1:1 proxy.
+    need_proxy = args.proxy_weight > 0 or args.decouple_curve
     if args.proxy_col is None:
         if not detected:
-            raise SystemExit('no proxy class detected; pass --proxy-col')
-        proxy_idx = detected[0]['col']
-        proxy_codes = tuple(detected[0]['members'])
-        proxy_labels = [str(enc[CATEGORICAL[proxy_idx]][c])
-                        for c in proxy_codes]
+            if need_proxy:
+                raise SystemExit('no proxy class detected; pass --proxy-col')
+            proxy_idx = proxy_codes = None
+            proxy_labels = []
+        else:
+            if len(detected[0]['members']) != 2:
+                raise SystemExit(
+                    'proxy decoupling currently supports 2-member classes; '
+                    'got ' + str(detected[0]['members']))
+            if len(detected) > 1:
+                print(f'  NOTE: {len(detected)} proxy classes found; '
+                      'decoupling only the first')
+            proxy_idx = detected[0]['col']
+            proxy_codes = tuple(detected[0]['members'])
+            proxy_labels = [str(enc[CATEGORICAL[proxy_idx]][c])
+                            for c in proxy_codes]
     else:
         proxy_idx = CATEGORICAL.index(args.proxy_col)
+        manual = detect_proxy_classes(data['train_cat'], s_idx,
+                                      exclude=(t_idx,))
+        manual = [d for d in manual if d['col'] == proxy_idx]
         proxy_labels = (args.proxy_labels.split(',')
                         if args.proxy_labels else
-                        [str(enc[args.proxy_col][c]) for c in
-                         detect_proxy_classes(data['train_cat'], s_idx,
-                                              exclude=(t_idx,))[0]['members']])
+                        ([str(enc[args.proxy_col][c]) for c in
+                          manual[0]['members']] if manual else None))
+        if proxy_labels is None or len(proxy_labels) != 2:
+            raise SystemExit('proxy decoupling currently supports 2-member '
+                             'classes; pass --proxy-labels with exactly two '
+                             'labels')
         proxy_codes = tuple(int(np.where(enc[args.proxy_col] == lab)[0][0])
                             for lab in proxy_labels)
     params.update(PROXY_IDX=proxy_idx, PROXY_CODES=proxy_codes,
@@ -510,10 +530,12 @@ def main():
     inf_gap_real = inferred_group_gap(tr_n, tr_c, s_idx, t_idx, ref_ho)
     probe = latent_probe(vae, tr_n, tr_c, s_idx, device)
     ceiling = real_feature_ceiling(tr_n, tr_c, s_idx)
-    proxy_probe = proxy_latent_probe(vae, tr_n, tr_c, s_idx, proxy_idx,
-                                     proxy_codes, device)
-    print(f'  latent {"/".join(proxy_labels)} probe (no proxy/sex token): '
-          f'{proxy_probe:.3f} (chance 0.5)')
+    proxy_probe = (proxy_latent_probe(vae, tr_n, tr_c, s_idx, proxy_idx,
+                                      proxy_codes, device)
+                   if proxy_idx is not None else None)
+    if proxy_probe is not None:
+        print(f'  latent {"/".join(proxy_labels)} probe (no proxy/sex token): '
+              f'{proxy_probe:.3f} (chance 0.5)')
     print(f'  latent sex-probe balanced acc: '
           f'{probe["drop_s_token"]:.3f} (no sex token; '
           f'{probe["with_s_token"]:.3f} with) vs real-feature ceiling '
@@ -631,8 +653,10 @@ def main():
     # Scored against the SOURCE rows' true sex (tier-1 only): the generated
     # S column is invented by design, so it says nothing about the proxy.
     from tabsyn.vae.temper import true_sex_joint_tv, decouple_curve
+    from tabsyn.vae.proxy_decouple import (impossible_combination_rate,
+                                           proxy_member_dependence)
     sp_joint_tv = decouple_results = None
-    if args.tier1:
+    if args.tier1 and proxy_idx is not None:
         sp_joint_tv = true_sex_joint_tv(syn_cat, true_s, tr_c, s_idx,
                                         proxy_idx)
         print(f'  (true sex, {args.proxy_col}) joint TV vs real: '
@@ -645,6 +669,34 @@ def main():
               + '; '.join(f"{r['tau']}: {r['leakage']:.3f}/"
                           f"{r['joint_tv']:.3f}/{r['flipped']:.3f}"
                           for r in decouple_results))
+
+    # ---- Generic proxy metrics (reported on every run) -------------------
+    # impossible-combination rate: share of synthetic rows carrying a
+    # (protected value, category) pair essentially absent from the real
+    # data (the 'male wife' rate, generalized to every column).
+    imposs = impossible_combination_rate(syn_cat, tr_c, s_idx,
+                                          exclude=(t_idx,))
+    imposs_real = impossible_combination_rate(tr_c, tr_c, s_idx,
+                                              exclude=(t_idx,))
+    print(f'  impossible-combination rate: syn {imposs["any"]:.3f} '
+          f'(real reference {imposs_real["any"]:.3f}); worst col '
+          f'{max(imposs["by_col"], key=imposs["by_col"].get)} '
+          f'{max(imposs["by_col"].values()):.3f}')
+    # proxy-member dependence: how well the other columns predict each
+    # detected class's member label (balanced acc; chance 1/n_members).
+    # tau=1 should drive the synthetic value to the real one's chance level.
+    if detected:
+        pm_dep_syn = proxy_member_dependence(syn_cat, detected,
+                                             exclude=(s_idx, t_idx))
+        pm_dep_real = proxy_member_dependence(tr_c, detected,
+                                              exclude=(s_idx, t_idx))
+        print('  proxy-member dependence (syn/real): '
+              + '; '.join(f'{describe_classes([d], CATEGORICAL, enc)[0]} '
+                          f'{s:.3f}/{r:.3f}'
+                          for d, s, r in zip(detected, pm_dep_syn,
+                                             pm_dep_real)))
+    else:
+        pm_dep_syn = pm_dep_real = None
 
     # ---- Promotion gates (config thresholds) ------------------------------
     gates = {
@@ -723,6 +775,10 @@ def main():
             'proxy_latent_probe': proxy_probe,
             'sex_proxy_joint_tv': sp_joint_tv,
             'decouple_curve': decouple_results,
+            'impossible_combination_rate': imposs,
+            'impossible_combination_rate_real': imposs_real,
+            'proxy_member_dependence_syn': pm_dep_syn,
+            'proxy_member_dependence_real': pm_dep_real,
             'promotion_gates': gate_pass,
             'syn_income_rate': syn_income_rate,
             'real_income_rate': real_income_rate},
