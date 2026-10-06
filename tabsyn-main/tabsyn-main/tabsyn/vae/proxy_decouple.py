@@ -15,9 +15,9 @@ DIFFERENT groups are merged (a column whose flagged categories all point to
 the same group has nothing to decouple).
 
 Two uses:
-  * post-hoc  : merge_proxies() before training, expand_merged() after
-                generation, sweeping tau (0 = member follows the synthetic
-                S, 1 = member independent of the row).
+  * post-hoc  : decoupling_curve() in tabsyn.vae.temper re-draws the
+                member label on the decoded rows, sweeping tau
+                (1 = real coupling, 0 = member independent of the row).
   * in-model  : proxy_member_labels() supplies the per-row member label that
                 the gradient-reversal term in flip_fairness.proxy_decoupling_loss
                 hides from the other tokens / decoded columns.
@@ -101,82 +101,6 @@ def describe_classes(classes, col_names=None, labels=None):
                         f"support {cl['support'][c]:.3f})"
                         for c in cl['members'])
         out.append(f'{name}: [{mem}]')
-    return out
-
-
-# --------------------------------------------------------------------------
-# Post-hoc: merge before training, expand after generation
-# --------------------------------------------------------------------------
-
-def merge_proxies(cat, classes):
-    """Copy of `cat` with each class's members mapped to its representative
-    code. The category count is unchanged (non-representative members just
-    never occur), so the model architecture is untouched."""
-    out = np.array(cat, copy=True)
-    for cl in classes:
-        j = cl['col']
-        out[np.isin(out[:, j], cl['members']), j] = cl['rep']
-    return out
-
-
-def fit_member_tables(cat, s_idx, classes, n_groups=None, alpha=1.0):
-    """P(member | merged class, S=g) and the marginal P(member | class),
-    from the real training data, with add-alpha smoothing.
-
-    Returns a list aligned with `classes` of dicts
-      {'cond': (n_groups, n_members) array, 'marg': (n_members,) array}.
-    """
-    cat = np.asarray(cat)
-    s = cat[:, s_idx]
-    if n_groups is None:
-        n_groups = int(s.max()) + 1
-    tables = []
-    for cl in classes:
-        j, mem = cl['col'], cl['members']
-        in_cls = np.isin(cat[:, j], mem)
-        cond = np.zeros((n_groups, len(mem)))
-        for g in range(n_groups):
-            for k, c in enumerate(mem):
-                cond[g, k] = ((s == g) & (cat[:, j] == c)).sum() + alpha
-        cond /= cond.sum(1, keepdims=True)
-        marg = np.array([(cat[in_cls, j] == c).sum() + alpha for c in mem],
-                        dtype=float)
-        marg /= marg.sum()
-        tables.append({'cond': cond, 'marg': marg})
-    return tables
-
-
-def expand_merged(syn_cat, s_syn, classes, tables, tau, rng=None):
-    """Expand each merged class back into its members.
-
-    For each synthetic row in a merged class: with probability 1 - tau the
-    member is drawn from P(member | S = the row's synthetic S) - consistent
-    labels, the proxy follows S; with probability tau it is drawn from the
-    marginal P(member | class) - independent of the row (tau = 1 yields the
-    paper's 'male wives' at the real member shares).
-
-    Args:
-        syn_cat: (n, k) synthetic codes (merged classes at their rep code).
-        s_syn: (n,) synthetic protected values used for the consistent draw.
-        tau: decoupling strength in [0, 1].
-    Returns:
-        new (n, k) array; syn_cat is not modified.
-    """
-    rng = rng or np.random.default_rng(0)
-    out = np.array(syn_cat, copy=True)
-    s_syn = np.asarray(s_syn).astype(int)
-    for cl, tb in zip(classes, tables):
-        j, mem = cl['col'], np.array(cl['members'])
-        rows = np.where(np.isin(out[:, j], mem))[0]
-        if len(rows) == 0:
-            continue
-        decouple = rng.random(len(rows)) < tau
-        probs = np.where(decouple[:, None], tb['marg'][None, :],
-                         tb['cond'][np.clip(s_syn[rows], 0,
-                                            len(tb['cond']) - 1)])
-        u = rng.random((len(rows), 1))
-        pick = (probs.cumsum(1) > u).argmax(1)
-        out[rows, j] = mem[pick]
     return out
 
 

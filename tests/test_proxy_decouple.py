@@ -12,8 +12,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..', 'tabsyn-main', 'tabsyn-main'))
 
-from tabsyn.vae.proxy_decouple import (detect_proxy_classes, merge_proxies,
-                                       fit_member_tables, expand_merged,
+from tabsyn.vae.proxy_decouple import (detect_proxy_classes,
                                        proxy_member_labels,
                                        impossible_combination_rate,
                                        proxy_member_dependence)
@@ -33,7 +32,7 @@ def toy_table(n=4000, seed=0):
 
 
 # --------------------------------------------------------------------------
-# Detection / merge / expand
+# Detection
 # --------------------------------------------------------------------------
 
 def test_detect_finds_cross_group_class_only():
@@ -56,38 +55,6 @@ def test_detect_skips_same_group_and_excluded():
     cat2 = np.stack([s, one_sided], axis=1)
     cls = detect_proxy_classes(cat2, s_idx=0)
     assert cls == []
-
-
-def test_merge_and_expand_tau0_is_consistent():
-    cat = toy_table()
-    cls = detect_proxy_classes(cat, s_idx=0)
-    tb = fit_member_tables(cat, 0, cls)
-    merged = merge_proxies(cat, cls)
-    assert set(np.unique(merged[:, 1])) == {0, 2}
-    out = expand_merged(merged, cat[:, 0], cls, tb, tau=0.0)
-    # tau=0: member follows S -> reproduces the real column almost exactly
-    assert (out[:, 1] == cat[:, 1]).mean() > 0.99
-    assert impossible_combination_rate(out, cat, 0)['any'] < 0.01
-
-
-def test_expand_tau1_decouples_member_from_features():
-    cat = toy_table()
-    cls = detect_proxy_classes(cat, s_idx=0)
-    tb = fit_member_tables(cat, 0, cls)
-    out = expand_merged(merge_proxies(cat, cls), cat[:, 0], cls, tb, tau=1.0)
-    # rows outside the class are untouched
-    other = cat[:, 1] == 2
-    assert (out[other, 1] == 2).all()
-    # member shares within the class match the real marginal
-    in_cls = out[:, 1] != 2
-    real_share = (cat[cat[:, 1] != 2, 1] == 0).mean()
-    assert abs((out[in_cls, 1] == 0).mean() - real_share) < 0.04
-    # 'male wives' appear (about half the spouse rows)
-    assert impossible_combination_rate(out, cat, 0)['any'] > 0.15
-    # and the member is no longer predictable from the other feature
-    dep = proxy_member_dependence(out, cls, exclude=(0,))[0]
-    dep_real = proxy_member_dependence(cat, cls, exclude=(0,))[0]
-    assert dep_real > 0.7 and dep < 0.56
 
 
 def test_member_labels():

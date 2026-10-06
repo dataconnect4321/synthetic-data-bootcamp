@@ -1,106 +1,23 @@
-"""Tempered protected-attribute sampling: a post-processing baseline.
+"""Post-hoc proxy decoupling on the decoded rows.
 
-The synthetic protected column is drawn from a tempered distribution
-    P_tau(s) ∝ P(s)^(1/tau) * pi(s)
-where P is the decoder's softmax for the protected column, pi the real
-group shares, and tau the temperature. tau=1 samples the model's own
-distribution; tau=0 samples the real shares directly (full tempering).
+A merged column (Adult: `relationship`) carries a sex-specific label
+(Husband vs Wife) that is a near-copy of the TRUE sex. Post-hoc
+decoupling re-draws that label on the decoded rows that hold it, from
+    Q_tau(label) ∝ P(label | other non-sex columns)^tau * pi(label)
+with P a real-trained class-balanced classifier (a likelihood ratio) and
+pi the real Husband/Wife share. tau=1 keeps the real coupling (sampled);
+tau=0 makes the label independent of every other column. The column's
+marginal is untouched. The generated S column never enters: FLIP does not
+reconstruct S, so the synthetic S is invented and conditioning or scoring
+on it would measure nothing.
 
-Because it only transforms the DP model's output probabilities, it costs
-no extra privacy budget. Sweeping tau traces a BER-vs-fidelity curve that
-any in-model fairness method has to beat.
+Scored on tier-1 decodes, where each row's source (true) sex is known:
+leakage = how well a real-trained classifier recovers the true sex from
+the decoded non-sex columns. The leakage-vs-tau curve is the target the
+in-model version (PROXY_WEIGHT, strength lambda) has to match.
 """
 
 import numpy as np
-
-
-def temper_protected(P, pi, tau):
-    """Tempered group probabilities.
-
-    Args:
-        P: (n, K) softmax probabilities from the decoder's protected column.
-        pi: (K,) reference group shares (e.g. the real data's).
-        tau: temperature in [0, 1]. tau=1 -> P unchanged; tau=0 -> pi for
-             every row (the synthetic column carries no per-row signal).
-
-    Returns:
-        (n, K) tempered probabilities, rows normalized to sum 1.
-    """
-    P = np.asarray(P, dtype=np.float64)
-    pi = np.asarray(pi, dtype=np.float64)
-    if tau == 1.0:
-        return P / P.sum(axis=1, keepdims=True)
-    if tau <= 0.0:
-        Q = np.tile(pi, (P.shape[0], 1))
-        return Q / Q.sum(axis=1, keepdims=True)
-    # P^tau * pi, normalized: tau=1 -> P; tau=0 -> pi (flat in P)
-    with np.errstate(divide='ignore'):
-        logQ = tau * np.log(np.clip(P, 1e-12, None)) \
-            + np.log(np.clip(pi, 1e-12, None))
-    logQ -= logQ.max(axis=1, keepdims=True)
-    Q = np.exp(logQ)
-    return Q / Q.sum(axis=1, keepdims=True)
-
-
-def temper_curve(vae, ref_num, ref_cat, syn_num, syn_cat, s_idx, taus,
-                 device='cpu', seed=0):
-    """BER-vs-fidelity curve for the tempered-sampling baseline.
-
-    For each tau: draw the protected column from the tempered distribution,
-    then score BER (an adversary predicting the DRAWN column from the other
-    synthetic columns) and the categorical share TV of the protected column
-    (vs the real shares). Everything else in the synthetic table is fixed -
-    only the protected column's assignment changes.
-
-    Returns a list of {'tau', 'ber', 's_share_tv'} dicts.
-    """
-    import torch
-    from tabsyn.vae.paper_metrics import fairness_scores
-    rng = np.random.default_rng(seed)
-    pi = np.bincount(ref_cat[:, s_idx]) / len(ref_cat)
-    K = len(pi)
-    # decoder softmax for the protected column, recomputed on the synthetic rows
-    with torch.no_grad():
-        out = vae.forward_with_stages(torch.tensor(syn_num).float().to(device),
-                                      torch.tensor(syn_cat).long().to(device))
-        logits = out['recon_x_cat'][s_idx]
-        P = torch.softmax(logits, dim=-1).cpu().numpy()
-    if P.shape[1] != K:
-        raise ValueError('protected column width mismatch')
-    results = []
-    for tau in taus:
-        Q = temper_protected(P, pi, tau)
-        s_new = np.array([rng.choice(K, p=Q[i] / Q[i].sum())
-                          for i in range(len(Q))])
-        cat = syn_cat.copy()
-        cat[:, s_idx] = s_new
-        fs = fairness_scores(syn_num, cat, s_idx, ref=(ref_num, ref_cat),
-                             n_splits=2)
-        p = np.bincount(s_new, minlength=K) / len(s_new)
-        results.append({'tau': float(tau), 'ber': fs['ber'],
-                        's_share_tv': float(0.5 * np.abs(p - pi).sum())})
-    return results
-
-
-
-# --------------------------------------------------------------------------
-# Post-hoc proxy decoupling
-# --------------------------------------------------------------------------
-# A merged column (Adult: `relationship`) carries a sex-specific label
-# (Husband vs Wife) that is a near-copy of the TRUE sex. Post-hoc
-# decoupling re-draws that label on the decoded rows that hold it, from
-#     Q_tau(label) ∝ P(label | other non-sex columns)^tau * pi(label)
-# with P a real-trained class-balanced classifier (a likelihood ratio) and
-# pi the real Husband/Wife share. tau=1 keeps the real coupling (sampled);
-# tau=0 makes the label independent of every other column. The column's
-# marginal is untouched. The generated S column never enters: FLIP does not
-# reconstruct S, so the synthetic S is invented and conditioning or scoring
-# on it would measure nothing.
-#
-# Scored on tier-1 decodes, where each row's source (true) sex is known:
-# leakage = how well a real-trained classifier recovers the true sex from
-# the decoded non-sex columns. The leakage-vs-tau curve is the target the
-# in-model version (PROXY_WEIGHT, strength lambda) has to match.
 
 def sublabel_conditional(ref_num, ref_cat, num, cat, s_idx, proxy_idx,
                          pos_code, neg_code, seed=0):

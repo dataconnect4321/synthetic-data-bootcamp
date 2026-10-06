@@ -404,53 +404,6 @@ def shared_mean_ratio(rep: torch.Tensor) -> float:
     return float(rep.mean(dim=0).pow(2).sum() / (var + 1e-12))
 
 
-def rbf_mmd(A: torch.Tensor, B: torch.Tensor, bandwidths=(0.5, 1.0, 2.0)) -> torch.Tensor:
-    """Multi-bandwidth RBF-kernel MMD^2 between two groups' representations.
-
-    CKA^T compares only second moments (linear covariance shape) and the
-    mean term only first moments, so a group difference that lives in
-    higher-order or nonlinear structure is invisible to both. An RBF-kernel
-    MMD sees any distributional difference, which is the blind spot where
-    sex bias survives disentanglement.
-
-    A single median-heuristic bandwidth gives a faint signal at typical
-    latent sizes (MMD^2 ~ 0.004 for a bimodal difference at 80 dims), so
-    the loss sums over several bandwidths {0.5, 1, 2} x the median pairwise
-    distance to cover both fine and coarse structure.
-    """
-    n = min(256, A.shape[0], B.shape[0])
-    Z = torch.cat([A[:n], B[:n]], dim=0)
-    with torch.no_grad():
-        d2 = torch.cdist(Z, Z).pow(2)
-        med = d2.median().clamp(min=1e-12).sqrt()
-    d2ab = torch.cdist(A, B).pow(2)
-    d2aa = torch.cdist(A, A).pow(2)
-    d2bb = torch.cdist(B, B).pow(2)
-    m = A.shape[0] * (A.shape[0] - 1)
-    n_ = B.shape[0] * (B.shape[0] - 1)
-    total = 0.0
-    for c in bandwidths:
-        sigma2 = 2 * (c * med) ** 2
-        Kaa, Kbb, Kab = torch.exp(-d2aa / sigma2), torch.exp(-d2bb / sigma2), torch.exp(-d2ab / sigma2)
-        total = total + ((Kaa.sum() - Kaa.diagonal().sum()) / m
-                         + (Kbb.sum() - Kbb.diagonal().sum()) / n_
-                         - 2 * Kab.mean())
-    return total
-
-
-def pairwise_mmd(rep: torch.Tensor, group: torch.Tensor) -> torch.Tensor:
-    """Mean MMD^2 over ALL pairs of protected groups (any group count)."""
-    blocks = _group_slices(rep, group)
-    if len(blocks) < 2:
-        return torch.tensor(0.0, device=rep.device)
-    total, n_pairs = 0.0, 0
-    for i in range(len(blocks)):
-        for j in range(i + 1, len(blocks)):
-            total = total + rbf_mmd(blocks[i], blocks[j])
-            n_pairs += 1
-    return total / n_pairs
-
-
 class GradientReversal(torch.autograd.Function):
     """Identity forward, negated backward: the classic GRL layer."""
 
@@ -488,23 +441,6 @@ class AdversaryHead(torch.nn.Module):
         return self.net(gradient_reversal(x, lambd))
 
 
-def adversary_loss(adv_head, stages, group, s_idx, lambd=1.0,
-                  t_idx=None):
-    """Per-record CE of the adversary predicting S from the decoded
-    non-protected logits (numerical + categorical, protected column
-    excluded). Batch MEAN of per-row terms (scale-invariant to batch size,
-    matching the other Phase-2 losses); still per-record decomposable."""
-    feats = [stages['recon_x_num']]
-    for i, c in enumerate(stages['recon_x_cat']):
-        if i == s_idx:
-            continue
-        feats.append(c)
-    x = torch.cat(feats, dim=1)
-    logits = adv_head(x, lambd)
-    return torch.nn.functional.cross_entropy(logits, group,
-                                             reduction='mean')
-
-
 # --------------------------------------------------------------------------
 # In-model proxy decoupling
 # --------------------------------------------------------------------------
@@ -512,7 +448,7 @@ def adversary_loss(adv_head, stages, group, s_idx, lambd=1.0,
 # (Husband vs Wife) that is a near-copy of S. Instead of re-drawing that
 # label after generation (tabsyn.vae.temper.decouple_curve, strength tau),
 # these terms make it independent of the OTHER tokens inside the VAE
-# (strength lambda), and CKA^T/MMD is applied to the non-proxy tokens only.
+# (strength lambda), and CKA^T is applied to the non-proxy tokens only.
 
 def cat_token_index(d_num, j, stage='mu'):
     """Token position of categorical column j. mu_z is laid out
@@ -630,7 +566,6 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
                                      s_idx=None,
                                      mean_weight: float = 1.0,
                                      binary_w1: bool = True,
-                                     mmd_weight: float = 0.0,
                                      exclude_cat=(),
                                      t_idx=None,
                                      target_in_fairness=False) -> torch.Tensor:
@@ -661,7 +596,7 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
                columns (its logits are skipped at the detokenizer stage
                since they are supervised by the uniform attribute loss).
         exclude_cat: categorical columns treated as proxies: their tokens are
-               dropped from mu_z and h and their logits skipped, so CKA^T/MMD
+               dropped from mu_z and h and their logits skipped, so CKA^T
                act on the non-proxy representation only (the proxy is
                handled by proxy_independence_loss instead).
 
@@ -681,12 +616,7 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
                             for j in exclude_cat])
     mu_flat = mu.reshape(mu.shape[0], -1)
     h_flat = h.reshape(h.shape[0], -1)
-    if mmd_weight:
-        # nonlinear-separability term at the latent stage
-        losses.append(disentanglement_loss(mu_flat, group, mean_weight)
-                       + mmd_weight * pairwise_mmd(mu_flat, group))
-    else:
-        losses.append(disentanglement_loss(mu_flat, group, mean_weight))
+    losses.append(disentanglement_loss(mu_flat, group, mean_weight))
 
     # Stage 2: detokenizer - feature-wise, mean-aggregated
     feature_losses = []
@@ -714,12 +644,8 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
         losses.append(torch.stack(feature_losses).mean())
 
     # Stage 3: decoder output. The decoder is nonlinear and can put group
-    # differences back in, so the MMD term applies here too when enabled.
-    if mmd_weight:
-        losses.append(disentanglement_loss(h_flat, group, mean_weight)
-                      + mmd_weight * pairwise_mmd(h_flat, group))
-    else:
-        losses.append(disentanglement_loss(h_flat, group, mean_weight))
+    # differences back in, so it gets the same CKA^T + mean treatment.
+    losses.append(disentanglement_loss(h_flat, group, mean_weight))
 
     return torch.stack(losses).mean()
 

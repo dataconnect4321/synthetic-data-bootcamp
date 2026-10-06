@@ -32,8 +32,6 @@ from tabsyn.vae.flip_fairness import (
     wasserstein_1d,
     binary_logit_gap_w1,
     shared_mean_ratio,
-    rbf_mmd,
-    pairwise_mmd,
     sliced_wasserstein_distance,
     uniform_attribute_loss,
     uniform_attribute_loss_per_sample,
@@ -349,81 +347,6 @@ def test_shared_mean_ratio():
     x = torch.randn(500, 8)
     assert shared_mean_ratio(x) < 0.05
     assert shared_mean_ratio(x + 50.0) > 100
-
-
-# --------------------------------------------------------------------------
-# rbf_mmd / pairwise_mmd
-# --------------------------------------------------------------------------
-
-def test_mmd_zero_for_identical_positive_for_scale():
-    """MMD^2 ~ 0 for identical groups and positive for a pure scale
-    difference - the case CKA^T scores as identical (same covariance shape
-    up to scale) and the mean term misses (same mean)."""
-    torch.manual_seed(0)
-    A = torch.randn(128, 80)
-    same = rbf_mmd(A, A.clone())
-    scaled = rbf_mmd(A, A * 1.5)
-    assert abs(same.item()) < 0.05
-    assert scaled.item() > 0.05
-    # CKA^T is blind to it
-    assert linear_cka_t(A, A * 1.5).item() > 0.99
-
-
-def test_mmd_positive_for_bimodal_difference():
-    """A bimodal group difference invisible to both CKA^T and the mean
-    term must still give positive MMD^2."""
-    torch.manual_seed(0)
-    A = torch.randn(128, 80)
-    B = torch.cat([torch.randn(64, 80) + 2.0, torch.randn(64, 80) - 2.0])
-    assert rbf_mmd(A, B).item() > 0.05
-
-
-def test_pairwise_mmd_three_groups():
-    torch.manual_seed(0)
-    rep = torch.randn(90, 16)
-    rep[30:60] += 1.0
-    rep[60:] -= 1.0
-    groups = torch.repeat_interleave(torch.arange(3), 30)
-    val = pairwise_mmd(rep, groups)
-    assert val.item() > 0.0
-    # all-same groups -> ~0
-    same = pairwise_mmd(torch.randn(90, 16), groups)
-    assert abs(same.item()) < 0.1
-
-
-def test_mmd_gradient_flows():
-    torch.manual_seed(0)
-    A = torch.randn(64, 16, requires_grad=True)
-    B = torch.randn(64, 16) + 0.5
-    rbf_mmd(A, B).backward()
-    assert A.grad is not None and torch.isfinite(A.grad).all()
-    assert A.grad.abs().sum() > 0
-
-
-def test_mmd_routed_through_group_level_pass_under_dp():
-    """Under DP the MMD term is batch-coupled (one record changes every
-    other record's kernel row), so it must ride pass 2's GroupLevelDPMechanism
-    with the SWD/CKA^T terms - never Opacus's per-sample pass. The training
-    loop routes it there because multi_stage_disentanglement_loss is called
-    inside the pass-2 block; this test pins that the loss is a single scalar
-    whose gradient cannot be decomposed per sample (kernel rows mix records)."""
-    torch.manual_seed(0)
-    n = 32
-    rep = torch.randn(n, 8, requires_grad=True)
-    other = torch.randn(n, 8)
-    groups = torch.randint(0, 2, (n,))
-    # emulate the batch coupling: changing row 0's group-mate changes row 0's
-    # gradient through the kernel, unlike a per-sample loss
-    loss = pairwise_mmd(rep, groups)
-    loss.backward()
-    g1 = rep.grad.clone()
-    rep.grad = None
-    rep2 = rep.detach().clone()
-    rep2[1] += 1.0  # perturb one OTHER row
-    rep3 = rep2.clone().requires_grad_(True)
-    pairwise_mmd(rep3, groups).backward()
-    assert not torch.allclose(g1[0], rep3.grad[0], atol=1e-8), \
-        'row 0 gradient should depend on other rows (batch-coupled)'
 
 
 # --------------------------------------------------------------------------

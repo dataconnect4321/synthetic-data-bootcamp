@@ -127,8 +127,6 @@ def build_params(args):
         'WEIGHT_DECAY': args.weight_decay,
         'LS_MODE': args.ls_mode,
         'RECON_S': args.recon_s,
-        'MMD_WEIGHT': args.mmd_weight,
-        'ADV_WEIGHT': args.adv_weight,
         'MARGINAL_WEIGHT': args.marginal_weight,
         'PROXY_WEIGHT': args.proxy_weight,
         'PROXY_MODE': args.proxy_mode,
@@ -329,27 +327,18 @@ def main():
     ap.add_argument('--save-phase1', default=None,
                     help='save the Phase-1(+Phase-2) VAE checkpoint to this '
                          'path (use with --phase2-epochs 0 to bank Phase 1)')
-    ap.add_argument('--mmd-weight', type=float, default=0.0,
-                    help='RBF-MMD^2 weight on the latent (nonlinear '
-                         'separability; the CKA/mean blind spot)')
-    ap.add_argument('--adv-weight', type=float, default=0.0,
-                    help='gradient-reversal adversary weight (per-record, '
-                         'DP-safe), ramped over Phase 2')
     ap.add_argument('--marginal-weight', type=float, default=0.0,
                     help='marginal-matching penalty weight (shares + '
                          'numeric quantiles)')
     ap.add_argument('--recon-s', action='store_true',
                     help='keep the protected attribute in the reconstruction '
                          'CE so the synthetic S column is real (needed for '
-                         'label validity, share TV, and the temper baseline)')
-    ap.add_argument('--temper-tau', type=float, default=None,
-                    help='post-processing baseline: temper the protected '
-                         'column sampling at this tau (requires --recon-s); '
-                         'sweeps the BER-vs-fidelity curve')
+                         'label validity, share TV, and the decoupling '
+                         'baselines)')
     ap.add_argument('--proxy-col', default=None,
                     help='merged column whose sex-specific label is decoupled; '
                          'default: auto-detect via detect_proxy_classes '
-                         '(P(S|category) >= 0.95, min support 1%)')
+                         '(P(S|category) >= 0.95, min support 1%%)')
     ap.add_argument('--proxy-labels', default=None,
                     help='the two sex-specific labels of --proxy-col; '
                          'default: auto-detected')
@@ -365,7 +354,7 @@ def main():
                     help='hsic (batch-coupled) or gradient-reversal '
                          'adversary (per-record)')
     ap.add_argument('--proxy-exclude-disent', action='store_true',
-                    help='apply CKA^T/MMD to the non-proxy tokens only')
+                    help='apply CKA^T to the non-proxy tokens only')
     ap.add_argument('--target-in-fairness', action='store_true',
                     help='include the target column\'s logits in the '
                          'detokenizer-stage CKA/mean/W1 terms (default: '
@@ -455,7 +444,7 @@ def main():
     print('\n[Stage 1] FLIP VAE')
     # The checkpoint goes INTO train_flip: it skips Phase-1 epochs but still
     # builds the sampler, optimizer, frozen reference encoder, and runs
-    # Phase 2 - so --lam/--mmd-weight still take effect per setting.
+    # Phase 2 - so --lam still takes effect per setting.
     vae, accountant, group_mech = demo.train_flip(
         X_num, X_cat, categories, s_idx, params, device,
         phase1_checkpoint=args.phase1_checkpoint,
@@ -646,17 +635,6 @@ def main():
                       f"{p['importance']:.3f}/{p['syn_dependence']:.3f}"
                       for p in proxies))
 
-    # ---- Tempered-sampling baseline ---------------------------------------
-    temper_results = None
-    if args.temper_tau is not None:
-        from tabsyn.vae.temper import temper_curve
-        temper_results = temper_curve(vae, tr_n, tr_c, syn_num, syn_cat,
-                                      s_idx, [1.0, 0.75, 0.5, 0.25, 0.0],
-                                      device=device)
-        print('  temper baseline (tau: ber / s-share TV): '
-              + '; '.join(f"{r['tau']}: {r['ber']:.3f}/{r['s_share_tv']:.3f}"
-                          for r in temper_results))
-
     # ---- Proxy decoupling ----------------------------------------------
     # Scored against the SOURCE rows' true sex (tier-1 only): the generated
     # S column is invented by design, so it says nothing about the proxy.
@@ -780,7 +758,6 @@ def main():
             'outcome_replication': rel,
             'match_valid': match_valid,
             'proxy_ranking': proxies,
-            'temper_curve': temper_results,
             'proxy_latent_probe': proxy_probe,
             'sex_proxy_joint_tv': sp_joint_tv,
             'decouple_curve': decouple_results,

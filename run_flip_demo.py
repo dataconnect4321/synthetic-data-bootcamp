@@ -41,7 +41,6 @@ from tabsyn.vae.flip_fairness import (
     sliced_wasserstein_distance,
     uniform_attribute_loss,
     uniform_attribute_loss_per_sample,
-    adversary_loss,
     proxy_sublabel,
     proxy_independence_loss,
     proxy_adversary_loss,
@@ -77,15 +76,6 @@ TRADEOFF_PARAMS = {
     # W1 logit-gap term instead of CKA^T (which has nothing to compare for
     # 2 logits).
     'BINARY_W1': True,
-    # Weight of the RBF-kernel MMD^2 between the two groups' latents.
-    # Targets nonlinear separability, which neither CKA^T (covariance shape)
-    # nor the mean term (first moments) can see.
-    'MMD_WEIGHT': 0.0,
-    # In-model adversary: gradient-reversal head from the decoded
-    # non-protected logits to S, per-record CE (DP-safe, pass 1). Ramped
-    # linearly over Phase 2 so the representation is established before
-    # the scrubbing pressure peaks.
-    'ADV_WEIGHT': 0.0,
     # Lambda ramp: LAMBDA_FAIR ramps linearly from 0 over the first
     # LAMBDA_RAMP_FRAC of Phase 2, so the fairness pressure grows after the
     # Phase-2 representation has stabilized (guards against collapse).
@@ -99,7 +89,7 @@ TRADEOFF_PARAMS = {
     # independent of the other tokens. 'hsic' is batch-coupled (pass 2);
     # 'adv' is a per-record gradient-reversal adversary (pass 1). Ramped
     # like LAMBDA_FAIR. PROXY_EXCLUDE_DISENT drops the proxy token from the
-    # CKA^T/MMD terms so they act on the non-proxy representation only.
+    # CKA^T terms so they act on the non-proxy representation only.
     'PROXY_WEIGHT': 0.0,
     'PROXY_MODE': 'hsic',
     'PROXY_IDX': None,
@@ -396,29 +386,6 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
     total_epochs = phase1_epochs + params['PHASE2_EPOCHS']
     reference_encoder = None
 
-    # In-model adversary head (Phase 2 only): gradient reversal from the
-    # decoded non-protected logits to S. Its loss is per-record, so under DP
-    # it rides Opacus's pass 1 with the other per-sample losses.
-    adv_head = None
-    adv_params = []
-    if params.get('ADV_WEIGHT', 0):
-        from tabsyn.vae.flip_fairness import AdversaryHead
-        d_in = d_numerical + sum(categories) - categories[s_idx]
-        adv_head = AdversaryHead(d_in, categories[s_idx]).to(device)
-        adv_params = list(adv_head.parameters())
-        if params['USE_DP']:
-            # adversary parameters get per-sample grads like everything else
-            pass
-        else:
-            optimizer.add_param_group({'params': adv_params})
-    if params.get('ADV_WEIGHT', 0) and params['USE_DP']:
-        # Opacus wrapped the model BEFORE the head existed; add its params as
-        # a plain group - the head is a standard MLP, so Opacus's native
-        # samplers cover it once it is inside the wrapped module. Simplest
-        # correct route: attach to the wrapped model's module tree.
-        raw.add_module('adv_head', adv_head)
-        optimizer.add_param_group({'params': adv_params})
-
     # Proxy decoupling setup (Phase 2 only).
     proxy_w = params.get('PROXY_WEIGHT', 0) or 0
     proxy_idx = params.get('PROXY_IDX')
@@ -482,14 +449,6 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
             # per-sample terms, so Opacus's per-sample clipping bounds each
             # record's influence on this gradient.
             loss_private = mse + ce + cur_beta * kld + loss_s
-            if adv_head is not None and phase == 2:
-                # linear ramp over Phase 2: 0 -> ADV_WEIGHT
-                ramp = (epoch - phase1_epochs + 1) / max(1, params['PHASE2_EPOCHS'])
-                adv_w = params['ADV_WEIGHT'] * min(1.0, ramp)
-                loss_adv = adversary_loss(adv_head, stages,
-                                          bcat[:, s_idx].long(), s_idx,
-                                          lambd=1.0)
-                loss_private = loss_private + adv_w * loss_adv
             if proxy_head is not None and phase == 2:
                 p2 = (epoch - phase1_epochs) / max(1, params['PHASE2_EPOCHS'])
                 pw = proxy_w * min(1.0, p2 / max(
@@ -534,7 +493,6 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                     stages, bcat[:, s_idx].long(), s_idx=s_idx,
                     mean_weight=params.get('MEAN_SHIFT_WEIGHT', 1.0),
                     binary_w1=params.get('BINARY_W1', True),
-                    mmd_weight=params.get('MMD_WEIGHT', 0.0),
                     exclude_cat=exclude_cat,
                     t_idx=params.get('TARGET_IDX'),
                     target_in_fairness=params.get('TARGET_IN_FAIRNESS',

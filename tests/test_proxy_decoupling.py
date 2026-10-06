@@ -143,7 +143,7 @@ def test_proxy_adversary_masked_and_per_record():
 
 
 # --------------------------------------------------------------------------
-# CKA^T / MMD on the non-proxy representation
+# CKA^T on the non-proxy representation
 # --------------------------------------------------------------------------
 
 def test_disentanglement_exclude_cat_ignores_proxy():
