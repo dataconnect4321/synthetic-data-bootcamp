@@ -249,7 +249,8 @@ class RDPAccountant:
         return best_eps, best_alpha
 
 
-def linear_cka_t(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+def linear_cka_t(A: torch.Tensor, B: torch.Tensor,
+                 center: str = 'group') -> torch.Tensor:
     """Transposed linear CKA between two representation matrices.
 
     FLIP compares activation patterns across protected groups:
@@ -260,24 +261,33 @@ def linear_cka_t(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 
         CKA^T(A, B) = tr(K H L H) / sqrt(tr(K H K H) tr(L H L H))
 
-    A @ H subtracts each ROW's mean across the activations, so centering
-    rows (dim=1) and taking <A^T A, B^T B>_F / (||A^T A|| ||B^T B||)
-    is exactly Eqs. 5-6 (the (n-1)^2 factors cancel). Groups may differ
-    in size. Centering columns instead (dim=0) would turn A^T A into a
-    within-group covariance and discard each group's mean, so a group
-    whose activations are merely shifted would still score ~1.
+    center='row' (paper-literal, Eqs. 5-6): A @ H subtracts each ROW's
+    mean across the activations, so centering rows (dim=1) and taking
+    <A^T A, B^T B>_F / (||A^T A|| ||B^T B||) is exactly Eqs. 5-6 (the
+    (n-1)^2 factors cancel). Groups may differ in size.
+
+    center='group' (default, used by the final Adult setup): centering
+    columns (dim=0) turns A^T A into a within-group covariance. It discards
+    each group's mean, so a group whose activations are merely shifted
+    would still score ~1 - which is why disentanglement_loss pairs it with
+    the normalized group mean gap (mean_weight). Row centering was not used
+    for the final runs because a large offset shared by all groups
+    (measured shared-mean ratio ~2.2 on Adult's latent) dominates the
+    row-centred Gram and drowns out the group signal.
 
     Args:
         A: (n_A, p) activations of group A (rows = samples).
         B: (n_B, p) activations of group B (n_B may differ from n_A).
+        center: 'group' (dim=0) or 'row' (dim=1, paper-literal).
 
     Returns:
         Scalar CKA^T value in [0, 1]. Higher = more similar covariance
         structure; disentanglement *maximizes* this (equivalently
         minimizes its negative).
     """
-    A = A - A.mean(dim=1, keepdim=True)  # = A @ H: centre across activations
-    B = B - B.mean(dim=1, keepdim=True)
+    dim = 1 if center == 'row' else 0
+    A = A - A.mean(dim=dim, keepdim=True)
+    B = B - B.mean(dim=dim, keepdim=True)
 
     AA = A.t() @ A
     BB = B.t() @ B
@@ -287,30 +297,58 @@ def linear_cka_t(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     return (AA * BB).sum() / denom
 
 
-def disentanglement_loss(rep: torch.Tensor, group: torch.Tensor) -> torch.Tensor:
-    """Negative mean pairwise CKA^T between protected groups (D' in Eq. 10).
+def _group_slices(rep: torch.Tensor, group: torch.Tensor):
+    """Per-group row blocks with at least 2 samples (covariance needs 2)."""
+    blocks = []
+    for g in torch.unique(group):
+        idx = torch.where(group == g)[0]
+        if idx.numel() >= 2:
+            blocks.append(rep[idx])
+    return blocks
+
+
+def group_mean_shift(A: torch.Tensor, B: torch.Tensor,
+                     eps: float = 1e-8) -> torch.Tensor:
+    """Normalized group mean gap ||mu_A - mu_B||^2 / pooled variance.
+
+    CKA^T centers each group on its own mean (dim=0), so it is blind to
+    a pure mean offset between groups. This term restores that signal:
+    the squared distance between the group means, divided by the total
+    pooled within-group variance (sum over features), so it is
+    dimensionless and independent of the representation's scale.
+    """
+    nA, nB = A.shape[0], B.shape[0]
+    pooled = ((nA - 1) * A.var(dim=0) + (nB - 1) * B.var(dim=0)) / (nA + nB - 2)
+    gap = (A.mean(dim=0) - B.mean(dim=0)).pow(2).sum()
+    return gap / (pooled.sum() + eps)
+
+
+def disentanglement_loss(rep: torch.Tensor, group: torch.Tensor,
+                         mean_weight: float = 0.0,
+                         center: str = 'group') -> torch.Tensor:
+    """Negative mean pairwise CKA^T between protected groups (D' in Eq. 10),
+    plus an optional group mean-shift penalty.
 
     Args:
         rep: (n, p) representation matrix (latent means, detokenized
              logits, or decoder output) for the current batch.
         group: (n,) integer protected-group labels for the batch.
+        mean_weight: weight of the normalized mean-difference term
+             (group_mean_shift). 0 gives the paper's pure -CKA^T.
+        center: CKA^T centering, 'group' (default) or 'row' (see
+             linear_cka_t).
 
     Returns:
-        Scalar loss; minimizing it makes the activation patterns of all
-        protected groups converge (HSIC-style independence). None when
-        rep has <= 2 columns: after centering across activations, two
-        columns leave a rank-1 Gram proportional to [[1,-1],[-1,1]] for
-        every group, so CKA^T is constant (no signal).
+        Scalar loss; minimizing it makes the activation patterns (and, with
+        mean_weight > 0, the means) of all protected groups converge
+        (HSIC-style independence). None under center='row' when rep has
+        <= 2 columns: after centering across activations, two columns leave
+        a rank-1 Gram proportional to [[1,-1],[-1,1]] for every group, so
+        CKA^T is constant (no signal).
     """
-    if rep.shape[1] <= 2:
+    if center == 'row' and rep.shape[1] <= 2:
         return None
-    unique = torch.unique(group)
-    group_reps = []
-    for g in unique:
-        idx = torch.where(group == g)[0]
-        if idx.numel() < 2:
-            continue  # covariance undefined for a single sample
-        group_reps.append(rep[idx])
+    group_reps = _group_slices(rep, group)
     if len(group_reps) < 2:
         return torch.tensor(0.0, device=rep.device)
 
@@ -318,74 +356,234 @@ def disentanglement_loss(rep: torch.Tensor, group: torch.Tensor) -> torch.Tensor
     n_pairs = 0
     for i in range(len(group_reps)):
         for j in range(i + 1, len(group_reps)):
-            total = total + linear_cka_t(group_reps[i], group_reps[j])
+            total = total - linear_cka_t(group_reps[i], group_reps[j],
+                                         center=center)
+            if mean_weight:
+                total = total + mean_weight * group_mean_shift(
+                    group_reps[i], group_reps[j])
             n_pairs += 1
 
-    return -total / n_pairs  # negative CKA^T
+    return total / n_pairs
+
+
+def wasserstein_1d(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Differentiable 1-D Wasserstein-1 distance between two empirical
+    samples of possibly different sizes (quantile-function matching)."""
+    m = max(a.numel(), b.numel())
+
+    def quantiles(x):
+        xs = torch.sort(x).values
+        n = xs.numel()
+        pos = ((torch.arange(m, device=x.device, dtype=x.dtype) + 0.5)
+               / m * n - 0.5).clamp(0, n - 1)
+        lo = pos.floor().long()
+        hi = (lo + 1).clamp(max=n - 1)
+        w = pos - lo.to(x.dtype)
+        return xs[lo] * (1 - w) + xs[hi] * w
+
+    return (quantiles(a) - quantiles(b)).abs().mean()
+
+
+def binary_logit_gap_w1(logits: torch.Tensor, group: torch.Tensor,
+                        eps: float = 1e-4) -> torch.Tensor:
+    """Detokenizer-stage group gap for a binary categorical column.
+
+    Two logits per row give CKA^T nothing to compare, so the column is
+    reduced to the logit gap d = l1 - l2 and the groups' distributions of
+    d are compared with W1, divided by the pooled within-group std.
+    Synthetic categories are chosen by argmax (d > 0), so the approval
+    rate is the share of d above zero; two groups with equal mean d can
+    still have very different rates, which W1 detects and a mean gap does
+    not. Mean over group pairs; >= 0.
+    """
+    d = logits[:, 0] - logits[:, 1]
+    blocks = _group_slices(d.unsqueeze(1), group)
+    blocks = [b.squeeze(1) for b in blocks]
+    if len(blocks) < 2:
+        return torch.tensor(0.0, device=logits.device)
+
+    total, n_pairs = 0.0, 0
+    for i in range(len(blocks)):
+        for j in range(i + 1, len(blocks)):
+            nA, nB = blocks[i].numel(), blocks[j].numel()
+            pooled_var = ((nA - 1) * blocks[i].var() + (nB - 1) * blocks[j].var()) \
+                / (nA + nB - 2)
+            total = total + wasserstein_1d(blocks[i], blocks[j]) \
+                / torch.sqrt(pooled_var + eps)
+            n_pairs += 1
+    return total / n_pairs
+
+
+def marginal_matching_penalty(stages, X_num, X_cat, n_quantiles=8,
+                              temperature=0.1, eps=1e-4):
+    """Marginal guard: pulls each decoded column's marginal toward the
+    batch's real marginal. Zero when the decoded batch equals the real
+    batch. Per-batch (not per-record); under DP it belongs in the
+    batch-coupled pass.
+
+    Numeric columns: mean absolute gap between real and decoded quantiles.
+    Categorical columns: KL(real share || synthetic share), SUMMED over
+    columns, with synthetic shares from a sharpened softmax (logits /
+    temperature) - a differentiable stand-in for the argmax shares the
+    decoder emits. The cost grows without bound as a real category's share
+    goes to 0, so the fairness terms cannot reach parity by deleting
+    sex-skewed categories ('levelling down'), while moving rows between
+    categories stays cheap. (An averaged mean-softmax TV penalty is blind to
+    this: deleting a 13% category costs ~0.13 / n_columns, and a category
+    can keep its mean softmax mass while never winning the argmax.)"""
+    n = X_num.shape[0]
+    qs = torch.linspace(0, 1, n_quantiles, device=X_num.device)[1:-1]
+    pen = (torch.quantile(X_num, qs, dim=0)
+           - torch.quantile(stages['recon_x_num'], qs, dim=0)).abs().mean()
+    for i, logits in enumerate(stages['recon_x_cat']):
+        k = logits.shape[1]
+        p = torch.bincount(X_cat[:, i], minlength=k).float() / n
+        q = torch.softmax(logits / temperature, dim=1).mean(dim=0)
+        m = p > 0
+        pen = pen + (p[m] * (torch.log(p[m]) - torch.log(q[m] + eps))).sum()
+    return pen
 
 
 def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
-                                     s_idx=None) -> torch.Tensor:
+                                     s_idx=None,
+                                     mean_weight: float = 1.0,
+                                     binary_w1: bool = True,
+                                     t_idx=None,
+                                     target_in_fairness=False,
+                                     reduce='mean',
+                                     center: str = 'group',
+                                     num_stage: str = 'summed') -> torch.Tensor:
     """FLIP multi-stage disentanglement (Sec. 4.3.2 of the paper).
 
     Applies the negative-CKA^T disentanglement at three intervention
-    stages and returns the mean:
+    stages:
 
       1. Latent space:   mu_z (flattened over tokens) - primary objective.
-      2. Detokenizer:   feature-wise on the pre-aggregation logits
-                        (each numerical feature's h_num * weight, plus
-                        each categorical logit; <= 2-column inputs skipped),
-                        mean-aggregated so features with more unique
-                        values are not disproportionately weighted.
+      2. Detokenizer:   feature-wise, mean-aggregated so features with more
+                        unique values are not disproportionately weighted.
+                        Numerical features: num_stage='summed' (default)
+                        uses the summed numerical outputs as one block;
+                        num_stage='pre' uses each numerical feature's
+                        pre-aggregation logits h_num * weight (n, d_token),
+                        as Sec. 4.3.2 describes. Categorical: each column's
+                        logits; binary columns (2 logits) use the W1
+                        logit-gap term instead of CKA^T when binary_w1.
       3. Decoder:       decoder output h (flattened over tokens), whose
                         dimensionality matches the latent space.
 
+    Deviation from the paper (center='group'): CKA^T keeps per-group
+    centering (dim=0), which cannot see group mean offsets, so each stage
+    also adds mean_weight * the normalized group mean gap
+    (group_mean_shift). center='row' is the paper-literal Eqs. 5-6.
+
     Args:
         stages: dict from Model_VAE.forward_with_stages() containing
-                'mu_z', 'h', 'recon_x_num', 'recon_x_cat'.
+                'mu_z', 'h', 'recon_x_num', 'recon_x_cat' (and
+                'recon_num_pre' for num_stage='pre').
         group: (n,) integer protected-group labels.
         s_idx: index of the protected attribute among the categorical
                columns (its logits are skipped at the detokenizer stage
                since they are supervised by the uniform attribute loss).
+        reduce: 'mean' of the stages, or 'sum' - each stage gets the full
+               lambda (a per-stage reading of Eq. 10).
+        center: CKA^T centering, 'group' or 'row' (see linear_cka_t).
+        num_stage: 'summed' or 'pre' (see stage 2).
 
     Returns:
-        Scalar mean disentanglement loss across the three stages.
+        Scalar disentanglement loss over the stages.
     """
     device = stages['mu_z'].device
     losses = []
 
     def add(target, loss):
-        if loss is not None:  # None = too few columns for CKA^T
+        if loss is not None:  # None = too few columns for row-centred CKA^T
             target.append(loss)
 
     # Stage 1: latent space
     mu_flat = stages['mu_z'].reshape(stages['mu_z'].shape[0], -1)
-    add(losses, disentanglement_loss(mu_flat, group))
+    h_flat = stages['h'].reshape(stages['h'].shape[0], -1)
+    add(losses, disentanglement_loss(mu_flat, group, mean_weight, center))
 
-    # Stage 2: detokenizer - feature-wise, mean-aggregated. Numerical
-    # features use the pre-aggregation logits h_num * weight (n, d_token)
-    # per feature, as Sec. 4.3.2 specifies, not the summed output.
+    # Stage 2: detokenizer - feature-wise, mean-aggregated
     feature_losses = []
     num_pre = stages.get('recon_num_pre')
-    if num_pre is not None:
+    if num_stage == 'pre' and num_pre is not None:
         for j in range(num_pre.shape[1]):
-            add(feature_losses, disentanglement_loss(num_pre[:, j, :], group))
+            add(feature_losses, disentanglement_loss(
+                num_pre[:, j, :], group, mean_weight, center))
+    elif stages['recon_x_num'] is not None:
+        add(feature_losses, disentanglement_loss(
+            stages['recon_x_num'], group, mean_weight, center))
     for i, cat_logits in enumerate(stages['recon_x_cat']):
         if cat_logits is None:
             continue
         if s_idx is not None and i == s_idx:
             continue  # protected attribute handled by L_S
-        add(feature_losses, disentanglement_loss(cat_logits, group))
+        # TARGET_IN_FAIRNESS (default off): the target's logits stay out of
+        # the detokenizer-stage terms unless outcome parity is intended.
+        if t_idx is not None and i == t_idx and not target_in_fairness:
+            continue
+        if binary_w1 and cat_logits.shape[1] == 2:
+            feature_losses.append(binary_logit_gap_w1(cat_logits, group))
+        else:
+            add(feature_losses, disentanglement_loss(
+                cat_logits, group, mean_weight, center))
     if feature_losses:
         losses.append(torch.stack(feature_losses).mean())
 
-    # Stage 3: decoder output
-    h_flat = stages['h'].reshape(stages['h'].shape[0], -1)
-    add(losses, disentanglement_loss(h_flat, group))
+    # Stage 3: decoder output. The decoder is nonlinear and can put group
+    # differences back in, so it gets the same CKA^T + mean treatment.
+    add(losses, disentanglement_loss(h_flat, group, mean_weight, center))
 
     if not losses:
         return torch.tensor(0.0, device=device)
-    return torch.stack(losses).mean()
+    stacked = torch.stack(losses)
+    return stacked.sum() if reduce == 'sum' else stacked.mean()
+
+
+# --------------------------------------------------------------------------
+# Joint decoded-output stage
+# --------------------------------------------------------------------------
+# The paper's detokenizer stage aligns each column separately and never sees
+# the joint pattern A-NCB measures; latent- and decoder-stage alignment is
+# undone by the decoder (measured: the moments of h halve while a probe reads
+# sex from it as well as before). This stage applies CKA^T + mean gap to the
+# whole decoded row, lifted with random Fourier features.
+
+def decoded_joint_rep(stages, s_idx, t_idx=None):
+    """The decoded row as the A-NCB adversary and clustering see it: numeric
+    reconstructions plus the softmax of every non-protected categorical
+    (target excluded when t_idx is given), standardized per dimension with
+    detached batch statistics so no column dominates by scale."""
+    parts = [stages['recon_x_num']]
+    for j, c in enumerate(stages['recon_x_cat']):
+        if j == s_idx or j == t_idx:
+            continue
+        parts.append(torch.softmax(c, dim=1))
+    x = torch.cat(parts, dim=1)
+    mu, sd = x.mean(0).detach(), x.std(0).detach().clamp_min(1e-4)
+    return (x - mu) / sd
+
+
+def random_fourier_features(x, n_features=256, seed=0):
+    """phi(x) = sqrt(2/D) cos(x W / sigma + b): an explicit RBF-kernel map
+    with a fixed (seeded) W and the batch median distance as bandwidth
+    (detached). Linear statistics of phi are kernel statistics of x."""
+    g = torch.Generator(device='cpu').manual_seed(seed)
+    W = torch.randn(x.shape[1], n_features, generator=g).to(x.device)
+    b = (2 * np.pi * torch.rand(n_features, generator=g)).to(x.device)
+    with torch.no_grad():
+        sub = x[:512]
+        d = torch.cdist(sub, sub)
+        sigma = d[d > 0].median().clamp_min(1e-4)
+    return np.sqrt(2.0 / n_features) * torch.cos(x @ W / sigma + b)
+
+
+def decoded_joint_loss(stages, group, s_idx, t_idx=None, mean_weight=1.0):
+    """CKA^T + normalized mean gap on the RFF-lifted joint decoded row.
+    Batch-coupled (group-level DP pass)."""
+    x = random_fourier_features(decoded_joint_rep(stages, s_idx, t_idx))
+    return disentanglement_loss(x, group, mean_weight)
 
 
 def sliced_wasserstein_distance(X: torch.Tensor, Y: torch.Tensor,

@@ -38,7 +38,7 @@ from run_flip_demo import (
     NUMERIC_COLS, CATEGORICAL_COLS, DATA_PATH,
     load_sample, train_flip, fidelity_metrics, privacy_metrics,
     fairness_metrics, decode_synthetic_data, generate_html_report,
-    clip_nonnegative, print_paper_metrics,
+    clip_nonnegative, print_paper_metrics, infer_numeric_schema,
 )
 
 from tabsyn.model import MLPDiffusion, Model
@@ -124,12 +124,14 @@ REPORT_PATH_ALL = os.path.join(HERE, 'flip_full_report_all.html')
 # ==========================================================================
 # Stage 2: latent diffusion (TabSyn's real generation mechanism)
 # ==========================================================================
-def train_diffusion(mu, std, params, device):
+def train_diffusion(mu, std=None, params=None, device=None):
     """Train TabSyn's MLPDiffusion denoiser (EDM preconditioning) on the
     VAE latents.
 
-    Trains on reparameterized latents z = mu + std * eps with fresh eps
-    per batch (Sec. 4.1.2 of the paper), not on mu alone.
+    With std given, trains on reparameterized latents z = mu + std * eps
+    with fresh eps per batch (Sec. 4.1.2 of the paper). With std=None it
+    trains on mu alone (TabSyn's default; the final Adult runs). mu may be a
+    tensor or an array (n, tokens*d).
 
     Follows tabsyn/main.py's normalization convention: latents are shifted
     by their mean and halved before training, and sampled latents are
@@ -148,9 +150,11 @@ def train_diffusion(mu, std, params, device):
     Returns (model, latent_mean, accountant) where accountant is None
     when DP is disabled.
     """
-    mean = mu.float().cpu().mean(dim=0, keepdim=True)
-    mu_norm = (mu.float().cpu() - mean) / 2   # (z - mean) / 2 with
-    std_norm = std.float().cpu() / 2          # z = mu + std * eps
+    mu = torch.as_tensor(mu).float().cpu()
+    mean = mu.mean(dim=0, keepdim=True)
+    mu_norm = (mu - mean) / 2                 # (z - mean) / 2 with
+    std_norm = (torch.as_tensor(std).float().cpu() / 2   # z = mu + std * eps
+                if std is not None else None)
 
     in_dim = mu_norm.shape[1]
     denoise_fn = MLPDiffusion(in_dim, params['DIM_T']).to(device)
@@ -188,7 +192,9 @@ def train_diffusion(mu, std, params, device):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.9, patience=20)
 
-    dataset = torch.utils.data.TensorDataset(mu_norm, std_norm)
+    dataset = (torch.utils.data.TensorDataset(mu_norm, std_norm)
+               if std_norm is not None
+               else torch.utils.data.TensorDataset(mu_norm))
     if params.get('USE_DP'):
         # DPDataLoader performs true Poisson sampling (each record
         # included independently per step at rate batch/N), which is
@@ -213,11 +219,25 @@ def train_diffusion(mu, std, params, device):
     best_loss, since_best = float('inf'), 0
 
     model.train()
-    for epoch in range(params['EPOCHS']):
+    # Diffusion length in OPTIMIZER STEPS when DIFF_STEPS is set: a smaller
+    # training sample must not silently undertrain the prior (an undertrained
+    # prior generates latents near the mean, which decode to near-identical
+    # low-income rows). Falls back to EPOCHS otherwise.
+    max_steps = params.get('DIFF_STEPS')
+    steps_done = 0
+    epoch = 0
+    while True:
+        if max_steps is not None and steps_done >= max_steps:
+            break
+        if max_steps is None and epoch >= params['EPOCHS']:
+            break
         epoch_loss, n_seen = 0.0, 0
-        for batch_mu, batch_std in loader:
-            batch_mu, batch_std = batch_mu.to(device), batch_std.to(device)
-            inputs = batch_mu + batch_std * torch.randn_like(batch_std)
+        for batch in loader:
+            if std_norm is not None:
+                batch_mu, batch_std = batch[0].to(device), batch[1].to(device)
+                inputs = batch_mu + batch_std * torch.randn_like(batch_std)
+            else:
+                inputs = batch[0].to(device)   # no extra RNG draw
             loss = train_model(inputs).mean()
 
             optimizer.zero_grad()
@@ -231,15 +251,19 @@ def train_diffusion(mu, std, params, device):
 
             epoch_loss += loss.item() * len(inputs)
             n_seen += len(inputs)
+            steps_done += 1
 
         scheduler.step(epoch_loss / max(1, n_seen))
-        if epoch % 100 == 0 or epoch == params['EPOCHS'] - 1:
+        if epoch % 100 == 0 or (max_steps is None and epoch == params['EPOCHS'] - 1) \
+                or (max_steps is not None and steps_done >= max_steps):
             msg = (f'  diffusion epoch {epoch:5d}  '
-                   f'loss={epoch_loss / max(1, n_seen):.6f}')
+                   f'loss={epoch_loss / max(1, n_seen):.6f}  '
+                   f'steps={steps_done}')
             if accountant is not None and accountant.steps > 0:
                 eps_d, _ = accountant.get_privacy_spent()
                 msg += f'  eps_diffusion={eps_d:.2f}'
             print(msg)
+        epoch += 1
 
         if patience:
             if epoch_loss / max(1, n_seen) < best_loss:
@@ -269,7 +293,8 @@ def sample_from_diffusion(diffusion_model, mean, n_gen, latent_shape,
 
 @torch.no_grad()
 def decode_latents(vae_model, latents, device, X_num=None, params=None,
-                   num_means=None, num_stds=None):
+                   num_floor=None, sample_idx=None, num_means=None,
+                   num_stds=None):
     """Decode sampled latents back to data space through the frozen VAE
     decoder + Reconstructor, with a DP-released range-clip backstop.
 
@@ -288,6 +313,11 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None,
     syn_num = recon_num.cpu().numpy()
     syn_cat = np.stack([c.argmax(dim=-1).cpu().numpy() for c in recon_cat],
                        axis=1)
+    if sample_idx is not None:
+        # L_S drives this column's logits to uniform, so argmax would emit one
+        # constant class; drawing from the softmax gives the random assignment.
+        probs = torch.softmax(recon_cat[sample_idx], dim=-1)
+        syn_cat[:, sample_idx] = torch.multinomial(probs, 1).squeeze(1).cpu().numpy()
 
     if X_num is not None and params is not None:
         Xn = X_num.to(device)
@@ -301,8 +331,13 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None,
     # Domain-knowledge clamp: all numeric columns in this dataset (loan
     # amount, income, LTV, property value, tract population) are
     # non-negative by definition. Public knowledge, no privacy cost.
-    # syn_num is still standardized, so real-unit 0 is -mean/std.
-    syn_num = clip_nonnegative(syn_num, num_means, num_stds)
+    # The standardized image of real-unit 0 is -mean/std (clipping
+    # standardized values at 0 would flatten every below-average value).
+    # num_floor passes it directly; num_means/num_stds compute it.
+    if num_floor is not None:
+        syn_num = np.maximum(syn_num, num_floor[None, :])
+    else:
+        syn_num = clip_nonnegative(syn_num, num_means, num_stds)
     if X_num is not None and params is not None:
         return syn_num, syn_cat, [stats_budget]
     return syn_num, syn_cat, []
@@ -390,8 +425,14 @@ def main():
                                                       num_stds=num_stds)
 
     # ---- Export ----------------------------------------------------------
-    synthetic_df = decode_synthetic_data(syn_num, syn_cat, num_means,
-                                         num_stds, encoders)
+    # clip/round numerics to the real columns' format; real min/max is not
+    # released under DP (the decoder's DP range clip applies instead)
+    num_schema = infer_numeric_schema(
+        X_num.numpy() * num_stds.values + num_means.values,
+        list(num_means.index))
+    synthetic_df = decode_synthetic_data(
+        syn_num, syn_cat, num_means, num_stds, encoders,
+        num_schema=num_schema, schema_bounds=not params.get('USE_DP'))
     os.makedirs(os.path.dirname(syn_path), exist_ok=True)
     synthetic_df.to_csv(syn_path, index=False)
     print(f'Synthetic data ({len(synthetic_df)} rows) saved to {syn_path}')
@@ -399,7 +440,7 @@ def main():
     # ---- Evaluate ---------------------------------------------------------
     fid = fidelity_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat,
                            encoders)
-    priv = privacy_metrics(X_num.numpy(), syn_num, params)
+    priv = privacy_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat)
     fair = fairness_metrics(X_cat.numpy(), syn_cat, t_idx, s_idx, encoders,
                            real_num=X_num.numpy(), syn_num=syn_num)
 
@@ -435,8 +476,8 @@ def main():
     print(f'  Categorical TV distance:            {fid["cat_tv_mean"]:.4f}')
     print(f'  Correlation-matrix delta:            {fid["corr_delta"]:.4f}')
     print(f'\n--- PRIVACY ---')
-    print(f'  DCR ratio (syn->real / real->real):  {priv["dcr_ratio"]:.4f}')
-    print(f'    (>= 1.0 healthy; < 0.5 = memorization risk)')
+    print(f'  eps-identifiability (lower = more private): '
+          f'{priv["eps_identifiability"]:.4f}')
     if eps is not None:
         print(f'  DP guarantee (record-level, per-sample losses): '
               f'(epsilon={eps:.2f}, delta={params["DP_DELTA"]})')

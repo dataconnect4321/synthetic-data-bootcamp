@@ -33,6 +33,15 @@ stage1:                     # FLIP VAE (both pipelines)
     phase2_epochs: 60       # disentanglement epochs
     phase2_lr_scale: 0.2    # LR multiplier when Phase 2 starts
     max_div_penalty: 10.0   # cap on the SWD anchor term
+    # Paper-literal disentanglement, as in this config's original runs
+    # (run_flip_demo.py's code defaults are the final Adult setup instead -
+    # see README Part 10):
+    cka_center: row          # CKA^T centred across activations (Eqs. 5-6)
+    num_stage: pre           # per-feature pre-aggregation numerics (Sec. 4.3.2)
+    div_stages: latent+decoder  # SWD at the latent and decoder stages
+    mean_shift_weight: 0.0   # no group mean-gap term
+    binary_w1: false         # no W1 term for binary columns
+    lambda_ramp_frac: 0      # full lambda from the first Phase-2 epoch
   privacy:
     use_dp: true
     noise_multiplier: 0.8   # DP-SGD σ for per-row losses

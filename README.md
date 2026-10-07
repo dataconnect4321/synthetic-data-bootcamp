@@ -1098,6 +1098,54 @@ These are the honest boundaries of what the implementation supports.
 
 ---
 
+## Part 10 — Adult Reproduction: Final Pipeline
+
+`run_adult_flip.py` runs FLIP on UCI Adult (protected attribute `sex`), one
+3-fold-CV fold per run. On Adult the paper-literal method does not move the
+synthetic data's fairness: the relationship column carries sex 1:1, and
+latent/decoder alignment is undone by the decoder. The final setup keeps
+FLIP as the only fairness/privacy mechanism and adds the minimum needed:
+
+| Component | Flag | Why |
+|---|---|---|
+| Paper training setup, batch-mean L_S | `--paper-config --ls-mode batch_mean` | the paper's FLIP |
+| Merge deterministic proxy classes (Husband/Wife → MASK) | `--mask-proxies` | the user-side preprocessing the paper's Sec. 7.2 leaves to the user; auto-detected (P(sex \| category) ≥ 0.95) |
+| Joint decoded-output stage (CKAᵀ + mean gap on the whole decoded row, RFF-lifted) | `--decoded-joint` | extends the paper's per-column detokenizer stage, which cannot see joint distributions |
+| KL marginal guard | `--marginal-weight 1.0` | stops the fairness terms from deleting sex-skewed categories (levelling down) |
+| Full λ per stage | `--stage-reduce sum` | a per-stage reading of Eq. 10 |
+| Generated sex sampled from its probabilities | `--s-decode sample` | under the batch-mean L_S every row sits within ~0.01 of uniform, so argmax copies the true sex or collapses |
+| Comparison baseline only: scrambling repair (Feldman et al.) | `--repair-tau 1.0` | what preprocessing alone achieves |
+
+Evaluation (all per fold; no averaging across datasets):
+- **BER** (paper Def. 1, on the generated sex column) and **true-sex BER**
+  (1 − leakage: the same quantity against each tier-1 row's real sex).
+- **A-NCB** with a full-covariance GMM (sklearn default) over 10 seeds,
+  mean and median; real reference on the original and the masked data.
+- **α-precision / β-recall** (TabSyn's naive AlphaPrecision), downstream
+  AUC, SP/EO, ε-identifiability (full pipeline only).
+- **Validity**: plausibility rules learned from the real data
+  (`fit_validity_rules`); **category share change** catches deletion.
+- Released CSVs are clipped/rounded to each real column's format
+  (`infer_numeric_schema`).
+
+Outputs: `final_table.py` (mean ± sd and per-fold table), `make_heatmaps.py`
+(paper-style heatmap grid), `validity_check.py`, `consistency_eval.py`
+(metrics after rejecting / editing rows that break strong learned rules).
+What was tried and removed for the Adult reproduction is recorded in
+`EXPERIMENTS_ADULT.md`; `EXPERIMENTS.md` is the guide to `configs/flip.yaml`
+experiments (`run_experiment.py`).
+
+```powershell
+# full final sweep: banks + lambda 0/4/8 (tier-1 and full) + repair baseline
+bash scripts/run_final_sweep.sh
+python final_table.py --prefix flip --tier1
+python final_table.py --prefix flip
+python make_heatmaps.py --prefix flip --tier1
+python make_heatmaps.py --prefix flip
+```
+
+---
+
 ## Running everything
 
 ```bash

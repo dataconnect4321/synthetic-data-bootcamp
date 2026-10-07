@@ -28,6 +28,9 @@ from tabsyn.vae.flip_fairness import (
     linear_cka_t,
     disentanglement_loss,
     multi_stage_disentanglement_loss,
+    group_mean_shift,
+    wasserstein_1d,
+    binary_logit_gap_w1,
     sliced_wasserstein_distance,
     uniform_attribute_loss,
     uniform_attribute_loss_per_sample,
@@ -109,7 +112,8 @@ def test_cka_correlated_higher_than_independent():
 def test_cka_t_matches_paper_eq5_6():
     """CKA^T(A, B) := CKA(A^T, B^T) (Sec. 4.2.2): linear kernels
     K = A^T A, L = B^T B over the p activations, p x p centering H, and
-    CKA = tr(KHLH) / sqrt(tr(KHKH) tr(LHLH)) (Eqs. 5-6)."""
+    CKA = tr(KHLH) / sqrt(tr(KHKH) tr(LHLH)) (Eqs. 5-6). Paper-literal
+    row centering (center='row'), as in configs/flip.yaml."""
     A = torch.randn(64, 16, dtype=torch.float64)
     B = torch.randn(48, 16, dtype=torch.float64)  # unequal sizes are fine
     p = A.shape[1]
@@ -117,29 +121,33 @@ def test_cka_t_matches_paper_eq5_6():
     K, L = A.t() @ A, B.t() @ B
     expected = torch.trace(K @ H @ L @ H) / torch.sqrt(
         torch.trace(K @ H @ K @ H) * torch.trace(L @ H @ L @ H))
-    assert torch.isclose(linear_cka_t(A, B), expected, atol=1e-8)
+    assert torch.isclose(linear_cka_t(A, B, center='row'), expected,
+                         atol=1e-8)
 
 
 def test_cka_t_sees_group_mean_shift():
     """Same covariance, different per-feature means: the paper's
     centering keeps group means in A^T A, so CKA^T drops below 1.
-    (Centering each feature over samples - dim=0 - scored this ~1.)"""
+    (Centering each feature over samples - dim=0, center='group' - scores
+    this ~1; that mode relies on the separate mean-gap term instead.)"""
     torch.manual_seed(0)
     mix = torch.randn(6, 6)
     A = torch.randn(500, 6) @ mix
     B_same = torch.randn(500, 6) @ mix
     B_shift = torch.randn(500, 6) @ mix + torch.tensor([3., 0, 0, -3., 0, 0])
-    assert linear_cka_t(A, B_same) > 0.99
-    assert linear_cka_t(A, B_shift) < 0.9
+    assert linear_cka_t(A, B_same, center='row') > 0.99
+    assert linear_cka_t(A, B_shift, center='row') < 0.9
 
 
 def test_disentanglement_skips_two_or_fewer_columns():
-    """After centering across activations, <= 2 columns make CKA^T
-    constant (no signal), so the loss returns None and is skipped."""
+    """After centering across activations (center='row'), <= 2 columns
+    make CKA^T constant (no signal), so the loss returns None and is
+    skipped."""
     groups = torch.randint(0, 2, (32,))
-    assert disentanglement_loss(torch.randn(32, 2), groups) is None
-    assert disentanglement_loss(torch.randn(32, 1), groups) is None
-    assert disentanglement_loss(torch.randn(32, 3), groups) is not None
+    row = dict(center='row')
+    assert disentanglement_loss(torch.randn(32, 2), groups, **row) is None
+    assert disentanglement_loss(torch.randn(32, 1), groups, **row) is None
+    assert disentanglement_loss(torch.randn(32, 3), groups, **row) is not None
 
 
 def test_cka_t_unequal_group_sizes():
@@ -255,17 +263,110 @@ def test_multi_stage_mean_of_stages():
     mu_flat = stages['mu_z'].reshape(64, -1)
     h_flat = stages['h'].reshape(64, -1)
     pre = stages['recon_num_pre']
-    feat_losses = [disentanglement_loss(pre[:, j, :], groups)
+    # the paper-literal setup of configs/flip.yaml: row-centred CKA^T,
+    # per-feature pre-aggregation numerics, no mean-gap or binary-W1 terms
+    row = dict(center='row')
+    feat_losses = [disentanglement_loss(pre[:, j, :], groups, **row)
                    for j in range(pre.shape[1])]
     for i, cl in enumerate(stages['recon_x_cat']):
         if i == s_idx:
             continue
-        feat_losses.append(disentanglement_loss(cl, groups))
+        feat_losses.append(disentanglement_loss(cl, groups, **row))
 
-    expected = (disentanglement_loss(mu_flat, groups)
+    expected = (disentanglement_loss(mu_flat, groups, **row)
                 + torch.stack(feat_losses).mean()
+                + disentanglement_loss(h_flat, groups, **row)) / 3.0
+    got = multi_stage_disentanglement_loss(stages, groups, s_idx=s_idx,
+                                           mean_weight=0.0, binary_w1=False,
+                                           center='row', num_stage='pre')
+    assert torch.isclose(got, expected, atol=1e-6)
+
+
+def test_cka_blind_to_group_mean_shift_but_mean_term_is_not():
+    """Per-group centering makes pure CKA^T score a mean shift as
+    'identical'; the mean-shift term must see it."""
+    base = torch.randn(200, 16)
+    rep = torch.cat([base, base + 3.0], dim=0)
+    groups = torch.cat([torch.zeros(200), torch.ones(200)]).long()
+    assert disentanglement_loss(rep, groups).item() < -0.99
+    with_mean = disentanglement_loss(rep, groups, mean_weight=1.0)
+    assert with_mean.item() > 1.0
+    # no shift -> mean term ~0, loss stays ~ -1
+    same = torch.cat([base, base], dim=0)
+    assert disentanglement_loss(same, groups, mean_weight=1.0).item() < -0.99
+
+
+def test_group_mean_shift_scale_invariant():
+    A, B = torch.randn(100, 8), torch.randn(80, 8) + 1.0
+    assert torch.isclose(group_mean_shift(A, B),
+                         group_mean_shift(10 * A, 10 * B), rtol=1e-4)
+
+
+def test_wasserstein_1d_known_values():
+    a = torch.arange(10, dtype=torch.float32)
+    assert wasserstein_1d(a, a).item() == 0.0
+    assert torch.isclose(wasserstein_1d(a, a + 2.5), torch.tensor(2.5), atol=1e-5)
+    # unequal sizes: same distribution sampled at different resolution
+    b = torch.linspace(0, 9, 37)
+    assert wasserstein_1d(a, b).item() < 0.3
+
+
+def test_binary_w1_detects_rate_gap_with_equal_mean_gap():
+    """Both groups have mean logit gap 0, but group 0 is always
+    approved (d > 0) and group 1 is 50/50: a mean comparison is blind,
+    W1 is not."""
+    n = 400
+    d0 = torch.rand(n) * 2.0 + 0.1                      # all > 0
+    d1 = torch.cat([torch.rand(n // 2) * 2.0 + 0.1,
+                    -(torch.rand(n // 2) * 2.0 + 0.1)])
+    d0 = d0 - d0.mean()                                  # equalize means
+    d1 = d1 - d1.mean()
+    logits = torch.stack([torch.cat([d0, d1]), torch.zeros(2 * n)], dim=1)
+    groups = torch.cat([torch.zeros(n), torch.ones(n)]).long()
+    assert abs(d0.mean() - d1.mean()) < 1e-5
+    assert binary_logit_gap_w1(logits, groups).item() > 0.1
+    same = torch.stack([torch.cat([d1, d1.flip(0)]), torch.zeros(2 * n)], dim=1)
+    assert binary_logit_gap_w1(same, groups).item() < 0.02
+
+
+def test_binary_w1_gradient_flows():
+    logits = torch.randn(64, 2, requires_grad=True)
+    groups = torch.randint(0, 2, (64,))
+    binary_logit_gap_w1(logits, groups).backward()
+    assert torch.isfinite(logits.grad).all() and logits.grad.abs().sum() > 0
+
+
+def test_multi_stage_paper_literal_matches_plain_cka():
+    """mean_weight=0 and binary_w1=False (the --paper-literal setting) must
+    reduce to pure -CKA^T on every stage, binary columns included."""
+    stages = _make_stages(categories=(3, 2))
+    groups = torch.randint(0, 2, (64,))
+    mu_flat = stages['mu_z'].reshape(64, -1)
+    h_flat = stages['h'].reshape(64, -1)
+    feat = torch.stack([
+        disentanglement_loss(stages['recon_x_num'], groups),
+        disentanglement_loss(stages['recon_x_cat'][1], groups)]).mean()
+    expected = (disentanglement_loss(mu_flat, groups) + feat
                 + disentanglement_loss(h_flat, groups)) / 3.0
-    got = multi_stage_disentanglement_loss(stages, groups, s_idx=s_idx)
+    got = multi_stage_disentanglement_loss(stages, groups, s_idx=0,
+                                           mean_weight=0.0, binary_w1=False)
+    assert torch.isclose(got, expected, atol=1e-6)
+
+
+def test_multi_stage_binary_column_uses_w1():
+    """A binary non-protected column is scored by W1, not CKA^T: with
+    mean_weight=0 the result must equal the explicit W1 composition."""
+    stages = _make_stages(categories=(3, 2))
+    groups = torch.randint(0, 2, (64,))
+    mu_flat = stages['mu_z'].reshape(64, -1)
+    h_flat = stages['h'].reshape(64, -1)
+    feat = torch.stack([
+        disentanglement_loss(stages['recon_x_num'], groups),
+        binary_logit_gap_w1(stages['recon_x_cat'][1], groups)]).mean()
+    expected = (disentanglement_loss(mu_flat, groups) + feat
+                + disentanglement_loss(h_flat, groups)) / 3.0
+    got = multi_stage_disentanglement_loss(stages, groups, s_idx=0,
+                                           mean_weight=0.0)
     assert torch.isclose(got, expected, atol=1e-6)
 
 
@@ -1022,6 +1123,69 @@ def test_two_phase_smoke():
         assert torch.isfinite(total)
         total.backward()
         optimizer.step()
+
+
+# --------------------------------------------------------------------------
+# Joint decoded-output stage and KL marginal guard
+# --------------------------------------------------------------------------
+
+def _decoded_stages(n, shift, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    group = torch.arange(n) % 2
+    num = torch.randn(n, 3, generator=g) + shift * group[:, None].float()
+    cats = [torch.randn(n, 2, generator=g),             # S (skipped)
+            torch.randn(n, 4, generator=g) + shift * group[:, None].float()]
+    return {'recon_x_num': num, 'recon_x_cat': cats}, group
+
+
+def test_decoded_joint_loss_sees_group_shift():
+    from tabsyn.vae.flip_fairness import decoded_joint_loss
+    same, g = _decoded_stages(512, 0.0)
+    diff, _ = _decoded_stages(512, 2.0)
+    assert decoded_joint_loss(diff, g, s_idx=0) > \
+        decoded_joint_loss(same, g, s_idx=0) + 0.1
+
+
+def test_decoded_joint_loss_has_gradient():
+    from tabsyn.vae.flip_fairness import decoded_joint_loss
+    st, g = _decoded_stages(256, 1.0)
+    st['recon_x_num'].requires_grad_(True)
+    decoded_joint_loss(st, g, s_idx=0).backward()
+    assert st['recon_x_num'].grad.abs().sum() > 0
+
+
+def test_marginal_guard_zero_on_identical_batch():
+    from tabsyn.vae.flip_fairness import marginal_matching_penalty
+    n = 1000
+    X_num = torch.randn(n, 2)
+    X_cat = torch.tensor([0] * 870 + [1] * 130).view(n, 1)
+    confident = torch.cat([torch.tensor([[5.0, -5.0]]).repeat(870, 1),
+                           torch.tensor([[-5.0, 5.0]]).repeat(130, 1)])
+    st = {'recon_x_num': X_num.clone(), 'recon_x_cat': [confident]}
+    assert marginal_matching_penalty(st, X_num, X_cat).item() < 0.01
+
+
+def test_marginal_guard_penalizes_shifted_numerics():
+    from tabsyn.vae.flip_fairness import marginal_matching_penalty
+    n = 1000
+    X_num = torch.randn(n, 2)
+    X_cat = torch.zeros(n, 1, dtype=torch.long)
+    st = {'recon_x_num': X_num + 1.0,
+          'recon_x_cat': [torch.tensor([[5.0, -5.0]]).repeat(n, 1)]}
+    assert marginal_matching_penalty(st, X_num, X_cat).item() > 0.5
+
+
+def test_marginal_guard_penalizes_vanishing_category():
+    """A category that keeps its mean softmax mass (13% on every row) but
+    never wins the argmax would vanish from the output; the sharpened-share
+    KL sees it."""
+    from tabsyn.vae.flip_fairness import marginal_matching_penalty
+    n = 1000
+    X_num = torch.zeros(n, 1)
+    X_cat = torch.tensor([0] * 870 + [1] * 130).view(n, 1)
+    logits = torch.log(torch.tensor([[0.87, 0.13]])).repeat(n, 1)
+    st = {'recon_x_num': X_num.clone(), 'recon_x_cat': [logits]}
+    assert marginal_matching_penalty(st, X_num, X_cat).item() > 0.5
 
 
 if __name__ == '__main__':
