@@ -580,8 +580,17 @@ def main():
             sample_idx=s_idx if args.s_decode == 'sample' else None,
             sample_all=args.cat_decode == 'sample')
 
+    # Released CSV only: clip + round numerics to the real columns' format
+    # (whole numbers stay whole, etc.). Metrics below use the unrounded
+    # decode, so runs before/after this change score identically. Under DP
+    # the real min/max is not released; the decoder's DP clip applies.
+    num_schema = demo.infer_numeric_schema(
+        data['train_num'] * data['stds'].values + data['means'].values,
+        NUMERIC)
     syn_df = demo.decode_synthetic_data(syn_num, syn_cat, data['means'],
-                                        data['stds'], enc)
+                                        data['stds'], enc,
+                                        num_schema=num_schema,
+                                        schema_bounds=args.dp_noise is None)
     os.makedirs(OUT_DIR, exist_ok=True)
     syn_df.to_csv(os.path.join(OUT_DIR, f'{tag}_synthetic.csv'), index=False)
 

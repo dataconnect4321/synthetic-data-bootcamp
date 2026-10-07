@@ -123,3 +123,32 @@ def test_alpha_beta_identical_vs_shifted():
                                                [4, 4])
     assert a_same > 0.85 and b_same > 0.3
     assert a_far < a_same - 0.3 and b_far < b_same
+
+
+def test_validity_rules_catch_each_violation_type():
+    from tabsyn.vae.paper_metrics import fit_validity_rules, validity_report
+    rng = np.random.default_rng(0)
+    n = 4000
+    married = rng.integers(0, 2, n)                     # 0 never, 1 married
+    spouse = np.where(married == 1, 1, rng.integers(0, 1, n))   # spouse => married
+    age = np.where(married == 1, rng.integers(25, 80, n),
+                   rng.integers(17, 80, n)).astype(float)
+    amount = rng.integers(0, 1000, n).astype(float)
+    num = np.stack([age, amount], 1)
+    cat = np.stack([married, spouse], 1)
+    rules = fit_validity_rules(num, cat, ['age', 'amount'],
+                               ['married', 'spouse'], min_support=100)
+    real = validity_report(rules, num, cat)
+    assert real['valid_rate'] > 0.97
+    bad_num = num[:4].copy()
+    bad_num[0, 1] = -50            # negative amount: range
+    bad_num[1, 0] = 40.5           # non-integer age: integer
+    bad_num[2, 0] = 18             # married 18-year-old: conditional range
+    bad_cat = cat[:4].copy()
+    bad_cat[2] = [1, 1]
+    bad_cat[3] = [0, 1]            # spouse but never married: fd + pair
+    rep = validity_report(rules, bad_num, bad_cat)
+    assert rep['by_type']['range'] == 0.25
+    assert rep['by_type']['integer'] == 0.25
+    assert rep['by_type']['cond'] >= 0.25
+    assert rep['by_type']['fd'] >= 0.25 or rep['by_type']['pair'] >= 0.25

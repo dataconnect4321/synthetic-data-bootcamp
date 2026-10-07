@@ -487,3 +487,114 @@ def alpha_precision_beta_recall(real_num_raw, real_cat, syn_num_raw, syn_cat,
     a = 1 - np.abs(alphas - prec).sum() / alphas.sum()
     b = 1 - np.abs(alphas - cov).sum() / alphas.sum()
     return float(a), float(b)
+
+
+# --------------------------------------------------------------------------
+# Data validity (plausibility) rules learned from the real data
+# --------------------------------------------------------------------------
+
+def fit_validity_rules(num_raw, cat, num_names, cat_names, cat_labels=None,
+                       q=0.001, min_support=200, fd_purity=0.99,
+                       fd_support=0.01, pair_expected=20.0):
+    """Learn dataset-agnostic plausibility rules from REAL data.
+
+    num_raw: (n, d) numerics on their original scale; cat: (n, k) codes.
+    Rules:
+      range     numeric value within the real [min, max]
+      integer   column whole-valued in real data -> must be whole
+      cond      numeric value within the real [q, 1-q] quantiles (q=0.1%) of rows
+                sharing its category (categories with >= min_support rows)
+      fd        near-deterministic implication A=a -> B=b
+                (P >= fd_purity, A=a on >= fd_support of rows)
+      pair      category pair absent from the real data although
+                independence predicts >= pair_expected rows
+    """
+    num_raw, cat = np.asarray(num_raw, float), np.asarray(cat)
+    n = len(cat)
+    lab = (lambda j, c: str(cat_labels[j][c])) if cat_labels is not None \
+        else (lambda j, c: str(c))
+    rules = {'range': [], 'integer': [], 'cond': [], 'fd': [], 'pair': []}
+    for i, name in enumerate(num_names):
+        x = num_raw[:, i]
+        rules['range'].append((i, name, x.min(), x.max()))
+        if np.allclose(x, np.round(x), rtol=0, atol=1e-3):
+            rules['integer'].append((i, name))
+    for j, cname in enumerate(cat_names):
+        for c in np.unique(cat[:, j]):
+            m = cat[:, j] == c
+            if m.sum() < min_support:
+                continue
+            for i, name in enumerate(num_names):
+                lo, hi = np.quantile(num_raw[m, i], [q, 1 - q])
+                rules['cond'].append((j, c, i, lo, hi,
+                                      f'{name} | {cname}={lab(j, c)}'))
+    shares = [np.bincount(cat[:, j]) / n for j in range(cat.shape[1])]
+    for a in range(cat.shape[1]):
+        for b in range(cat.shape[1]):
+            if a == b:
+                continue
+            for va in np.where(shares[a] >= fd_support)[0]:
+                m = cat[:, a] == va
+                cnt = np.bincount(cat[m, b], minlength=len(shares[b]))
+                vb = int(cnt.argmax())
+                if cnt[vb] / m.sum() >= fd_purity and shares[b][vb] < 0.99:
+                    rules['fd'].append((a, int(va), b, vb,
+                                        f'{cat_names[a]}={lab(a, va)} -> '
+                                        f'{cat_names[b]}={lab(b, vb)}'))
+            if b > a:
+                tab = np.zeros((len(shares[a]), len(shares[b])), int)
+                np.add.at(tab, (cat[:, a], cat[:, b]), 1)
+                exp = n * np.outer(shares[a], shares[b])
+                for va, vb in zip(*np.where((tab == 0) &
+                                            (exp >= pair_expected))):
+                    rules['pair'].append((a, int(va), b, int(vb),
+                                          f'{cat_names[a]}={lab(a, va)} & '
+                                          f'{cat_names[b]}={lab(b, vb)}'))
+    return rules
+
+
+def validity_report(rules, num_raw, cat, tol=1e-6, top=5):
+    """Score a table against fitted rules. Returns the share of rows that
+    break no rule, per-type violation rates (share of rows breaking at least
+    one rule of that type) and the most-violated individual rules."""
+    num_raw, cat = np.asarray(num_raw, float), np.asarray(cat)
+    n = len(cat)
+    bad = {k: np.zeros(n, bool) for k in rules}
+    worst = []
+    for i, name, lo, hi in rules['range']:
+        v = (num_raw[:, i] < lo - tol) | (num_raw[:, i] > hi + tol)
+        bad['range'] |= v
+        worst.append((v.mean(), f'range: {name} outside [{lo:g}, {hi:g}]'))
+    for i, name in rules['integer']:
+        v = np.abs(num_raw[:, i] - np.round(num_raw[:, i])) > 1e-3
+        bad['integer'] |= v
+        worst.append((v.mean(), f'integer: {name} not whole'))
+    for j, c, i, lo, hi, desc in rules['cond']:
+        m = cat[:, j] == c
+        v = m & ((num_raw[:, i] < lo - tol) | (num_raw[:, i] > hi + tol))
+        bad['cond'] |= v
+        worst.append((v.mean(), f'cond: {desc} outside [{lo:g}, {hi:g}]'))
+    for a, va, b, vb, desc in rules['fd']:
+        v = (cat[:, a] == va) & (cat[:, b] != vb)
+        bad['fd'] |= v
+        worst.append((v.mean(), f'fd: {desc}'))
+    for a, va, b, vb, desc in rules['pair']:
+        v = (cat[:, a] == va) & (cat[:, b] == vb)
+        bad['pair'] |= v
+        worst.append((v.mean(), f'pair: {desc}'))
+    any_bad = np.zeros(n, bool)
+    for v in bad.values():
+        any_bad |= v
+    # 'substantive' ignores the whole-number format rule, which is a
+    # decoding/rounding issue rather than an implausible record
+    subst = np.zeros(n, bool)
+    for k, v in bad.items():
+        if k != 'integer':
+            subst |= v
+    worst = [w for w in worst if not w[1].startswith('integer')]
+    worst.sort(key=lambda t: -t[0])
+    return {'valid_rate': float(1 - any_bad.mean()),
+            'substantive_valid_rate': float(1 - subst.mean()),
+            'by_type': {k: float(v.mean()) for k, v in bad.items()},
+            'n_rules': {k: len(v) for k, v in rules.items()},
+            'worst': [(round(float(r), 4), d) for r, d in worst[:top] if r > 0]}

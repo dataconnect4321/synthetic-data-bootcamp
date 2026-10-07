@@ -38,6 +38,7 @@ from run_flip_demo import (
     NUMERIC_COLS, CATEGORICAL_COLS, DATA_PATH,
     load_sample, train_flip, fidelity_metrics, privacy_metrics,
     fairness_metrics, decode_synthetic_data, generate_html_report,
+    infer_numeric_schema,
 )
 
 from tabsyn.model import MLPDiffusion, Model
@@ -389,8 +390,14 @@ def main():
                                                       sample_idx=s_idx)
 
     # ---- Export ----------------------------------------------------------
-    synthetic_df = decode_synthetic_data(syn_num, syn_cat, num_means,
-                                         num_stds, encoders)
+    # clip/round numerics to the real columns' format; real min/max is not
+    # released under DP (the decoder's DP range clip applies instead)
+    num_schema = infer_numeric_schema(
+        X_num.numpy() * num_stds.values + num_means.values,
+        list(num_means.index))
+    synthetic_df = decode_synthetic_data(
+        syn_num, syn_cat, num_means, num_stds, encoders,
+        num_schema=num_schema, schema_bounds=not params.get('USE_DP'))
     os.makedirs(os.path.dirname(syn_path), exist_ok=True)
     synthetic_df.to_csv(syn_path, index=False)
     print(f'Synthetic data ({len(synthetic_df)} rows) saved to {syn_path}')

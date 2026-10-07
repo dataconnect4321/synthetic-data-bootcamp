@@ -954,12 +954,58 @@ SYNTHETIC_DATA_PATH = os.path.join(
     'Data', 'flip_synthetic_bmo_nationwide.csv')
 
 
-def decode_synthetic_data(syn_num, syn_cat, num_means, num_stds, cat_encoders):
+def infer_numeric_schema(real_raw, names, max_decimals=6):
+    """Per-column format of the REAL numeric data, for any dataset:
+    'decimals' = the fewest decimal places (0..max_decimals) every real value
+    uses (0 = whole numbers), 'lo'/'hi' = the real min / max.
+
+    PRIVACY: decimals is a schema property (a minor disclosure). lo/hi are
+    order statistics of real records and are NOT DP - under DP pass
+    bounds=False to apply_numeric_schema (the decoder already clips to a
+    DP-released range).
+    """
+    real_raw = np.asarray(real_raw, dtype=np.float64)
+    schema = {}
+    for i, name in enumerate(names):
+        x = real_raw[:, i]
+        dec = max_decimals
+        for k in range(max_decimals + 1):
+            # tolerance absorbs float error from de-standardization
+            if np.allclose(x, np.round(x, k), rtol=0, atol=1e-3 * 10.0 ** -k):
+                dec = k
+                break
+        schema[name] = {'decimals': dec, 'lo': float(x.min()),
+                        'hi': float(x.max())}
+    return schema
+
+
+def apply_numeric_schema(df, schema, bounds=True):
+    """Make synthetic numerics look like the real column: clip to the real
+    range (bounds=True) and round to the real number of decimals - so whole-
+    number columns (age, counts) come out whole, never negative where the
+    real data never is, etc. Returns a copy; columns not in schema are kept."""
+    df = df.copy()
+    for name, s in schema.items():
+        if name not in df:
+            continue
+        x = df[name].to_numpy(dtype=np.float64)
+        if bounds:
+            x = np.clip(x, s['lo'], s['hi'])
+        x = np.round(x, s['decimals'])
+        df[name] = x.astype(np.int64) if s['decimals'] == 0 else x
+    return df
+
+
+def decode_synthetic_data(syn_num, syn_cat, num_means, num_stds, cat_encoders,
+                          num_schema=None, schema_bounds=True):
     """Reverse the normalization/label-encoding from load_sample() so the
     synthetic array is human-readable in the same units/labels as the
-    source CSV."""
+    source CSV. With num_schema (infer_numeric_schema on the real training
+    data), numerics are clipped and rounded to the real columns' format."""
     num_denorm = syn_num * num_stds.values[None, :] + num_means.values[None, :]
     df = pd.DataFrame(num_denorm, columns=NUMERIC_COLS)
+    if num_schema is not None:
+        df = apply_numeric_schema(df, num_schema, bounds=schema_bounds)
     for j, col in enumerate(CATEGORICAL_COLS):
         uniques = cat_encoders[col]
         codes = np.clip(syn_cat[:, j], 0, len(uniques) - 1)
