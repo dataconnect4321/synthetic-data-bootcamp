@@ -130,7 +130,8 @@ def normalized_cluster_balance(clusters, groups):
     return float(worst)
 
 
-def adversarial_ncb(num, cat, s_idx, pred_groups, n_clusters=2, seed=0):
+def adversarial_ncb(num, cat, s_idx, pred_groups, n_clusters=2, seed=0,
+                    covariance_type='diag', n_init=3):
     """A-NCB: NCB of a GMM clustering of the FAMD-embedded non-protected
     columns, scored against the ADVERSARIALLY INFERRED protected labels
     (`pred_groups`) rather than the stored column.
@@ -138,16 +139,24 @@ def adversarial_ncb(num, cat, s_idx, pred_groups, n_clusters=2, seed=0):
     A diagonal-covariance mixture is used on the full set of FAMD
     components; FAMD scores are globally decorrelated, so this loses little
     and keeps the fit stable."""
-    clusters = cluster_features(num, cat, s_idx, n_clusters, seed)
+    clusters = cluster_features(num, cat, s_idx, n_clusters, seed,
+                                covariance_type, n_init)
     return normalized_cluster_balance(clusters, pred_groups)
 
 
-def cluster_features(num, cat, s_idx, n_clusters=2, seed=0):
-    """GMM cluster ids of the FAMD-embedded non-protected columns."""
+def cluster_features(num, cat, s_idx, n_clusters=2, seed=0,
+                     covariance_type='diag', n_init=3):
+    """GMM cluster ids of the FAMD-embedded non-protected columns.
+
+    covariance_type='full', n_init=1 is sklearn's default and the likely
+    paper setup; on Adult it recovers the married / not-married split. The
+    'diag' default splits off a ~11% cluster unrelated to sex, which keeps
+    A-NCB near 1 for real and synthetic data alike."""
     _, _, _, num_f, cat_f = _split_features(num, cat, s_idx)
     coords = famd_coordinates(num_f.astype(np.float64), cat_f)
-    gmm = GaussianMixture(n_components=n_clusters, covariance_type='diag',
-                          n_init=3, random_state=seed)
+    gmm = GaussianMixture(n_components=n_clusters,
+                          covariance_type=covariance_type,
+                          n_init=n_init, random_state=seed)
     return gmm.fit_predict(coords)
 
 
@@ -332,7 +341,7 @@ def proxy_ranking(real_num, real_cat, s_idx, syn_num, syn_cat, ref,
 
 
 def fairness_scores(num, cat, s_idx, ref=None, n_splits=3, n_clusters=2,
-                    seed=0):
+                    seed=0, covariance_type='diag', n_init=3):
     """BER and A-NCB of a table.
 
     BER uses the table's own protected column (out-of-fold classifier), as
@@ -345,7 +354,8 @@ def fairness_scores(num, cat, s_idx, ref=None, n_splits=3, n_clusters=2,
     adv = own if ref is None else infer_protected(ref[0], ref[1], num, cat,
                                                   s_idx, seed)
     n_groups = len(np.unique(y))
-    clusters = cluster_features(num, cat, s_idx, n_clusters, seed)
+    clusters = cluster_features(num, cat, s_idx, n_clusters, seed,
+                                covariance_type, n_init)
     return {
         'ber': balanced_error_rate(y, own),
         'ber_chance': chance_ber(n_groups),
@@ -427,3 +437,53 @@ def epsilon_identifiability(real_num, real_cat, syn_num, syn_cat,
     d_rs = _nearest_gower(real_t, syn_t, ranges, weights, n_num,
                           device=device)
     return float((d_rs < d_rr).float().mean())
+
+
+# --------------------------------------------------------------------------
+# alpha-precision / beta-recall (Alaa et al. 2022), TabSyn's setup
+# --------------------------------------------------------------------------
+
+def _mixed_matrix(num_raw, cat, sizes):
+    """Raw-scale numerics + one-hot categoricals: the representation TabSyn's
+    eval_quality.py hands to synthcity's naive AlphaPrecision."""
+    parts = [np.asarray(num_raw, dtype=np.float64)]
+    for j, k in enumerate(sizes):
+        parts.append(np.eye(k)[np.asarray(cat)[:, j]])
+    return np.concatenate(parts, axis=1)
+
+
+def alpha_precision_beta_recall(real_num_raw, real_cat, syn_num_raw, syn_cat,
+                                sizes, n_steps=30):
+    """Integrated alpha-precision and beta-recall, a port of synthcity's
+    AlphaPrecision.metrics (the 'naive' variant TabSyn and the FLIP paper
+    report): no learned embedding, the real data's mean as center.
+
+    alpha-precision: is synthetic data inside the real data's alpha-support
+    (fidelity). beta-recall: does synthetic data cover the real data's
+    beta-support (diversity). Both in [0, 1], higher is better.
+    """
+    from sklearn.neighbors import NearestNeighbors
+    X = _mixed_matrix(real_num_raw, real_cat, sizes)
+    Y = _mixed_matrix(syn_num_raw, syn_cat, sizes)
+    # synthcity's naive variant min-max scales every column on the REAL data
+    # first (_normalize_covariates); without it fnlwgt / capital-gain
+    # dominate every distance and alpha sits near 1 regardless of quality
+    lo, span = X.min(axis=0), X.max(axis=0) - X.min(axis=0)
+    span[span == 0] = 1.0
+    X, Y = (X - lo) / span, (Y - lo) / span
+    alphas = np.linspace(0, 1, n_steps)
+    center = X.mean(axis=0)
+    radii = np.quantile(np.sqrt(((X - center) ** 2).sum(1)), alphas)
+    syn_center = Y.mean(axis=0)
+    syn_to_center = np.sqrt(((Y - center) ** 2).sum(1))
+    real_to_real = NearestNeighbors(n_neighbors=2).fit(X).kneighbors(X)[0][:, 1]
+    d_rs, idx_rs = NearestNeighbors(n_neighbors=1).fit(Y).kneighbors(X)
+    d_rs, idx_rs = d_rs[:, 0], idx_rs[:, 0]
+    closest_d = np.sqrt(((Y[idx_rs] - syn_center) ** 2).sum(1))
+    closest_radii = np.quantile(closest_d, alphas)
+    prec = np.array([(syn_to_center <= r).mean() for r in radii])
+    cov = np.array([((d_rs <= real_to_real) & (closest_d <= r)).mean()
+                    for r in closest_radii])
+    a = 1 - np.abs(alphas - prec).sum() / alphas.sum()
+    b = 1 - np.abs(alphas - cov).sum() / alphas.sum()
+    return float(a), float(b)

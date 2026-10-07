@@ -538,12 +538,35 @@ def proxy_adversary_loss(adv_head, stages, sub_label, mask, proxy_idx, s_idx,
 
 
 def marginal_matching_penalty(stages, X_num, X_cat, s_idx,
-                              n_quantiles=8):
+                              n_quantiles=8, kind='tv', temperature=0.1,
+                              eps=1e-4):
     """Penalty pulling each column's decoded marginal toward the batch's real
-    marginal: category shares (TV) for categorical columns, quantile
-    matching (mean absolute quantile gap) for numeric columns. Zero when the
-    decoded batch equals the real batch. Per-batch (not per-record); under
-    DP it belongs in the batch-coupled pass."""
+    marginal: category shares for categorical columns, quantile matching
+    (mean absolute quantile gap) for numeric columns. Zero when the decoded
+    batch equals the real batch. Per-batch (not per-record); under DP it
+    belongs in the batch-coupled pass.
+
+    kind='tv': mean softmax share, total variation averaged over columns
+    (original). Blind to vanishing categories twice over: deleting a 13%
+    category costs ~0.13 / n_columns, and a category can keep its mean
+    softmax mass while never winning the argmax the decoder outputs.
+    kind='kl': KL(real share || synthetic share) SUMMED over columns, with
+    synthetic shares from a sharpened softmax (logits / temperature), a
+    differentiable stand-in for argmax shares. The cost grows without bound
+    as a real category's share goes to 0, so deleting categories is
+    expensive while moving rows between categories stays cheap."""
+    if kind == 'kl':
+        n = X_num.shape[0]
+        qs = torch.linspace(0, 1, n_quantiles, device=X_num.device)[1:-1]
+        pen = (torch.quantile(X_num, qs, dim=0)
+               - torch.quantile(stages['recon_x_num'], qs, dim=0)).abs().mean()
+        for i, logits in enumerate(stages['recon_x_cat']):
+            k = logits.shape[1]
+            p = torch.bincount(X_cat[:, i], minlength=k).float() / n
+            q = torch.softmax(logits / temperature, dim=1).mean(dim=0)
+            m = p > 0
+            pen = pen + (p[m] * (torch.log(p[m]) - torch.log(q[m] + eps))).sum()
+        return pen
     pen = 0.0
     n = X_num.shape[0]
     # numeric: quantile matching
@@ -568,7 +591,8 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
                                      binary_w1: bool = True,
                                      exclude_cat=(),
                                      t_idx=None,
-                                     target_in_fairness=False) -> torch.Tensor:
+                                     target_in_fairness=False,
+                                     reduce='mean') -> torch.Tensor:
     """FLIP multi-stage disentanglement (Sec. 4.3.2 of the paper).
 
     Applies the negative-CKA^T disentanglement at three intervention
@@ -647,7 +671,52 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
     # differences back in, so it gets the same CKA^T + mean treatment.
     losses.append(disentanglement_loss(h_flat, group, mean_weight))
 
-    return torch.stack(losses).mean()
+    # reduce='sum' gives each stage the full lambda (the mean divides it by
+    # the number of stages, ~3x weaker than a per-stage reading of Eq. 10)
+    stacked = torch.stack(losses)
+    return stacked.sum() if reduce == 'sum' else stacked.mean()
+
+
+def decoded_joint_rep(stages, s_idx, t_idx=None):
+    """The decoded row as the A-NCB adversary and clustering see it: numeric
+    reconstructions plus the softmax of every non-protected categorical
+    (target excluded when t_idx is given), standardized per dimension with
+    detached batch statistics so no column dominates by scale."""
+    parts = [stages['recon_x_num']]
+    for j, c in enumerate(stages['recon_x_cat']):
+        if j == s_idx or j == t_idx:
+            continue
+        parts.append(torch.softmax(c, dim=1))
+    x = torch.cat(parts, dim=1)
+    mu, sd = x.mean(0).detach(), x.std(0).detach().clamp_min(1e-4)
+    return (x - mu) / sd
+
+
+def random_fourier_features(x, n_features=256, seed=0):
+    """phi(x) = sqrt(2/D) cos(x W / sigma + b): an explicit RBF-kernel map
+    with a fixed (seeded) W and the batch median distance as bandwidth
+    (detached). Linear statistics of phi are kernel statistics of x."""
+    g = torch.Generator(device='cpu').manual_seed(seed)
+    W = torch.randn(x.shape[1], n_features, generator=g).to(x.device)
+    b = (2 * np.pi * torch.rand(n_features, generator=g)).to(x.device)
+    with torch.no_grad():
+        sub = x[:512]
+        d = torch.cdist(sub, sub)
+        sigma = d[d > 0].median().clamp_min(1e-4)
+    return np.sqrt(2.0 / n_features) * torch.cos(x @ W / sigma + b)
+
+
+def decoded_joint_loss(stages, group, s_idx, t_idx=None, mode='linear',
+                       mean_weight=1.0):
+    """CKA^T + normalized mean gap on the JOINT decoded output. The paper's
+    detokenizer stage aligns each column separately and never sees the
+    joint pattern A-NCB measures; latent-stage alignment is undone by the
+    decoder. mode 'rff' lifts the decoded row with random Fourier features
+    first (kernel moments); 'linear' uses it as is. Batch-coupled."""
+    x = decoded_joint_rep(stages, s_idx, t_idx)
+    if mode == 'rff':
+        x = random_fourier_features(x)
+    return disentanglement_loss(x, group, mean_weight)
 
 
 def sliced_wasserstein_distance(X: torch.Tensor, Y: torch.Tensor,

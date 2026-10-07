@@ -42,6 +42,7 @@ from tabsyn.vae.flip_fairness import (
     uniform_attribute_loss,
     uniform_attribute_loss_per_sample,
     proxy_sublabel,
+    decoded_joint_loss,
     proxy_independence_loss,
     proxy_adversary_loss,
     marginal_matching_penalty,
@@ -91,6 +92,13 @@ TRADEOFF_PARAMS = {
     # like LAMBDA_FAIR. PROXY_EXCLUDE_DISENT drops the proxy token from the
     # CKA^T terms so they act on the non-proxy representation only.
     'PROXY_WEIGHT': 0.0,
+    # Joint decoded-output disentanglement: CKA^T + mean gap on the whole
+    # decoded row (what A-NCB sees), weighted by the same ramped lambda.
+    # 'off', 'linear', or 'rff' (random-Fourier-feature kernel lift).
+    'DECODED_JOINT': 'off',
+    # Marginal penalty form: 'tv' (original) or 'kl' (vanishing-category
+    # guard; see flip_fairness.marginal_matching_penalty).
+    'MARGINAL_KIND': 'tv',
     'PROXY_MODE': 'hsic',
     'PROXY_IDX': None,
     'PROXY_CODES': None,
@@ -496,13 +504,15 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                     exclude_cat=exclude_cat,
                     t_idx=params.get('TARGET_IDX'),
                     target_in_fairness=params.get('TARGET_IN_FAIRNESS',
-                                                   False))
+                                                   False),
+                    reduce=params.get('STAGE_REDUCE', 'mean'))
                 # lambda ramp over the first LAMBDA_RAMP_FRAC of Phase 2
                 p2_frac = (epoch - phase1_epochs) / max(1, params['PHASE2_EPOCHS'])
                 lam_eff = params['LAMBDA_FAIR'] * min(
                     1.0, p2_frac / max(1e-9, params.get('LAMBDA_RAMP_FRAC', 0.25)))
                 marg_pen = marginal_matching_penalty(
-                    stages, bnum, bcat, s_idx) \
+                    stages, bnum, bcat, s_idx,
+                    kind=params.get('MARGINAL_KIND', 'tv')) \
                     if params.get('MARGINAL_WEIGHT', 0) else torch.tensor(0.0,
                         device=bnum.device)
                 # Clamp the divergence penalty: without a cap the SWD term
@@ -512,6 +522,13 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                 div = torch.clamp(div, max=params['MAX_DIV_PENALTY'])
                 loss_fair = div + lam_eff * disent \
                     + params.get('MARGINAL_WEIGHT', 0) * marg_pen
+                if params.get('DECODED_JOINT', 'off') != 'off':
+                    loss_fair = loss_fair + lam_eff * decoded_joint_loss(
+                        stages, bcat[:, s_idx].long(), s_idx,
+                        t_idx=None if params.get('TARGET_IN_FAIRNESS')
+                        else params.get('TARGET_IDX'),
+                        mode=params['DECODED_JOINT'],
+                        mean_weight=params.get('MEAN_SHIFT_WEIGHT', 1.0))
                 if proxy_w and proxy_head is None:
                     # HSIC mode: batch-coupled -> group-level pass
                     pmask, plab = proxy_sublabel(bcat, proxy_idx,

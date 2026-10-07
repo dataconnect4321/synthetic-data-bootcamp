@@ -127,8 +127,11 @@ def build_params(args):
         'WEIGHT_DECAY': args.weight_decay,
         'LS_MODE': args.ls_mode,
         'RECON_S': args.recon_s,
-        'MARGINAL_WEIGHT': args.marginal_weight,
+        'MARGINAL_WEIGHT': args.marginal_weight or 0.0,
+        'STAGE_REDUCE': args.stage_reduce,
+        'MARGINAL_KIND': args.marginal_kind,
         'PROXY_WEIGHT': args.proxy_weight,
+        'DECODED_JOINT': args.decoded_joint,
         'PROXY_MODE': args.proxy_mode,
         'PROXY_EXCLUDE_DISENT': args.proxy_exclude_disent,
     })
@@ -146,15 +149,21 @@ def build_params(args):
     return params, dparams
 
 
-def averaged_scores(num, cat, s_idx, ref=None, fast=False):
+def averaged_scores(num, cat, s_idx, ref=None, fast=False, n_seeds=None,
+                    **cluster_kw):
     """fairness_scores averaged over seeds (classifier + GMM init): A-NCB is a
-    minimum over clusters, so a single seed is noisy. Fast runs use 2 seeds."""
-    seeds = range(2) if fast else range(5)
-    runs = [fairness_scores(num, cat, s_idx, ref=ref, seed=s) for s in seeds]
+    minimum over clusters, so a single seed is noisy. Fast runs use 2 seeds.
+    cluster_kw (covariance_type, n_init) selects the A-NCB clustering; the
+    median is reported alongside the mean because the full-covariance fit
+    can land on different splits per seed."""
+    seeds = range(n_seeds or (2 if fast else 5))
+    runs = [fairness_scores(num, cat, s_idx, ref=ref, seed=s, **cluster_kw)
+            for s in seeds]
     out = {}
     for k in runs[0]:
         v = np.array([r[k] for r in runs])
         out[k], out[k + '_sd'] = float(v.mean()), float(v.std())
+        out[k + '_median'] = float(np.median(v))
     return out
 
 
@@ -308,6 +317,11 @@ def main():
                          'logits; argmax matches the other columns and the '
                          'paper runs, sample avoids the degenerate column '
                          'the per-sample L_S produces')
+    ap.add_argument('--cat-decode', choices=['argmax', 'sample'],
+                    default='argmax',
+                    help='decode every categorical by argmax (default) or by '
+                         'sampling its softmax, so generated shares equal the '
+                         'mean probabilities the losses train on')
     ap.add_argument('--diff-epochs', type=int, default=2000)
     ap.add_argument('--diff-batch', type=int, default=4096)
     ap.add_argument('--paper-config', action='store_true',
@@ -327,9 +341,21 @@ def main():
     ap.add_argument('--save-phase1', default=None,
                     help='save the Phase-1(+Phase-2) VAE checkpoint to this '
                          'path (use with --phase2-epochs 0 to bank Phase 1)')
-    ap.add_argument('--marginal-weight', type=float, default=0.0,
+    ap.add_argument('--marginal-weight', type=float, default=None,
                     help='marginal-matching penalty weight (shares + '
-                         'numeric quantiles)')
+                         'numeric quantiles); default 0, or 1.0 under '
+                         '--paper-config. Not in the paper: it resists the '
+                         'output shift CKA^T needs')
+    ap.add_argument('--marginal-kind', choices=['tv', 'kl'], default='tv',
+                    help='marginal penalty form: tv (mean-softmax TV averaged '
+                         'over columns, original) or kl (KL(real||syn) on '
+                         'sharpened shares, summed over columns - stops '
+                         'categories from vanishing)')
+    ap.add_argument('--stage-reduce', choices=['mean', 'sum'],
+                    default='mean',
+                    help='combine the latent / detokenizer / decoder '
+                         'disentanglement stages by mean (repo default) or '
+                         'sum (full lambda per stage)')
     ap.add_argument('--recon-s', action='store_true',
                     help='keep the protected attribute in the reconstruction '
                          'CE so the synthetic S column is real (needed for '
@@ -342,6 +368,25 @@ def main():
     ap.add_argument('--proxy-labels', default=None,
                     help='the two sex-specific labels of --proxy-col; '
                          'default: auto-detected')
+    ap.add_argument('--mask-proxies', action='store_true',
+                    help='pre-training decoupling: merge each auto-detected '
+                         'proxy class (e.g. Husband/Wife) into one new '
+                         'category in both folds. The real BER/A-NCB '
+                         'reference uses the original data; a masked-real '
+                         'reference is reported alongside')
+    ap.add_argument('--decoded-joint', choices=['off', 'linear', 'rff'],
+                    default='off',
+                    help='add CKA^T + mean gap on the JOINT decoded output '
+                         '(what A-NCB sees), weighted by lambda; rff lifts '
+                         'it with random Fourier features first')
+    ap.add_argument('--repair-tau', type=float, default=0.0,
+                    help='pre-training scrambling repair (Feldman et al.): '
+                         'scramble every non-target column\'s link to sex '
+                         'with strength tau in [0, 1], keeping each '
+                         'column\'s overall distribution (nothing can '
+                         'vanish). Applied after --mask-proxies')
+    ap.add_argument('--mask-label', default='MASK',
+                    help='name of the merged category (default MASK)')
     ap.add_argument('--decouple-curve', action='store_true',
                     help='post-hoc decoupling: re-draw the sex-specific '
                          'label from P(label | others)^tau * pi and sweep '
@@ -377,7 +422,8 @@ def main():
                       BATCH_SIZE=4096, D_TOKEN=4, FACTOR=32,
                       BETA_MAX=1e-2, BETA_MIN=1e-5, BETA_LAMBDA=0.7,
                       BETA_PATIENCE=10, PHASE2_LR_SCALE=1.0,
-                      MARGINAL_WEIGHT=1.0)
+                      MARGINAL_WEIGHT=(1.0 if args.marginal_weight is None
+                                       else args.marginal_weight))
     device = torch.device(params['DEVICE'])
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -398,6 +444,42 @@ def main():
     if detected:
         print('  auto-detected proxy classes: '
               + '; '.join(describe_classes(detected, CATEGORICAL, enc)))
+    # Pre-training masking: each detected class is merged into ONE new
+    # category (Husband, Wife -> MASK) in BOTH folds, so the generator never
+    # sees the sex-specific label and every table scored against the
+    # synthetic one shares its vocabulary. The raw copies serve only as the
+    # original-data real reference (BER/A-NCB) and to define impossible
+    # combinations.
+    tr_c_raw, te_c_raw = data['train_cat'].copy(), data['test_cat'].copy()
+    if args.mask_proxies:
+        from tabsyn.vae.proxy_decouple import mask_proxy_classes
+        if not detected:
+            raise SystemExit('--mask-proxies: no proxy class detected')
+        mask_codes = []
+        for cl in detected:
+            col = CATEGORICAL[cl['col']]
+            mask_codes.append(len(enc[col]))
+            enc[col] = np.append(enc[col], args.mask_label)
+        data['train_cat'] = mask_proxy_classes(tr_c_raw, detected, mask_codes)
+        data['test_cat'] = mask_proxy_classes(te_c_raw, detected, mask_codes)
+        X_cat = torch.tensor(data['train_cat'])
+        categories = [len(enc[c]) for c in CATEGORICAL]
+        changed = float((data['train_cat'] != tr_c_raw).any(axis=1).mean())
+        print(f'  masked proxy classes -> {args.mask_label!r}: '
+              f'{changed:.3f} of training rows changed')
+    # Pre-training scrambling repair: the GENERATOR trains on a copy of the
+    # training fold whose columns' links to sex are scrambled with strength
+    # tau (overall distributions kept). data['train_*'] stays unrepaired, so
+    # every quality metric is measured against the real population.
+    if args.repair_tau:
+        from tabsyn.vae.proxy_decouple import repair_toward_independence
+        rep_n, rep_c = repair_toward_independence(
+            data['train_num'], data['train_cat'], s_idx, args.repair_tau,
+            exclude=(t_idx,), seed=args.split_seed)
+        X_num, X_cat = torch.tensor(rep_n), torch.tensor(rep_c)
+        changed = float((rep_c != data['train_cat']).any(axis=1).mean())
+        print(f'  scrambling repair tau={args.repair_tau:g}: {changed:.3f} '
+              f'of training rows got a new category')
     # Proxy decoupling is optional: a plain baseline (no --proxy-weight,
     # no --decouple-curve) must run on datasets without a near-1:1 proxy.
     need_proxy = args.proxy_weight > 0 or args.decouple_curve
@@ -434,6 +516,10 @@ def main():
                              'labels')
         proxy_codes = tuple(int(np.where(enc[args.proxy_col] == lab)[0][0])
                             for lab in proxy_labels)
+    if args.mask_proxies:
+        # the sex-specific labels no longer exist in the masked data
+        proxy_idx = proxy_codes = None
+        proxy_labels = []
     params.update(PROXY_IDX=proxy_idx, PROXY_CODES=proxy_codes,
                   TARGET_IN_FAIRNESS=args.target_in_fairness,
                   TARGET_IDX=t_idx)
@@ -476,7 +562,8 @@ def main():
         syn_num, syn_cat, stats_budgets = full.decode_latents(
             vae, z, device, X_num=X_num, params=params,
             num_floor=(-data['means'] / data['stds']).values,
-            sample_idx=s_idx if args.s_decode == 'sample' else None)
+            sample_idx=s_idx if args.s_decode == 'sample' else None,
+            sample_all=args.cat_decode == 'sample')
         diff_acc = None
     else:
         print('\n[Stage 2] latent diffusion')
@@ -490,7 +577,8 @@ def main():
         syn_num, syn_cat, stats_budgets = full.decode_latents(
             vae, sampled, device, X_num=X_num, params=params,
             num_floor=(-data['means'] / data['stds']).values,
-            sample_idx=s_idx if args.s_decode == 'sample' else None)
+            sample_idx=s_idx if args.s_decode == 'sample' else None,
+            sample_all=args.cat_decode == 'sample')
 
     syn_df = demo.decode_synthetic_data(syn_num, syn_cat, data['means'],
                                         data['stds'], enc)
@@ -517,9 +605,23 @@ def main():
     # adversary trained on the real TRAINING fold, applied to the real TEST
     # fold (previously the synthetic-scored adversary was reused, which is
     # a different procedure). ncb_stored is reported alongside.
-    real_test = averaged_scores(data['test_num'], data['test_cat'], s_idx,
-                                ref=(tr_n, tr_c))
-    real_train = averaged_scores(tr_n, tr_c, s_idx)
+    real_test = averaged_scores(data['test_num'], te_c_raw, s_idx,
+                                ref=(tr_n, tr_c_raw))
+    real_train = averaged_scores(tr_n, tr_c_raw, s_idx)
+    # A-NCB with a FULL-covariance mixture (sklearn default, n_init=1;
+    # likely the paper's setup): on Adult it recovers the married split,
+    # unlike the diag fit. 10 seeds; mean and median reported.
+    fc = dict(n_seeds=10, covariance_type='full', n_init=1)
+    syn_fc = averaged_scores(syn_num, syn_cat, s_idx, ref=ref_ho, **fc)
+    real_test_fc = averaged_scores(data['test_num'], te_c_raw, s_idx,
+                                   ref=(tr_n, tr_c_raw), **fc)
+    real_test_reenc_fc = (averaged_scores(data['test_num'], data['test_cat'],
+                                          s_idx, ref=(tr_n, tr_c), **fc)
+                          if args.mask_proxies else None)
+    # secondary reference: the real data after the same masking
+    real_test_reenc = (averaged_scores(data['test_num'], data['test_cat'],
+                                       s_idx, ref=(tr_n, tr_c))
+                       if args.mask_proxies else None)
     eps_id = None if args.tier1 else epsilon_identifiability(tr_n, tr_c,
                                                             syn_num, syn_cat)
     lv_auc = label_validity_auc(tr_n, tr_c, syn_num, syn_cat, s_idx)
@@ -587,6 +689,19 @@ def main():
         raise SystemExit(f'COLLAPSED: income {syn_income_rate:.3f} vs real '
                           f'{real_income_rate:.3f}, W1 {fid["num_w1_mean"]:.3f}; '
                           f'result flagged and not scored')
+    # alpha-precision / beta-recall (paper Sec. 5.3.1, TabSyn's naive
+    # AlphaPrecision): raw-scale numerics + one-hot categoricals, against
+    # the training fold the generator learned (masked when masking). The
+    # held-out fold scored the same way is the real-data reference.
+    from tabsyn.vae.paper_metrics import alpha_precision_beta_recall
+    def _raw(n):
+        return n * data['stds'].values + data['means'].values
+    alpha_p, beta_r = alpha_precision_beta_recall(
+        _raw(tr_n), tr_c, _raw(syn_num), syn_cat, categories)
+    alpha_p_real, beta_r_real = alpha_precision_beta_recall(
+        _raw(tr_n), tr_c, _raw(te_n), te_c, categories)
+    print(f'  alpha-precision {alpha_p:.3f}  beta-recall {beta_r:.3f}  '
+          f'(real held-out: {alpha_p_real:.3f} / {beta_r_real:.3f})')
     fair = demo.fairness_metrics(tr_c, syn_cat, t_idx, s_idx, enc,
                                  real_num=tr_n, syn_num=syn_num)
 
@@ -660,9 +775,9 @@ def main():
     # impossible-combination rate: share of synthetic rows carrying a
     # (protected value, category) pair essentially absent from the real
     # data (the 'male wife' rate, generalized to every column).
-    imposs = impossible_combination_rate(syn_cat, tr_c, s_idx,
+    imposs = impossible_combination_rate(syn_cat, tr_c_raw, s_idx,
                                           exclude=(t_idx,))
-    imposs_real = impossible_combination_rate(tr_c, tr_c, s_idx,
+    imposs_real = impossible_combination_rate(tr_c_raw, tr_c_raw, s_idx,
                                               exclude=(t_idx,))
     print(f'  impossible-combination rate: syn {imposs["any"]:.3f} '
           f'(real reference {imposs_real["any"]:.3f}); worst col '
@@ -674,7 +789,7 @@ def main():
     if detected:
         pm_dep_syn = proxy_member_dependence(syn_cat, detected,
                                              exclude=(s_idx, t_idx))
-        pm_dep_real = proxy_member_dependence(tr_c, detected,
+        pm_dep_real = proxy_member_dependence(tr_c_raw, detected,
                                               exclude=(s_idx, t_idx))
         print('  proxy-member dependence (syn/real): '
               + '; '.join(f'{describe_classes([d], CATEGORICAL, enc)[0]} '
@@ -735,6 +850,12 @@ def main():
         'n_test': len(data['test_num']),
         'paper_metrics': {
             'syn': syn, 'real_test': real_test, 'real_train': real_train,
+            'real_test_reencoded': real_test_reenc,
+            'alpha_precision': alpha_p, 'beta_recall': beta_r,
+            'alpha_precision_real': alpha_p_real,
+            'beta_recall_real': beta_r_real,
+            'syn_fullcov': syn_fc, 'real_test_fullcov': real_test_fc,
+            'real_test_reencoded_fullcov': real_test_reenc_fc,
             'syn_paper_style': syn_paper,
             'eps_identifiability': eps_id,
             'label_validity_auc': lv_auc,
@@ -794,6 +915,14 @@ def main():
           f'(chance {syn["ber_chance"]:.2f})')
     print(f'  A-NCB (strict, real-trained adversary) '
           f'syn={syn["a_ncb"]:.3f}  real(test)={real_test["a_ncb"]:.3f}')
+    print(f'  A-NCB (full-cov mixture, 10 seeds) syn={syn_fc["a_ncb"]:.3f} '
+          f'(median {syn_fc["a_ncb_median"]:.3f})  '
+          f'real(test)={real_test_fc["a_ncb"]:.3f} '
+          f'(median {real_test_fc["a_ncb_median"]:.3f})')
+    if real_test_reenc is not None:
+        print(f'  real reference after masking: '
+              f'BER={real_test_reenc["ber"]:.3f}  '
+              f'A-NCB={real_test_reenc["a_ncb"]:.3f}')
     print(f'  A-NCB (paper-style, own-S adversary) '
           f'syn={syn_paper["a_ncb"]:.3f}  real(train, own-S)='
           f'{real_train["a_ncb"]:.3f}')

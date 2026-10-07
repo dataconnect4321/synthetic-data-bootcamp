@@ -109,3 +109,17 @@ def test_balanced_error_rate_basic():
     y = np.array([0, 0, 0, 0, 1, 1])
     assert balanced_error_rate(y, np.zeros(6, dtype=int)) == 0.5
     assert balanced_error_rate(y, y) == 0.0
+
+
+def test_alpha_beta_identical_vs_shifted():
+    from tabsyn.vae.paper_metrics import alpha_precision_beta_recall
+    rng = np.random.default_rng(0)
+    num = rng.normal(size=(1500, 3))
+    cat = rng.integers(0, 4, size=(1500, 2))
+    num2 = rng.normal(size=(1500, 3))
+    cat2 = rng.integers(0, 4, size=(1500, 2))
+    a_same, b_same = alpha_precision_beta_recall(num, cat, num2, cat2, [4, 4])
+    a_far, b_far = alpha_precision_beta_recall(num, cat, num2 + 3.0, cat2,
+                                               [4, 4])
+    assert a_same > 0.85 and b_same > 0.3
+    assert a_far < a_same - 0.3 and b_far < b_same

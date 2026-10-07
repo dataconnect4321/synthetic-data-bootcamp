@@ -1103,3 +1103,54 @@ if __name__ == '__main__':
                 print(f'FAIL  {name}: {type(e).__name__}: {e}')
     print(f'\n{"ALL TESTS PASSED" if failures == 0 else f"{failures} FAILURES"}')
     sys.exit(1 if failures else 0)
+
+# --------------------------------------------------------------------------
+# Joint decoded-output disentanglement
+# --------------------------------------------------------------------------
+
+def _decoded_stages(n, shift, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    group = torch.arange(n) % 2
+    num = torch.randn(n, 3, generator=g) + shift * group[:, None].float()
+    cats = [torch.randn(n, 2, generator=g),             # S (skipped)
+            torch.randn(n, 4, generator=g) + shift * group[:, None].float()]
+    return {'recon_x_num': num, 'recon_x_cat': cats}, group
+
+
+def test_decoded_joint_loss_sees_group_shift():
+    from tabsyn.vae.flip_fairness import decoded_joint_loss
+    for mode in ('linear', 'rff'):
+        same, g = _decoded_stages(512, 0.0)
+        diff, _ = _decoded_stages(512, 2.0)
+        assert decoded_joint_loss(diff, g, s_idx=0, mode=mode) > \
+            decoded_joint_loss(same, g, s_idx=0, mode=mode) + 0.1
+
+
+def test_decoded_joint_loss_has_gradient():
+    from tabsyn.vae.flip_fairness import decoded_joint_loss
+    st, g = _decoded_stages(256, 1.0)
+    st['recon_x_num'].requires_grad_(True)
+    decoded_joint_loss(st, g, s_idx=0, mode='rff').backward()
+    assert st['recon_x_num'].grad.abs().sum() > 0
+
+
+def test_kl_marginal_penalizes_vanishing_category_tv_does_not():
+    """A category that keeps its mean softmax mass but never wins the argmax
+    is invisible to the TV penalty and expensive under KL."""
+    from tabsyn.vae.flip_fairness import marginal_matching_penalty
+    n = 1000
+    X_num = torch.zeros(n, 1)
+    X_cat = torch.tensor([0] * 870 + [1] * 130).view(n, 1)   # real: 87/13
+    # every row: P(cat 1) = 0.13 -> mean softmax share matches, argmax never 1
+    logits = torch.log(torch.tensor([[0.87, 0.13]])).repeat(n, 1)
+    st = {'recon_x_num': X_num.clone(), 'recon_x_cat': [logits]}
+    tv = marginal_matching_penalty(st, X_num, X_cat, s_idx=None, kind='tv')
+    kl = marginal_matching_penalty(st, X_num, X_cat, s_idx=None, kind='kl')
+    assert tv.item() < 0.01
+    assert kl.item() > 0.5
+    # a genuine 87/13 split of confident rows costs ~0 under KL too
+    good = torch.cat([torch.tensor([[5.0, -5.0]]).repeat(870, 1),
+                      torch.tensor([[-5.0, 5.0]]).repeat(130, 1)])
+    st2 = {'recon_x_num': X_num.clone(), 'recon_x_cat': [good]}
+    assert marginal_matching_penalty(st2, X_num, X_cat, None,
+                                     kind='kl').item() < 0.01
