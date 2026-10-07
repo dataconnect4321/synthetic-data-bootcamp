@@ -109,26 +109,45 @@ def test_cka_correlated_higher_than_independent():
     assert linear_cka_t(A, B_correlated) > linear_cka_t(A, B_indep)
 
 
-def test_cka_t_is_covariance_cosine():
-    """CKA^T must equal <A^T A, B^T B>_F / (||A^T A||_F ||B^T B||_F),
-    the cosine similarity of the groups' feature covariances - NOT
-    ||A^T B||^2_F, which pairs rows across groups arbitrarily."""
-    A = torch.randn(64, 16)
-    B = torch.randn(48, 16)  # unequal sizes must be fine
-    Ac = A - A.mean(dim=0, keepdim=True)
-    Bc = B - B.mean(dim=0, keepdim=True)
-    expected = ((Ac.t() @ Ac) * (Bc.t() @ Bc)).sum() / (
-        torch.norm(Ac.t() @ Ac, p='fro') * torch.norm(Bc.t() @ Bc, p='fro'))
-    assert torch.isclose(linear_cka_t(A, B), expected, atol=1e-5)
+def test_cka_t_matches_paper_eq5_6():
+    """CKA^T(A, B) := CKA(A^T, B^T) (Sec. 4.2.2): linear kernels
+    K = A^T A, L = B^T B over the p activations, p x p centering H, and
+    CKA = tr(KHLH) / sqrt(tr(KHKH) tr(LHLH)) (Eqs. 5-6). Paper-literal
+    row centering (center='row'), as in configs/flip.yaml."""
+    A = torch.randn(64, 16, dtype=torch.float64)
+    B = torch.randn(48, 16, dtype=torch.float64)  # unequal sizes are fine
+    p = A.shape[1]
+    H = torch.eye(p, dtype=torch.float64) - 1.0 / p
+    K, L = A.t() @ A, B.t() @ B
+    expected = torch.trace(K @ H @ L @ H) / torch.sqrt(
+        torch.trace(K @ H @ K @ H) * torch.trace(L @ H @ L @ H))
+    assert torch.isclose(linear_cka_t(A, B, center='row'), expected,
+                         atol=1e-8)
 
 
-def test_cka_t_single_feature_is_one():
-    """With p=1 feature, scalar covariances are trivially 'aligned':
-    CKA^T = 1. The old ||A^T B||^2 form returned the squared cosine of
-    an arbitrary row pairing instead."""
-    A = torch.randn(32, 1)
-    B = torch.randn(24, 1)
-    assert torch.isclose(linear_cka_t(A, B), torch.tensor(1.0), atol=1e-5)
+def test_cka_t_sees_group_mean_shift():
+    """Same covariance, different per-feature means: the paper's
+    centering keeps group means in A^T A, so CKA^T drops below 1.
+    (Centering each feature over samples - dim=0, center='group' - scores
+    this ~1; that mode relies on the separate mean-gap term instead.)"""
+    torch.manual_seed(0)
+    mix = torch.randn(6, 6)
+    A = torch.randn(500, 6) @ mix
+    B_same = torch.randn(500, 6) @ mix
+    B_shift = torch.randn(500, 6) @ mix + torch.tensor([3., 0, 0, -3., 0, 0])
+    assert linear_cka_t(A, B_same, center='row') > 0.99
+    assert linear_cka_t(A, B_shift, center='row') < 0.9
+
+
+def test_disentanglement_skips_two_or_fewer_columns():
+    """After centering across activations (center='row'), <= 2 columns
+    make CKA^T constant (no signal), so the loss returns None and is
+    skipped."""
+    groups = torch.randint(0, 2, (32,))
+    row = dict(center='row')
+    assert disentanglement_loss(torch.randn(32, 2), groups, **row) is None
+    assert disentanglement_loss(torch.randn(32, 1), groups, **row) is None
+    assert disentanglement_loss(torch.randn(32, 3), groups, **row) is not None
 
 
 def test_cka_t_unequal_group_sizes():
@@ -207,6 +226,7 @@ def _make_stages(n=64, d_num=4, categories=(3, 5), d_token=8, tokens=5):
         'mu_z': torch.randn(n, tokens, d_token),
         'h': torch.randn(n, tokens, d_token),
         'recon_x_num': torch.randn(n, d_num),
+        'recon_num_pre': torch.randn(n, d_num, d_token),
         'recon_x_cat': [torch.randn(n, c) for c in categories],
         'std_z': torch.randn(n, tokens, d_token).abs(),
     }
@@ -233,24 +253,32 @@ def test_multi_stage_skips_protected_feature():
 
 
 def test_multi_stage_mean_of_stages():
-    """Loss should equal the mean of the three stage losses."""
+    """Loss should equal the mean of the three stage losses; the
+    detokenizer stage averages per-feature losses on the PRE-aggregation
+    numerical logits (one per numeric feature) and the categorical logits."""
     stages = _make_stages()
     groups = torch.randint(0, 2, (64,))
     s_idx = 0
 
     mu_flat = stages['mu_z'].reshape(64, -1)
     h_flat = stages['h'].reshape(64, -1)
-    feat_losses = [disentanglement_loss(stages['recon_x_num'], groups)]
+    pre = stages['recon_num_pre']
+    # the paper-literal setup of configs/flip.yaml: row-centred CKA^T,
+    # per-feature pre-aggregation numerics, no mean-gap or binary-W1 terms
+    row = dict(center='row')
+    feat_losses = [disentanglement_loss(pre[:, j, :], groups, **row)
+                   for j in range(pre.shape[1])]
     for i, cl in enumerate(stages['recon_x_cat']):
         if i == s_idx:
             continue
-        feat_losses.append(disentanglement_loss(cl, groups))
+        feat_losses.append(disentanglement_loss(cl, groups, **row))
 
-    expected = (disentanglement_loss(mu_flat, groups)
+    expected = (disentanglement_loss(mu_flat, groups, **row)
                 + torch.stack(feat_losses).mean()
-                + disentanglement_loss(h_flat, groups)) / 3.0
+                + disentanglement_loss(h_flat, groups, **row)) / 3.0
     got = multi_stage_disentanglement_loss(stages, groups, s_idx=s_idx,
-                                           mean_weight=0.0)
+                                           mean_weight=0.0, binary_w1=False,
+                                           center='row', num_stage='pre')
     assert torch.isclose(got, expected, atol=1e-6)
 
 
@@ -425,16 +453,25 @@ def test_per_sample_ls_positive_for_skewed():
 
 
 def test_per_sample_ls_bounds_batch_mean():
-    """Per-sample sum >= batch-mean L_S (Jensen): a batch can have a
+    """Per-sample L_S >= batch-mean L_S (Jensen): a batch can have a
     uniform mean while individual rows are confidently wrong - the
     per-sample variant catches what the mean hides."""
     # Half the rows one-hot group 0, half one-hot group 1: mean softmax
-    # is uniform (batch-mean L_S ~ 0) but each row is far from uniform.
+    # is uniform (batch-mean L_S ~ 0) but each row is ~0.707 from uniform.
     rows = torch.zeros(16, 2)
     rows[:8, 0] = 10.0
     rows[8:, 1] = 10.0
     assert uniform_attribute_loss(rows).item() < 1e-3
-    assert uniform_attribute_loss_per_sample(rows).item() > 1.0
+    assert uniform_attribute_loss_per_sample(rows).item() > 0.5
+
+
+def test_per_sample_ls_is_batch_mean():
+    """Per-sample L_S is a MEAN like MSE/CE, so it does not grow with the
+    batch size (a sum outweighed reconstruction by ~batch size)."""
+    row = torch.tensor([[3.0, 0.0, 0.0]])
+    small = uniform_attribute_loss_per_sample(row.repeat(8, 1))
+    large = uniform_attribute_loss_per_sample(row.repeat(1024, 1))
+    assert torch.isclose(small, large, atol=1e-6)
 
 
 def test_per_sample_ls_decomposable():
@@ -866,6 +903,11 @@ def test_forward_with_stages_shapes():
     assert out['mu_z'].shape == (n, n_tokens, 4)
     assert out['h'].shape == (n, n_tokens - 1, 4)
     assert out['std_z'].shape == out['mu_z'].shape
+    # Pre-aggregation numerical logits (Sec. 4.3.2): summing over the
+    # token dimension gives the reconstructed numerics
+    assert out['recon_num_pre'].shape == (n, d_num, 4)
+    assert torch.allclose(out['recon_num_pre'].sum(-1), out['recon_x_num'],
+                          atol=1e-6)
 
 
 def test_forward_with_stages_matches_forward():

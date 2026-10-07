@@ -120,12 +120,17 @@ def panel_cmap(direction):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap.add_argument('--lams', default=None,
+                    help='comma-separated lambdas to show (default: all present)')
     ap.add_argument('--prefix', default='fin')
     ap.add_argument('--tier1', action='store_true')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
 
     runs, skipped = load(args.prefix, args.tier1)
+    if args.lams:
+        keep = {int(float(x)) for x in args.lams.split(',')}
+        runs = {k: v for k, v in runs.items() if k[0] in keep}
     if not runs:
         raise SystemExit('no runs found')
     lams = sorted({l for l, _ in runs})

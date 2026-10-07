@@ -1,6 +1,6 @@
 #!/bin/bash
 # Final Adult sweep (see README Part 10). For each fold: bank Phase 1 on the
-# masked data, then FLIP Phase 2 at lambda 0/2/4/8 (tier-1, then the full
+# masked data, then FLIP Phase 2 at lambda 0/4/8 (tier-1, then the full
 # pipeline); plus the scrambling-repair baseline (tau=1, lambda=0).
 # Folds run in parallel. Results: adult_results/{flip,rpb}_f*_lam*.json
 cd "$(dirname "$0")/.."
@@ -15,12 +15,12 @@ flip_chain() {
   [ -f $ck ] || $PY run_adult_flip.py $C --fold $f --phase2-epochs 0 --tier1 \
       --save-phase1 $ck --tag fin_f${f}_bank > $L/fin_f${f}_bank.log 2>&1
   [ -f $ck ] || { echo "fold $f: no bank"; return; }
-  for lam in 0 2 4 8; do
+  for lam in 0 4 8; do
     $PY run_adult_flip.py $C --fold $f --lam $lam --tier1 --phase1-checkpoint $ck \
         --tag flip_f${f}_lam${lam}_t1 > $L/flip_f${f}_lam${lam}_t1.log 2>&1
     echo "flip fold $f lam $lam tier1 exit $?"
   done
-  for lam in 0 2 4 8; do
+  for lam in 0 4 8; do
     $PY run_adult_flip.py $C --fold $f --lam $lam --phase1-checkpoint $ck \
         --tag flip_f${f}_lam${lam} > $L/flip_f${f}_lam${lam}.log 2>&1
     echo "flip fold $f lam $lam full exit $?"

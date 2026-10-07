@@ -38,7 +38,7 @@ from run_flip_demo import (
     NUMERIC_COLS, CATEGORICAL_COLS, DATA_PATH,
     load_sample, train_flip, fidelity_metrics, privacy_metrics,
     fairness_metrics, decode_synthetic_data, generate_html_report,
-    infer_numeric_schema,
+    clip_nonnegative, print_paper_metrics, infer_numeric_schema,
 )
 
 from tabsyn.model import MLPDiffusion, Model
@@ -101,6 +101,12 @@ DIFFUSION_PARAMS = {
 
     # Target delta for Stage 2's (epsilon, delta)-DP guarantee.
     'DP_DELTA': 1e-5,
+
+    # Stop after this many epochs without a lower training loss, as
+    # TabSyn does (patience 500). None trains for all EPOCHS. Only valid
+    # without DP: the decision reads the training loss, which is not
+    # covered by the accounting.
+    'EARLY_STOP_PATIENCE': None,
 }
 
 SYNTHETIC_DATA_PATH = os.path.join(HERE, 'Data',
@@ -118,9 +124,14 @@ REPORT_PATH_ALL = os.path.join(HERE, 'flip_full_report_all.html')
 # ==========================================================================
 # Stage 2: latent diffusion (TabSyn's real generation mechanism)
 # ==========================================================================
-def train_diffusion(latents, params, device):
+def train_diffusion(mu, std=None, params=None, device=None):
     """Train TabSyn's MLPDiffusion denoiser (EDM preconditioning) on the
     VAE latents.
+
+    With std given, trains on reparameterized latents z = mu + std * eps
+    with fresh eps per batch (Sec. 4.1.2 of the paper). With std=None it
+    trains on mu alone (TabSyn's default; the final Adult runs). mu may be a
+    tensor or an array (n, tokens*d).
 
     Follows tabsyn/main.py's normalization convention: latents are shifted
     by their mean and halved before training, and sampled latents are
@@ -139,11 +150,13 @@ def train_diffusion(latents, params, device):
     Returns (model, latent_mean, accountant) where accountant is None
     when DP is disabled.
     """
-    z = torch.tensor(latents, dtype=torch.float32)
-    mean = z.mean(dim=0, keepdim=True)
-    z_norm = (z - mean) / 2
+    mu = torch.as_tensor(mu).float().cpu()
+    mean = mu.mean(dim=0, keepdim=True)
+    mu_norm = (mu - mean) / 2                 # (z - mean) / 2 with
+    std_norm = (torch.as_tensor(std).float().cpu() / 2   # z = mu + std * eps
+                if std is not None else None)
 
-    in_dim = z_norm.shape[1]
+    in_dim = mu_norm.shape[1]
     denoise_fn = MLPDiffusion(in_dim, params['DIM_T']).to(device)
     model = Model(denoise_fn=denoise_fn, hid_dim=in_dim).to(device)
 
@@ -168,7 +181,7 @@ def train_diffusion(latents, params, device):
         # accountant's sample_rate exactly.
         accountant = RDPAccountant(
             noise_multiplier=params['NOISE_MULTIPLIER'],
-            sample_rate=params['BATCH_SIZE'] / z_norm.shape[0],
+            sample_rate=params['BATCH_SIZE'] / mu_norm.shape[0],
             delta=params['DP_DELTA'])
         train_model = wrapped
     else:
@@ -179,7 +192,9 @@ def train_diffusion(latents, params, device):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.9, patience=20)
 
-    dataset = torch.utils.data.TensorDataset(z_norm)
+    dataset = (torch.utils.data.TensorDataset(mu_norm, std_norm)
+               if std_norm is not None
+               else torch.utils.data.TensorDataset(mu_norm))
     if params.get('USE_DP'):
         # DPDataLoader performs true Poisson sampling (each record
         # included independently per step at rate batch/N), which is
@@ -196,6 +211,13 @@ def train_diffusion(latents, params, device):
             dataset, batch_size=params['BATCH_SIZE'], shuffle=True,
             num_workers=0, drop_last=False)
 
+    patience = params.get('EARLY_STOP_PATIENCE')
+    if patience and params.get('USE_DP'):
+        raise ValueError('EARLY_STOP_PATIENCE reads the training loss, which '
+                         'the DP accounting does not cover; use it only '
+                         'with USE_DP=False')
+    best_loss, since_best = float('inf'), 0
+
     model.train()
     # Diffusion length in OPTIMIZER STEPS when DIFF_STEPS is set: a smaller
     # training sample must not silently undertrain the prior (an undertrained
@@ -210,8 +232,12 @@ def train_diffusion(latents, params, device):
         if max_steps is None and epoch >= params['EPOCHS']:
             break
         epoch_loss, n_seen = 0.0, 0
-        for (batch,) in loader:
-            inputs = batch.to(device)
+        for batch in loader:
+            if std_norm is not None:
+                batch_mu, batch_std = batch[0].to(device), batch[1].to(device)
+                inputs = batch_mu + batch_std * torch.randn_like(batch_std)
+            else:
+                inputs = batch[0].to(device)   # no extra RNG draw
             loss = train_model(inputs).mean()
 
             optimizer.zero_grad()
@@ -239,6 +265,17 @@ def train_diffusion(latents, params, device):
             print(msg)
         epoch += 1
 
+        if patience:
+            if epoch_loss / max(1, n_seen) < best_loss:
+                best_loss, since_best = epoch_loss / max(1, n_seen), 0
+            else:
+                since_best += 1
+                if since_best >= patience:
+                    print(f'  early stop at diffusion epoch {epoch} '
+                          f'(no improvement for {patience} epochs, '
+                          f'best loss={best_loss:.6f})')
+                    break
+
     return model, mean, accountant
 
 
@@ -256,7 +293,8 @@ def sample_from_diffusion(diffusion_model, mean, n_gen, latent_shape,
 
 @torch.no_grad()
 def decode_latents(vae_model, latents, device, X_num=None, params=None,
-                   num_floor=None, sample_idx=None):
+                   num_floor=None, sample_idx=None, num_means=None,
+                   num_stds=None):
     """Decode sampled latents back to data space through the frozen VAE
     decoder + Reconstructor, with a DP-released range-clip backstop.
 
@@ -293,10 +331,13 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None,
     # Domain-knowledge clamp: all numeric columns in this dataset (loan
     # amount, income, LTV, property value, tract population) are
     # non-negative by definition. Public knowledge, no privacy cost.
-    # num_floor is -mean/std, the standardized image of 0 (clipping
+    # The standardized image of real-unit 0 is -mean/std (clipping
     # standardized values at 0 would flatten every below-average value).
+    # num_floor passes it directly; num_means/num_stds compute it.
     if num_floor is not None:
         syn_num = np.maximum(syn_num, num_floor[None, :])
+    else:
+        syn_num = clip_nonnegative(syn_num, num_means, num_stds)
     if X_num is not None and params is not None:
         return syn_num, syn_cat, [stats_budget]
     return syn_num, syn_cat, []
@@ -330,7 +371,7 @@ def main():
     if device.type == 'cuda':
         print(f'Using GPU: {torch.cuda.get_device_name(0)}')
     else:
-        print('Using CPU (GPU not available)')
+        print(f'Using {device.type.upper()}')
     print('=' * 70)
     print('FULL FLIP pipeline (VAE + latent diffusion) on bmo_nationwide.csv'
           + (' [ENTIRE DATASET]' if args.all else ''))
@@ -363,11 +404,13 @@ def main():
                                             X_cat.to(device))
     mu_z = enc['mu_z']                       # (n, tokens, d)
     latent_shape = mu_z.shape[1:]
-    latents = mu_z.reshape(mu_z.shape[0], -1).cpu().numpy()  # (n, tokens*d)
-    print(f'  latents: {latents.shape}')
+    mu_flat = mu_z.reshape(mu_z.shape[0], -1)             # (n, tokens*d)
+    # forward_with_stages' 'std_z' is the encoder's LOG-VARIANCE
+    std_flat = torch.exp(0.5 * enc['std_z']).reshape(mu_flat.shape)
+    print(f'  latents: {tuple(mu_flat.shape)}')
 
     diffusion_model, z_mean, diff_accountant = train_diffusion(
-        latents, dparams, device)
+        mu_flat, std_flat, dparams, device)
 
     # ---- Sample + decode -------------------------------------------------
     n_gen = dparams['N_GEN'] or len(X_num)
@@ -378,8 +421,8 @@ def main():
     syn_num, syn_cat, stats_budgets = decode_latents(vae_model, sampled,
                                                       device, X_num=X_num,
                                                       params=params,
-                                                      num_floor=(-num_means / num_stds).values,
-                                                      sample_idx=s_idx)
+                                                      num_means=num_means,
+                                                      num_stds=num_stds)
 
     # ---- Export ----------------------------------------------------------
     # clip/round numerics to the real columns' format; real min/max is not
@@ -458,12 +501,7 @@ def main():
           f'(gain {fair["fairness_gain"]:+.4f})')
     print(f'  DP ratio       real={fair["real_dp_ratio"]:.4f} -> '
           f'syn={fair["syn_dp_ratio"]:.4f}')
-    if 'paper_metrics' in fair:
-        pm = fair['paper_metrics']
-        print(f'  BER   real={pm["real"]["ber"]:.4f} -> syn={pm["syn"]["ber"]:.4f}'
-              f'  (chance = {pm["syn"]["ber_chance"]:.4f})')
-        print(f'  A-NCB real={pm["real"]["a_ncb"]:.4f} -> syn={pm["syn"]["a_ncb"]:.4f}'
-              f'  (ideal = 1)')
+    print_paper_metrics(fair)
 
     # ---- HTML report ------------------------------------------------------
     # Merge both parameter dicts so the report documents the full run.

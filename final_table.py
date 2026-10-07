@@ -178,6 +178,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--tier1', action='store_true',
                     help='aggregate the tier-1 runs instead of full diffusion')
+    ap.add_argument('--lams', default=None,
+                    help='comma-separated lambdas to show (default: all present)')
     ap.add_argument('--prefix', default='pc',
                     help='run-tag prefix: pc (raw) or re (re-encoded)')
     ap.add_argument('--out', default=None,
@@ -187,6 +189,9 @@ def main():
     suffix = '_t1' if args.tier1 else ''
     pattern = os.path.join(OUT_DIR, f'{args.prefix}_f?_lam?{suffix}.json')
     runs, skipped = load_runs(pattern)
+    if args.lams:
+        keep = {int(float(x)) for x in args.lams.split(',')}
+        runs = {k: v for k, v in runs.items() if k[0] in keep}
 
     lines = []
     title = ('FINAL RESULTS - tier-1 (reconstruct-through-latent)'

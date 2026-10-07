@@ -34,6 +34,12 @@ Examples:
 """
 
 import os
+# Cap BLAS/OpenMP threads per process (the sklearn/numpy/torch CPU work in
+# scoring). Sweeps run several processes at once, and each defaulting to
+# every core oversubscribes the CPU. Must be set before numpy/torch load.
+# Override with ADULT_NUM_THREADS. The GPU is unaffected.
+for _v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
+    os.environ.setdefault(_v, os.environ.get('ADULT_NUM_THREADS', '3'))
 import sys
 import copy
 import json
@@ -143,7 +149,8 @@ def build_params(args):
         # tokens, wide FFN, plateau beta decay. PHASE2_EPOCHS comes from
         # --phase2-epochs (0 to bank Phase 1) and is not overwritten.
         params.update(PHASE1_EPOCHS=3000, BATCH_SIZE=4096, D_TOKEN=4,
-                      FACTOR=32, BETA_MAX=1e-2, BETA_MIN=1e-5,
+                      FACTOR=32, BETA_SCHEDULE='plateau',
+                      BETA_MAX=1e-2, BETA_MIN=1e-5,
                       BETA_LAMBDA=0.7, BETA_PATIENCE=10, PHASE2_LR_SCALE=1.0)
     if args.dp_noise is not None:
         params['NOISE_MULTIPLIER'] = args.dp_noise
@@ -171,6 +178,42 @@ def averaged_scores(num, cat, s_idx, ref=None, n_seeds=10, **cluster_kw):
         out[k], out[k + '_sd'] = float(v.mean()), float(v.std())
         out[k + '_median'] = float(np.median(v))
     return out
+
+
+def real_ref_cache(args, version='clean_v1'):
+    """Cache for scores computed from the REAL data only. They depend on
+    the fold, split seed and masking - not on lambda, tier-1/full or the
+    repair baseline (whose generator alone sees the repaired copy) - so the
+    first run on a fold computes and stores them and later runs load the
+    same numbers. Returns get(name, fn): the cached value, or fn() computed
+    and stored. Writes are atomic and merge with concurrent writers."""
+    key = (f'real_ref_f{args.fold}of{args.folds}_ss{args.split_seed}_'
+           f'{"mask" if args.mask_proxies else "raw"}_{version}')
+    cache_dir = os.path.join(OUT_DIR, 'cache')
+    path = os.path.join(cache_dir, key + '.json')
+
+    def _load():
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+    store = _load()
+
+    def get(name, fn):
+        if name in store:
+            return store[name]
+        value = fn()
+        store[name] = value
+        os.makedirs(cache_dir, exist_ok=True)
+        merged = _load()
+        merged.update(store)
+        tmp = f'{path}.{os.getpid()}.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(merged, f, default=float)
+        os.replace(tmp, path)
+        return value
+    return get
 
 
 def main():
@@ -326,8 +369,9 @@ def main():
         print('\n[Stage 2] latent diffusion')
         mu_z = enc_out['mu_z']
         latents = mu_z.reshape(mu_z.shape[0], -1).cpu().numpy()
-        diff_model, z_mean, diff_acc = full.train_diffusion(latents, dparams,
-                                                            device)
+        # trained on mu (std=None), as in the final runs
+        diff_model, z_mean, diff_acc = full.train_diffusion(
+            latents, params=dparams, device=device)
         sampled = full.sample_from_diffusion(diff_model, z_mean, len(X_num),
                                              mu_z.shape[1:], dparams, device)
         syn_num, syn_cat, stats_budgets = full.decode_latents(
@@ -353,10 +397,12 @@ def main():
     # BER + A-NCB (full-covariance GMM, adversary trained on the real
     # HELD-OUT fold; 10 seeds). Real references: the original data, and the
     # real data after the same masking.
+    ref_cached = real_ref_cache(args)
     syn = averaged_scores(syn_num, syn_cat, s_idx, ref=(te_n, te_c))
-    real_test = averaged_scores(te_n, te_c_raw, s_idx, ref=(tr_n, tr_c_raw))
-    real_test_masked = (averaged_scores(te_n, te_c, s_idx, ref=(tr_n, tr_c))
-                        if args.mask_proxies else None)
+    real_test = ref_cached('real_test', lambda: averaged_scores(
+        te_n, te_c_raw, s_idx, ref=(tr_n, tr_c_raw)))
+    real_test_masked = (ref_cached('real_test_masked', lambda: averaged_scores(
+        te_n, te_c, s_idx, ref=(tr_n, tr_c))) if args.mask_proxies else None)
     eps_id = None if args.tier1 else epsilon_identifiability(tr_n, tr_c,
                                                             syn_num, syn_cat)
     # Tier-1 only: true-sex leakage - a real-trained classifier recovering
@@ -370,7 +416,8 @@ def main():
         def _bal(pred):
             return float(np.mean([(pred[true_s == g] == g).mean()
                                   for g in np.unique(true_s)]))
-        ceiling_ho = _bal(infer_protected(te_n, te_c, tr_n, tr_c, s_idx))
+        ceiling_ho = ref_cached('heldout_ceiling', lambda: _bal(
+            infer_protected(te_n, te_c, tr_n, tr_c, s_idx)))
         leak = _bal(infer_protected(te_n, te_c, syn_num, syn_cat, s_idx))
         s_agree = float((syn_cat[:, s_idx] == tr_c[:, s_idx]).mean())
         true_gap = true_group_target_gap(syn_cat, tr_c, t_idx, s_idx)
@@ -400,8 +447,9 @@ def main():
     alpha_p, beta_r = alpha_precision_beta_recall(raw(tr_n), tr_c,
                                                   raw(syn_num), syn_cat,
                                                   categories)
-    alpha_p_real, beta_r_real = alpha_precision_beta_recall(
-        raw(tr_n), tr_c, raw(te_n), te_c, categories)
+    alpha_p_real, beta_r_real = ref_cached(
+        'alpha_beta_real', lambda: alpha_precision_beta_recall(
+            raw(tr_n), tr_c, raw(te_n), te_c, categories))
     # Validity: plausibility rules learned from the real training fold,
     # scored on the released (rounded) table; held-out fold = baseline.
     rules = fit_validity_rules(raw(tr_n), tr_c, NUMERIC, CATEGORICAL,
@@ -411,7 +459,8 @@ def main():
         for c in CATEGORICAL], axis=1).astype(int)
     validity = validity_report(rules, syn_df[NUMERIC].values.astype(float),
                                syn_cat_released)
-    validity_real = validity_report(rules, raw(te_n), te_c)
+    validity_real = ref_cached('validity_real', lambda: validity_report(
+        rules, raw(te_n), te_c))
 
     s_tv = group_share_tv(syn_cat, tr_c, s_idx)
     all_tv = categorical_share_tv_all(syn_cat, tr_c)
@@ -430,16 +479,16 @@ def main():
         HistGradientBoostingClassifier(random_state=0).fit(
             _util_feats(syn_num, syn_cat), syn_cat[:, t_idx] == t_pos)
         .predict_proba(_util_feats(te_n, te_c))[:, 1]))
-    util_auc_real = float(roc_auc_score(
+    util_auc_real = ref_cached('util_auc_real', lambda: float(roc_auc_score(
         te_c[:, t_idx] == t_pos,
         HistGradientBoostingClassifier(random_state=0).fit(
             _util_feats(tr_n, tr_c), tr_c[:, t_idx] == t_pos)
-        .predict_proba(_util_feats(te_n, te_c))[:, 1]))
+        .predict_proba(_util_feats(te_n, te_c))[:, 1])))
     # 'male wife' rate: (sex, category) pairs absent from the real data
     imposs = impossible_combination_rate(syn_cat, tr_c_raw, s_idx,
                                          exclude=(t_idx,))
-    imposs_real = impossible_combination_rate(tr_c_raw, tr_c_raw, s_idx,
-                                              exclude=(t_idx,))
+    imposs_real = ref_cached('imposs_real', lambda: impossible_combination_rate(
+        tr_c_raw, tr_c_raw, s_idx, exclude=(t_idx,)))
 
     # Relative-to-real (paper Table 3 form; the paper's figures are
     # 4-DATASET AVERAGES, context only)
