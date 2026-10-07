@@ -47,8 +47,10 @@ PANELS_FULL = [
     ('True-sex BER',        'true_sex_ber', 'true_sex_ber_real', 'half'),
     ('BER',                 'paper_metrics.syn.ber',
      'paper_metrics.real_test.ber', 'half'),
-    ('A-NCB',               'paper_metrics.syn_fullcov.a_ncb',
-     'paper_metrics.real_test_fullcov.a_ncb', 'up'),
+    ('A-NCB',               'paper_metrics.syn_fullcov.a_ncb|'
+                            'paper_metrics.syn.a_ncb',
+     'paper_metrics.real_test_fullcov.a_ncb|paper_metrics.real_test.a_ncb',
+     'up'),
     ('Max category share change', 'max_nonsex_share_tv', None, 'down'),
 ]
 # why a panel can be empty
@@ -78,13 +80,17 @@ def get(d, path):
         s_idx = 0  # 'sex' is the first categorical column
         vals = [v for k, v in tv.items() if int(k) != s_idx]
         return float(max(vals)) if vals else np.nan
-    x = d
-    try:
-        for k in path.split('.'):
-            x = x[int(k)] if isinstance(x, list) else x[k]
-        return float(x)
-    except (KeyError, IndexError, TypeError, ValueError):
-        return np.nan
+    # 'a|b' tries each path in turn (older result files stored the
+    # full-covariance A-NCB under syn_fullcov / real_test_fullcov)
+    for p in path.split('|'):
+        x = d
+        try:
+            for k in p.split('.'):
+                x = x[int(k)] if isinstance(x, list) else x[k]
+            return float(x)
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    return np.nan
 
 
 def load(prefix, tier1):

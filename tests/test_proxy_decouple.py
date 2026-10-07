@@ -1,6 +1,6 @@
 """Tests for tabsyn.vae.proxy_decouple (automatic proxy detection,
-merge/expand with tau, and the impossible-combination / member-dependence
-metrics). Standalone: no dependency on flip_fairness.
+masking, the scrambling repair baseline, and the
+impossible-combination metric). Standalone: no dependency on flip_fairness.
 
 Run:  python -m pytest tests/test_proxy_decouple.py -v
 """
@@ -13,9 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..', 'tabsyn-main', 'tabsyn-main'))
 
 from tabsyn.vae.proxy_decouple import (detect_proxy_classes,
-                                       proxy_member_labels,
-                                       impossible_combination_rate,
-                                       proxy_member_dependence)
+                                       impossible_combination_rate)
 
 
 def toy_table(n=4000, seed=0):
@@ -55,14 +53,6 @@ def test_detect_skips_same_group_and_excluded():
     cat2 = np.stack([s, one_sided], axis=1)
     cls = detect_proxy_classes(cat2, s_idx=0)
     assert cls == []
-
-
-def test_member_labels():
-    cat = toy_table(200)
-    cls = detect_proxy_classes(cat, s_idx=0, min_support=0.0)
-    (lab, mask), = proxy_member_labels(cat, cls)
-    assert (mask == (cat[:, 1] != 2)).all()
-    assert (lab[cat[:, 1] == 1] == 1).all() and (lab[cat[:, 1] == 0] == 0).all()
 
 
 # --------------------------------------------------------------------------

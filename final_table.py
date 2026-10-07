@@ -8,10 +8,10 @@ result is hidden in an average.
 
     python final_table.py [--tier1] [--prefix pc|re] [--out FILE]
 
---prefix re reads the runs trained with the proxy classes masked
-(--mask-proxies: Husband/Wife -> MASK). Their real reference is the
-ORIGINAL data; the 'vs re-encoded real' rows compare against the real data
-after the same masking.
+--prefix flip reads the final FLIP sweep, --prefix rpb the repair
+baseline. With --mask-proxies runs the real reference is the ORIGINAL data;
+the 'vs masked real' rows compare against the real data after the same
+masking.
 """
 
 import argparse
@@ -36,27 +36,25 @@ METRICS = [
      'paper_metrics.heldout_ceiling', 'plain'),
     ('BER (synthetic S col)',  'paper_metrics.syn.ber',
      'paper_metrics.real_test.ber', 'plain'),
-    ('BER vs re-encoded real', 'paper_metrics.syn.ber',
+    ('BER vs masked real',     'paper_metrics.syn.ber',
      'paper_metrics.real_test_reencoded.ber', 'plain'),
     ('BER rel. to real (%)',   'paper_metrics.outcome_replication.ber_rel_pct',
      None, 'plain'),
     # A-NCB: full-covariance GMM (sklearn default, likely the paper's
-    # setup), strict real-trained adversary, 10 seeds. The diagonal-GMM
-    # version is no longer reported: it splits off a cluster unrelated to
-    # sex and sits near 1 for real and synthetic data alike.
-    ('A-NCB',                  'paper_metrics.syn_fullcov.a_ncb',
-     'paper_metrics.real_test_fullcov.a_ncb', 'plain'),
-    ('A-NCB (median of seeds)', 'paper_metrics.syn_fullcov.a_ncb_median',
-     'paper_metrics.real_test_fullcov.a_ncb_median', 'plain'),
-    ('A-NCB seed sd',          'paper_metrics.syn_fullcov.a_ncb_sd',
-     'paper_metrics.real_test_fullcov.a_ncb_sd', 'plain'),
-    ('A-NCB vs re-encoded real', 'paper_metrics.syn_fullcov.a_ncb',
-     'paper_metrics.real_test_reencoded_fullcov.a_ncb', 'plain'),
-    ('A-NCB rel. to real (%)', ('paper_metrics.syn_fullcov.a_ncb',
-                                'paper_metrics.real_test_fullcov.a_ncb'),
+    # setup), strict real-trained adversary, 10 seeds.
+    ('A-NCB',                  'paper_metrics.syn_fullcov.a_ncb|paper_metrics.syn.a_ncb',
+     'paper_metrics.real_test_fullcov.a_ncb|paper_metrics.real_test.a_ncb', 'plain'),
+    ('A-NCB (median of seeds)', 'paper_metrics.syn_fullcov.a_ncb_median|paper_metrics.syn.a_ncb_median',
+     'paper_metrics.real_test_fullcov.a_ncb_median|paper_metrics.real_test.a_ncb_median', 'plain'),
+    ('A-NCB seed sd',          'paper_metrics.syn_fullcov.a_ncb_sd|paper_metrics.syn.a_ncb_sd',
+     'paper_metrics.real_test_fullcov.a_ncb_sd|paper_metrics.real_test.a_ncb_sd', 'plain'),
+    ('A-NCB vs masked real',   'paper_metrics.syn_fullcov.a_ncb|paper_metrics.syn.a_ncb',
+     'paper_metrics.real_test_reencoded_fullcov.a_ncb|paper_metrics.real_test_reencoded.a_ncb', 'plain'),
+    ('A-NCB rel. to real (%)', ('paper_metrics.syn_fullcov.a_ncb|paper_metrics.syn.a_ncb',
+                                'paper_metrics.real_test_fullcov.a_ncb|paper_metrics.real_test.a_ncb'),
      None, 'rel'),
     ('A-NCB headroom (%)',     None,
-     'paper_metrics.real_test_fullcov.a_ncb', 'headroom'),
+     'paper_metrics.real_test_fullcov.a_ncb|paper_metrics.real_test.a_ncb', 'headroom'),
     ('Downstream AUC',         'paper_metrics.downstream_auc',
      'paper_metrics.downstream_auc_real', 'plain'),
     ('AUC rel. to real (%)',   'paper_metrics.outcome_replication.auc_rel_pct',
@@ -73,8 +71,8 @@ METRICS = [
      None, 'plain'),
     ('Impossible-comb rate',   'paper_metrics.impossible_combination_rate.any',
      'paper_metrics.impossible_combination_rate_real.any', 'plain'),
-    ('Proxy-member dependence', 'paper_metrics.proxy_member_dependence_syn.0',
-     'paper_metrics.proxy_member_dependence_real.0', 'plain'),
+    ('Validity (learned rules)', 'paper_metrics.validity',
+     'paper_metrics.validity_real', 'plain'),
     ('alpha-precision',        'paper_metrics.alpha_precision',
      'paper_metrics.alpha_precision_real', 'plain'),
     ('beta-recall',            'paper_metrics.beta_recall',
@@ -88,16 +86,20 @@ METRICS = [
 
 
 def get(d, path):
-    """Float at a dotted path, or NaN if anything is missing."""
+    """Float at a dotted path, or NaN if anything is missing. 'a|b' tries
+    each path in turn (older result files stored the full-covariance A-NCB
+    under syn_fullcov / real_test_fullcov)."""
     if path is None:
         return np.nan
-    x = d
-    try:
-        for k in path.split('.'):
-            x = x[int(k)] if isinstance(x, list) else x[k]
-        return float(x)
-    except (KeyError, IndexError, TypeError, ValueError):
-        return np.nan
+    for p in path.split('|'):
+        x = d
+        try:
+            for k in p.split('.'):
+                x = x[int(k)] if isinstance(x, list) else x[k]
+            return float(x)
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    return np.nan
 
 
 def transform(v, mode):

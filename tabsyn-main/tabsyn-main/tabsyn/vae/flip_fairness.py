@@ -394,194 +394,33 @@ def binary_logit_gap_w1(logits: torch.Tensor, group: torch.Tensor,
     return total / n_pairs
 
 
-def shared_mean_ratio(rep: torch.Tensor) -> float:
-    """||pooled mean||^2 / total variance of a representation.
+def marginal_matching_penalty(stages, X_num, X_cat, n_quantiles=8,
+                              temperature=0.1, eps=1e-4):
+    """Marginal guard: pulls each decoded column's marginal toward the
+    batch's real marginal. Zero when the decoded batch equals the real
+    batch. Per-batch (not per-record); under DP it belongs in the
+    batch-coupled pass.
 
-    Diagnostic for the paper-literal row-centering (dim=1) CKA^T: a large
-    offset shared by all groups drowns out group signal under it. A small
-    ratio means that alternative is safe."""
-    var = rep.var(dim=0).sum()
-    return float(rep.mean(dim=0).pow(2).sum() / (var + 1e-12))
-
-
-class GradientReversal(torch.autograd.Function):
-    """Identity forward, negated backward: the classic GRL layer."""
-
-    @staticmethod
-    def forward(ctx, x, lambd=1.0):
-        ctx.lambd = lambd
-        return x.view_as(x)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return -ctx.lambd * grad_output, None
-
-
-def gradient_reversal(x, lambd=1.0):
-    return GradientReversal.apply(x, lambd)
-
-
-class AdversaryHead(torch.nn.Module):
-    """Per-record protected-attribute adversary on the decoded non-protected
-    logits. A gradient-reversal layer makes minimizing its CE loss MAXIMIZE
-    the adversary's error, scrubbing S from the other columns' logits.
-
-    The loss is a per-record cross-entropy (each row's logits vs its own
-    group label), so under DP it routes through Opacus's per-sample pass
-    (pass 1), NOT the batch-coupled group-level mechanism.
-    """
-
-    def __init__(self, d_in, n_groups, hidden=64):
-        super().__init__()
-        self.net = torch.nn.Sequential(
-            torch.nn.Linear(d_in, hidden), torch.nn.ReLU(),
-            torch.nn.Linear(hidden, n_groups))
-
-    def forward(self, x, lambd=1.0):
-        return self.net(gradient_reversal(x, lambd))
-
-
-# --------------------------------------------------------------------------
-# In-model proxy decoupling
-# --------------------------------------------------------------------------
-# A merged column (Adult: `relationship`) carries a sex-specific label
-# (Husband vs Wife) that is a near-copy of S. Instead of re-drawing that
-# label after generation (tabsyn.vae.temper.decouple_curve, strength tau),
-# these terms make it independent of the OTHER tokens inside the VAE
-# (strength lambda), and CKA^T is applied to the non-proxy tokens only.
-
-def cat_token_index(d_num, j, stage='mu'):
-    """Token position of categorical column j. mu_z is laid out
-    [CLS, num_1..num_d, cat_1..cat_k]; the decoder output h drops CLS."""
-    return (1 if stage == 'mu' else 0) + d_num + j
-
-
-def drop_tokens(rep, tokens):
-    """rep (n, T, d) with the given token positions removed."""
-    keep = [t for t in range(rep.shape[1]) if t not in set(tokens)]
-    return rep[:, keep]
-
-
-def proxy_sublabel(cat, proxy_idx, pos_code, neg_code):
-    """Rows holding one of the merged column's two sex-specific labels, and
-    the binary sub-label on those rows (1 = pos_code, e.g. Husband).
-
-    Returns (mask (n,) bool, label (n,) long; label is 0 off the mask)."""
-    col = cat[:, proxy_idx]
-    mask = (col == pos_code) | (col == neg_code)
-    return mask, (col == pos_code).long()
-
-
-def hsic_normalized(X, y):
-    """Normalized biased HSIC between a representation X (n, d) and a binary
-    label y (n,): RBF kernel on X (median-distance bandwidth, detached),
-    linear kernel on the centered one-hot of y. In [0, 1]; 0 = X carries no
-    (kernel-detectable) information about y. Batch-coupled, so under DP it
-    belongs in the group-level pass."""
-    n = X.shape[0]
-    if n < 4 or y.min() == y.max():
-        return torch.tensor(0.0, device=X.device)
-    X = X.float()
-    d2 = torch.cdist(X, X).pow(2)
-    with torch.no_grad():
-        sigma2 = d2[d2 > 0].median().clamp_min(1e-8)
-    K = torch.exp(-d2 / (2 * sigma2))
-    Kc = K - K.mean(0, keepdim=True) - K.mean(1, keepdim=True) + K.mean()
-    yc = y.float() - y.float().mean()
-    # HSIC(X, y) ∝ yc^T Kc yc ; HSIC(y, y) ∝ (yc^T yc)^2 ; HSIC(X, X) ∝ ||Kc||_F^2
-    hxy = yc @ Kc @ yc
-    hxx = (Kc * Kc).sum()
-    hyy = (yc @ yc).pow(2)
-    return hxy / torch.sqrt(hxx * hyy).clamp_min(1e-12)
-
-
-def proxy_independence_loss(stages, sub_label, mask, proxy_idx, s_idx):
-    """HSIC between the merged column's sex-specific label and the remaining
-    representation (latent mu_z and decoder output h with the proxy and S
-    tokens removed), on the rows that carry the label. Mean of the two
-    stages. Minimizing it leaves the label recoverable only from the proxy
-    token itself."""
-    if mask.sum() < 4:
-        return torch.tensor(0.0, device=stages['mu_z'].device)
-    d_num = stages['recon_x_num'].shape[1]
-    losses = []
-    for key, stage in (('mu_z', 'mu'), ('h', 'h')):
-        rep = drop_tokens(stages[key],
-                          [cat_token_index(d_num, proxy_idx, stage),
-                           cat_token_index(d_num, s_idx, stage)])
-        rep = rep[mask].reshape(int(mask.sum()), -1)
-        losses.append(hsic_normalized(rep, sub_label[mask]))
-    return torch.stack(losses).mean()
-
-
-def proxy_adversary_input_dim(n_tokens_mu, d_token):
-    """Input width of the proxy adversary: mu_z minus the proxy and S tokens."""
-    return (n_tokens_mu - 2) * d_token
-
-
-def proxy_adversary_loss(adv_head, stages, sub_label, mask, proxy_idx, s_idx,
-                         lambd=1.0):
-    """Per-record alternative to proxy_independence_loss: a gradient-reversal
-    adversary predicts the sex-specific label from mu_z without the proxy
-    and S tokens. Sum of per-row CE terms (masked rows only), so under DP
-    it rides the per-sample pass."""
-    d_num = stages['recon_x_num'].shape[1]
-    rep = drop_tokens(stages['mu_z'],
-                      [cat_token_index(d_num, proxy_idx, 'mu'),
-                       cat_token_index(d_num, s_idx, 'mu')])
-    rep = rep.reshape(rep.shape[0], -1)
-    ce = torch.nn.functional.cross_entropy(adv_head(rep, lambd), sub_label,
-                                           reduction='none')
-    # batch MEAN of the masked per-row terms (not a sum): scale-invariant
-    # to batch size, matching the other Phase-2 losses
-    return (ce * mask.float()).mean()
-
-
-def marginal_matching_penalty(stages, X_num, X_cat, s_idx,
-                              n_quantiles=8, kind='tv', temperature=0.1,
-                              eps=1e-4):
-    """Penalty pulling each column's decoded marginal toward the batch's real
-    marginal: category shares for categorical columns, quantile matching
-    (mean absolute quantile gap) for numeric columns. Zero when the decoded
-    batch equals the real batch. Per-batch (not per-record); under DP it
-    belongs in the batch-coupled pass.
-
-    kind='tv': mean softmax share, total variation averaged over columns
-    (original). Blind to vanishing categories twice over: deleting a 13%
-    category costs ~0.13 / n_columns, and a category can keep its mean
-    softmax mass while never winning the argmax the decoder outputs.
-    kind='kl': KL(real share || synthetic share) SUMMED over columns, with
-    synthetic shares from a sharpened softmax (logits / temperature), a
-    differentiable stand-in for argmax shares. The cost grows without bound
-    as a real category's share goes to 0, so deleting categories is
-    expensive while moving rows between categories stays cheap."""
-    if kind == 'kl':
-        n = X_num.shape[0]
-        qs = torch.linspace(0, 1, n_quantiles, device=X_num.device)[1:-1]
-        pen = (torch.quantile(X_num, qs, dim=0)
-               - torch.quantile(stages['recon_x_num'], qs, dim=0)).abs().mean()
-        for i, logits in enumerate(stages['recon_x_cat']):
-            k = logits.shape[1]
-            p = torch.bincount(X_cat[:, i], minlength=k).float() / n
-            q = torch.softmax(logits / temperature, dim=1).mean(dim=0)
-            m = p > 0
-            pen = pen + (p[m] * (torch.log(p[m]) - torch.log(q[m] + eps))).sum()
-        return pen
-    pen = 0.0
+    Numeric columns: mean absolute gap between real and decoded quantiles.
+    Categorical columns: KL(real share || synthetic share), SUMMED over
+    columns, with synthetic shares from a sharpened softmax (logits /
+    temperature) - a differentiable stand-in for the argmax shares the
+    decoder emits. The cost grows without bound as a real category's share
+    goes to 0, so the fairness terms cannot reach parity by deleting
+    sex-skewed categories ('levelling down'), while moving rows between
+    categories stays cheap. (An averaged mean-softmax TV penalty is blind to
+    this: deleting a 13% category costs ~0.13 / n_columns, and a category
+    can keep its mean softmax mass while never winning the argmax.)"""
     n = X_num.shape[0]
-    # numeric: quantile matching
     qs = torch.linspace(0, 1, n_quantiles, device=X_num.device)[1:-1]
-    real_q = torch.quantile(X_num, qs, dim=0)          # (Q, d_num)
-    syn_q = torch.quantile(stages['recon_x_num'], qs, dim=0)
-    pen = pen + (real_q - syn_q).abs().mean()
-    # categorical: share TV per column
-    tv = 0.0
+    pen = (torch.quantile(X_num, qs, dim=0)
+           - torch.quantile(stages['recon_x_num'], qs, dim=0)).abs().mean()
     for i, logits in enumerate(stages['recon_x_cat']):
         k = logits.shape[1]
-        real_share = torch.bincount(X_cat[:, i], minlength=k).float() / n
-        syn_share = torch.softmax(logits, dim=1).mean(dim=0)
-        tv = tv + 0.5 * (real_share - syn_share).abs().sum()
-    pen = pen + tv / len(stages['recon_x_cat'])
+        p = torch.bincount(X_cat[:, i], minlength=k).float() / n
+        q = torch.softmax(logits / temperature, dim=1).mean(dim=0)
+        m = p > 0
+        pen = pen + (p[m] * (torch.log(p[m]) - torch.log(q[m] + eps))).sum()
     return pen
 
 
@@ -589,14 +428,13 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
                                      s_idx=None,
                                      mean_weight: float = 1.0,
                                      binary_w1: bool = True,
-                                     exclude_cat=(),
                                      t_idx=None,
                                      target_in_fairness=False,
                                      reduce='mean') -> torch.Tensor:
     """FLIP multi-stage disentanglement (Sec. 4.3.2 of the paper).
 
     Applies the negative-CKA^T disentanglement at three intervention
-    stages and returns the mean:
+    stages:
 
       1. Latent space:   mu_z (flattened over tokens) - primary objective.
       2. Detokenizer:   feature-wise on the pre-aggregation logits
@@ -619,27 +457,17 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
         s_idx: index of the protected attribute among the categorical
                columns (its logits are skipped at the detokenizer stage
                since they are supervised by the uniform attribute loss).
-        exclude_cat: categorical columns treated as proxies: their tokens are
-               dropped from mu_z and h and their logits skipped, so CKA^T
-               act on the non-proxy representation only (the proxy is
-               handled by proxy_independence_loss instead).
+        reduce: 'mean' of the stages, or 'sum' - each stage gets the full
+               lambda (a per-stage reading of Eq. 10).
 
     Returns:
-        Scalar mean disentanglement loss across the three stages.
+        Scalar disentanglement loss over the three stages.
     """
-    device = stages['mu_z'].device
     losses = []
 
     # Stage 1: latent space
-    mu, h = stages['mu_z'], stages['h']
-    if exclude_cat:
-        d_num = stages['recon_x_num'].shape[1]
-        mu = drop_tokens(mu, [cat_token_index(d_num, j, 'mu')
-                              for j in exclude_cat])
-        h = drop_tokens(h, [cat_token_index(d_num, j, 'h')
-                            for j in exclude_cat])
-    mu_flat = mu.reshape(mu.shape[0], -1)
-    h_flat = h.reshape(h.shape[0], -1)
+    mu_flat = stages['mu_z'].reshape(stages['mu_z'].shape[0], -1)
+    h_flat = stages['h'].reshape(stages['h'].shape[0], -1)
     losses.append(disentanglement_loss(mu_flat, group, mean_weight))
 
     # Stage 2: detokenizer - feature-wise, mean-aggregated
@@ -657,8 +485,6 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
         # the detokenizer-stage terms unless outcome parity is intended.
         if t_idx is not None and i == t_idx and not target_in_fairness:
             continue
-        if i in exclude_cat:
-            continue  # proxy handled by proxy_independence_loss
         if binary_w1 and cat_logits.shape[1] == 2:
             feature_losses.append(binary_logit_gap_w1(cat_logits, group))
         else:
@@ -671,11 +497,18 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
     # differences back in, so it gets the same CKA^T + mean treatment.
     losses.append(disentanglement_loss(h_flat, group, mean_weight))
 
-    # reduce='sum' gives each stage the full lambda (the mean divides it by
-    # the number of stages, ~3x weaker than a per-stage reading of Eq. 10)
     stacked = torch.stack(losses)
     return stacked.sum() if reduce == 'sum' else stacked.mean()
 
+
+# --------------------------------------------------------------------------
+# Joint decoded-output stage
+# --------------------------------------------------------------------------
+# The paper's detokenizer stage aligns each column separately and never sees
+# the joint pattern A-NCB measures; latent- and decoder-stage alignment is
+# undone by the decoder (measured: the moments of h halve while a probe reads
+# sex from it as well as before). This stage applies CKA^T + mean gap to the
+# whole decoded row, lifted with random Fourier features.
 
 def decoded_joint_rep(stages, s_idx, t_idx=None):
     """The decoded row as the A-NCB adversary and clustering see it: numeric
@@ -706,16 +539,10 @@ def random_fourier_features(x, n_features=256, seed=0):
     return np.sqrt(2.0 / n_features) * torch.cos(x @ W / sigma + b)
 
 
-def decoded_joint_loss(stages, group, s_idx, t_idx=None, mode='linear',
-                       mean_weight=1.0):
-    """CKA^T + normalized mean gap on the JOINT decoded output. The paper's
-    detokenizer stage aligns each column separately and never sees the
-    joint pattern A-NCB measures; latent-stage alignment is undone by the
-    decoder. mode 'rff' lifts the decoded row with random Fourier features
-    first (kernel moments); 'linear' uses it as is. Batch-coupled."""
-    x = decoded_joint_rep(stages, s_idx, t_idx)
-    if mode == 'rff':
-        x = random_fourier_features(x)
+def decoded_joint_loss(stages, group, s_idx, t_idx=None, mean_weight=1.0):
+    """CKA^T + normalized mean gap on the RFF-lifted joint decoded row.
+    Batch-coupled (group-level DP pass)."""
+    x = random_fourier_features(decoded_joint_rep(stages, s_idx, t_idx))
     return disentanglement_loss(x, group, mean_weight)
 
 

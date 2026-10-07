@@ -41,10 +41,7 @@ from tabsyn.vae.flip_fairness import (
     sliced_wasserstein_distance,
     uniform_attribute_loss,
     uniform_attribute_loss_per_sample,
-    proxy_sublabel,
     decoded_joint_loss,
-    proxy_independence_loss,
-    proxy_adversary_loss,
     marginal_matching_penalty,
     BalancedGroupSampler,
     PoissonGroupSampler,
@@ -81,28 +78,17 @@ TRADEOFF_PARAMS = {
     # LAMBDA_RAMP_FRAC of Phase 2, so the fairness pressure grows after the
     # Phase-2 representation has stabilized (guards against collapse).
     'LAMBDA_RAMP_FRAC': 0.25,
-    # Marginal-matching penalty (category shares + numeric quantiles),
-    # batch-coupled (pass 2 under DP).
+    # Marginal guard: KL(real || synthetic) category shares (+ numeric
+    # quantiles), batch-coupled (pass 2 under DP). Stops the fairness terms
+    # from deleting sex-skewed categories ('levelling down').
     'MARGINAL_WEIGHT': 0.0,
-    # In-model proxy decoupling: weight (lambda) of a term making a merged
-    # column's sex-specific label (PROXY_CODES = (pos, neg) codes in
-    # categorical column PROXY_IDX, e.g. relationship Husband/Wife)
-    # independent of the other tokens. 'hsic' is batch-coupled (pass 2);
-    # 'adv' is a per-record gradient-reversal adversary (pass 1). Ramped
-    # like LAMBDA_FAIR. PROXY_EXCLUDE_DISENT drops the proxy token from the
-    # CKA^T terms so they act on the non-proxy representation only.
-    'PROXY_WEIGHT': 0.0,
-    # Joint decoded-output disentanglement: CKA^T + mean gap on the whole
-    # decoded row (what A-NCB sees), weighted by the same ramped lambda.
-    # 'off', 'linear', or 'rff' (random-Fourier-feature kernel lift).
-    'DECODED_JOINT': 'off',
-    # Marginal penalty form: 'tv' (original) or 'kl' (vanishing-category
-    # guard; see flip_fairness.marginal_matching_penalty).
-    'MARGINAL_KIND': 'tv',
-    'PROXY_MODE': 'hsic',
-    'PROXY_IDX': None,
-    'PROXY_CODES': None,
-    'PROXY_EXCLUDE_DISENT': False,
+    # Joint decoded-output stage: CKA^T + mean gap on the whole decoded row
+    # (RFF-lifted), weighted by the same ramped lambda. Extends the paper's
+    # per-column detokenizer stage, which cannot see joint distributions.
+    'DECODED_JOINT': False,
+    # How the disentanglement stages combine: 'mean' or 'sum' (full lambda
+    # per stage, a per-stage reading of Eq. 10).
+    'STAGE_REDUCE': 'mean',
 
     # L_S variant: 'per_sample' (DP-safe) or 'batch_mean' (paper Eq. 3).
     'LS_MODE': 'per_sample',
@@ -394,24 +380,6 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
     total_epochs = phase1_epochs + params['PHASE2_EPOCHS']
     reference_encoder = None
 
-    # Proxy decoupling setup (Phase 2 only).
-    proxy_w = params.get('PROXY_WEIGHT', 0) or 0
-    proxy_idx = params.get('PROXY_IDX')
-    if proxy_w and (proxy_idx is None or params.get('PROXY_CODES') is None):
-        raise ValueError('PROXY_WEIGHT needs PROXY_IDX and PROXY_CODES')
-    exclude_cat = (proxy_idx,) if (params.get('PROXY_EXCLUDE_DISENT')
-                                   and proxy_idx is not None) else ()
-    proxy_head = None
-    if proxy_w and params.get('PROXY_MODE', 'hsic') == 'adv':
-        from tabsyn.vae.flip_fairness import (AdversaryHead,
-                                              proxy_adversary_input_dim)
-        n_tok = 1 + d_numerical + len(categories)
-        proxy_head = AdversaryHead(
-            proxy_adversary_input_dim(n_tok, params['D_TOKEN']), 2).to(device)
-        if params['USE_DP']:
-            raw.add_module('proxy_head', proxy_head)
-        optimizer.add_param_group({'params': list(proxy_head.parameters())})
-
     for epoch in range(total_epochs):
         phase = 1 if epoch < phase1_epochs else 2
 
@@ -453,18 +421,10 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                 recon_s=params.get('RECON_S', False))
 
             # ---- Pass 1: per-sample-decomposable loss (record-level DP) --
-            # mse + ce + kld + L_S (+ adversary CE) are all sums/means of
-            # per-sample terms, so Opacus's per-sample clipping bounds each
-            # record's influence on this gradient.
+            # mse + ce + kld + L_S are all sums/means of per-sample terms,
+            # so Opacus's per-sample clipping bounds each record's influence
+            # on this gradient.
             loss_private = mse + ce + cur_beta * kld + loss_s
-            if proxy_head is not None and phase == 2:
-                p2 = (epoch - phase1_epochs) / max(1, params['PHASE2_EPOCHS'])
-                pw = proxy_w * min(1.0, p2 / max(
-                    1e-9, params.get('LAMBDA_RAMP_FRAC', 0.25)))
-                pmask, plab = proxy_sublabel(bcat, proxy_idx,
-                                             *params['PROXY_CODES'])
-                loss_private = loss_private + pw * proxy_adversary_loss(
-                    proxy_head, stages, plab, pmask, proxy_idx, s_idx)
             loss_private.backward(retain_graph=phase == 2)
 
             # ---- Pass 2: batch-coupled fairness terms (group-level DP) --
@@ -501,7 +461,6 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                     stages, bcat[:, s_idx].long(), s_idx=s_idx,
                     mean_weight=params.get('MEAN_SHIFT_WEIGHT', 1.0),
                     binary_w1=params.get('BINARY_W1', True),
-                    exclude_cat=exclude_cat,
                     t_idx=params.get('TARGET_IDX'),
                     target_in_fairness=params.get('TARGET_IN_FAIRNESS',
                                                    False),
@@ -511,8 +470,7 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                 lam_eff = params['LAMBDA_FAIR'] * min(
                     1.0, p2_frac / max(1e-9, params.get('LAMBDA_RAMP_FRAC', 0.25)))
                 marg_pen = marginal_matching_penalty(
-                    stages, bnum, bcat, s_idx,
-                    kind=params.get('MARGINAL_KIND', 'tv')) \
+                    stages, bnum, bcat) \
                     if params.get('MARGINAL_WEIGHT', 0) else torch.tensor(0.0,
                         device=bnum.device)
                 # Clamp the divergence penalty: without a cap the SWD term
@@ -522,21 +480,12 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                 div = torch.clamp(div, max=params['MAX_DIV_PENALTY'])
                 loss_fair = div + lam_eff * disent \
                     + params.get('MARGINAL_WEIGHT', 0) * marg_pen
-                if params.get('DECODED_JOINT', 'off') != 'off':
+                if params.get('DECODED_JOINT'):
                     loss_fair = loss_fair + lam_eff * decoded_joint_loss(
                         stages, bcat[:, s_idx].long(), s_idx,
                         t_idx=None if params.get('TARGET_IN_FAIRNESS')
                         else params.get('TARGET_IDX'),
-                        mode=params['DECODED_JOINT'],
                         mean_weight=params.get('MEAN_SHIFT_WEIGHT', 1.0))
-                if proxy_w and proxy_head is None:
-                    # HSIC mode: batch-coupled -> group-level pass
-                    pmask, plab = proxy_sublabel(bcat, proxy_idx,
-                                                 *params['PROXY_CODES'])
-                    pw = proxy_w * min(1.0, p2_frac / max(
-                        1e-9, params.get('LAMBDA_RAMP_FRAC', 0.25)))
-                    loss_fair = loss_fair + pw * proxy_independence_loss(
-                        stages, plab, pmask, proxy_idx, s_idx)
 
                 if group_mech is not None:
                     # Capture the fairness gradient WITHOUT Opacus's hooks:

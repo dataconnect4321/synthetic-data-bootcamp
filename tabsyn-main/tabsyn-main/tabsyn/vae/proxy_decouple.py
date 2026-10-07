@@ -3,11 +3,9 @@
 Strict disentanglement is infeasible when a category nearly determines the
 protected attribute S (Adult: relationship=Husband -> male, Wife -> female):
 a decoder that must reproduce that category from a sex-free latent cannot
-(data-processing inequality). Instead each such proxy is factored into
-
-  * a legitimate component  - the MERGED class ("spouse"), modelled as usual
-  * a protected-specific label - WHICH member of the class ("Husband" vs
-    "Wife"), made independent of the row's other features with strength tau.
+(data-processing inequality). Instead each such proxy class is merged into
+one category ("spouse"): the legitimate information is kept, the
+protected-specific label (WHICH member, "Husband" vs "Wife") is dropped.
 
 Everything here is dataset-agnostic: proxy categories are found with a
 pre-registered threshold on P(S | category), and only categories pointing to
@@ -15,19 +13,19 @@ DIFFERENT groups are merged (a column whose flagged categories all point to
 the same group has nothing to decouple).
 
 Uses:
-  * pre-train : mask_proxy_classes() merges each class into one new
-                category (e.g. MASK) before Phase 1 (--mask-proxies).
-  * post-hoc  : decouple_curve() in tabsyn.vae.temper re-draws the
-                member label on the decoded rows, sweeping tau
-                (1 = real coupling, 0 = member independent of the row).
-  * in-model  : proxy_member_labels() supplies the per-row member label that
-                the gradient-reversal term in flip_fairness.proxy_decoupling_loss
-                hides from the other tokens / decoded columns.
+  * mask_proxy_classes() merges each class into one new category (e.g.
+    MASK) in every fold before training (--mask-proxies): the user-side
+    preprocessing the paper's Sec. 7.2 leaves to the user.
+  * repair_toward_independence() scrambles every column's link to S with
+    strength tau (--repair-tau): the comparison baseline, not the method.
+  * impossible_combination_rate() reports (S, category) pairs absent from
+    the real data, e.g. 'male wife'.
 
-PRIVACY NOTE: detection and the P(member | merged, S) table are computed on
-the real training fold. They are a handful of category-level counts, not
-covered by the DP-SGD accounting - report them as an uncounted release (or
-add Laplace/Gaussian noise to the counts before use).
+PRIVACY NOTE: detection is computed on the real training fold from a
+handful of category-level counts, not covered by the DP-SGD accounting -
+report it as an uncounted release (or add Laplace/Gaussian noise to the
+counts before use). The repair baseline is data-dependent (quantiles and a
+classifier fit on real records) and would need its own accounting under DP.
 """
 
 import numpy as np
@@ -124,24 +122,6 @@ def mask_proxy_classes(cat, classes, mask_codes):
     return out
 
 
-def proxy_member_labels(cat, classes):
-    """Per-row member label for the in-model decoupling term.
-
-    Returns a list aligned with `classes` of (labels, mask) int arrays:
-    labels[i] = index of the row's category within cl['members'] (0 for rows
-    outside the class), mask[i] = 1 if the row belongs to the class.
-    """
-    cat = np.asarray(cat)
-    out = []
-    for cl in classes:
-        j, mem = cl['col'], cl['members']
-        lab = np.zeros(len(cat), dtype=np.int64)
-        for k, c in enumerate(mem):
-            lab[cat[:, j] == c] = k
-        out.append((lab, np.isin(cat[:, j], mem).astype(np.int64)))
-    return out
-
-
 # --------------------------------------------------------------------------
 # Metrics
 # --------------------------------------------------------------------------
@@ -178,35 +158,6 @@ def impossible_combination_rate(syn_cat, real_cat, s_idx, rare=0.01,
         by_col[j] = float(bad.mean())
         any_bad |= bad
     return {'any': float(any_bad.mean()), 'by_col': by_col}
-
-
-def proxy_member_dependence(cat, classes, exclude=(), seed=0):
-    """How well the OTHER categorical columns predict each class's member
-    label among the class's rows (balanced accuracy, 3-fold, gradient
-    boosting; chance 1 / n_members). Pass the protected column (and anything
-    else to ignore) in `exclude`. tau = 0 should drive this to chance; it is
-    the direct readout of the decoupling, independent of the protected
-    column."""
-    from sklearn.ensemble import HistGradientBoostingClassifier
-    from sklearn.model_selection import cross_val_predict, StratifiedKFold
-    cat = np.asarray(cat)
-    res = []
-    for cl, (lab, mask) in zip(classes, proxy_member_labels(cat, classes)):
-        rows = mask.astype(bool)
-        cols = [k for k in range(cat.shape[1]) if k != cl['col']
-                and k not in exclude]
-        X, y = cat[rows][:, cols], lab[rows]
-        if len(np.unique(y)) < 2 or min(np.bincount(y)) < 3:
-            res.append(float('nan'))
-            continue
-        clf = HistGradientBoostingClassifier(
-            categorical_features=[True] * len(cols),
-            class_weight='balanced', max_iter=100, random_state=seed)
-        pred = cross_val_predict(clf, X, y, cv=StratifiedKFold(
-            3, shuffle=True, random_state=seed))
-        res.append(float(np.mean([(pred[y == g] == g).mean()
-                                  for g in np.unique(y)])))
-    return res
 
 
 # --------------------------------------------------------------------------

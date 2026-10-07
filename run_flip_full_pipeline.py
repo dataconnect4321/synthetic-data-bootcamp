@@ -256,7 +256,7 @@ def sample_from_diffusion(diffusion_model, mean, n_gen, latent_shape,
 
 @torch.no_grad()
 def decode_latents(vae_model, latents, device, X_num=None, params=None,
-                   num_floor=None, sample_idx=None, sample_all=False):
+                   num_floor=None, sample_idx=None):
     """Decode sampled latents back to data space through the frozen VAE
     decoder + Reconstructor, with a DP-released range-clip backstop.
 
@@ -280,14 +280,6 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None,
         # constant class; drawing from the softmax gives the random assignment.
         probs = torch.softmax(recon_cat[sample_idx], dim=-1)
         syn_cat[:, sample_idx] = torch.multinomial(probs, 1).squeeze(1).cpu().numpy()
-    if sample_all:
-        # Draw EVERY categorical from its softmax: the generated share of a
-        # category then equals its mean probability (in expectation), the
-        # quantity the training losses see. Under argmax a category can hold
-        # probability mass on every row yet never be emitted.
-        for j, c in enumerate(recon_cat):
-            probs = torch.softmax(c, dim=-1)
-            syn_cat[:, j] = torch.multinomial(probs, 1).squeeze(1).cpu().numpy()
 
     if X_num is not None and params is not None:
         Xn = X_num.to(device)

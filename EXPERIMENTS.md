@@ -81,3 +81,24 @@ Her PR contributed: the dim=1 CKAᵀ option, the batch-mean L_S routing,
 `run_experiment.py`, the configs, and `fairness_eval.py`. None of the
 deletions above touch her code. Deleting or changing any of her
 contributions requires her agreement first.
+
+## `adultDataClean` branch — streamlined to the final setup
+
+Branched from `adultDataTest` at `97bd885`. Everything the final run plan
+(README Part 10) does not use was removed; `adultDataTest` keeps it all.
+
+| Removed | Why |
+|---|---|
+| In-model proxy decoupling (`--proxy-weight/-mode/-exclude-disent`, HSIC and gradient-reversal adversary, `proxy_sublabel`, token helpers, `exclude_cat`) | Fold-1 screens: no effect on leakage at weight <= 32, collapse at 512; superseded by masking |
+| Post-hoc decoupling curve (`temper.py`, `--decouple-curve`, `decouple_curves.py`) | Superseded by masking (pre-training) and the repair baseline |
+| Random re-draw of proxy members (`--reencode-tau`) | Created impossible rows (male wives); replaced by masking |
+| Mean-softmax TV marginal penalty | Let sex-skewed categories vanish (married, Craft-repair, race=Black); KL guard only |
+| Linear joint stage, `--cat-decode sample` (all categoricals) | Linear fooled only the soft probabilities; sampling all columns did not stop deletion |
+| Diagonal-covariance A-NCB, paper-style (own-S) A-NCB | Diag split off a cluster unrelated to sex (A-NCB ~1 for real and synthetic); own-S adversary is trivially fair under an invented S column. Full-covariance A-NCB is now the default and only one |
+| Diagnostics: latent probes, shared-mean ratio, label validity, inferred group gap, tier-1 group agreement, relationship faithfulness, proxy ranking, proxy-member dependence, promotion gates, HMDA fairness extras, `--diagnose-only`, `--paper-literal`, `--recon-s`, `--proxy-col/-labels`, `--fast` subsample | Not part of the final report |
+| `aggregate_folds.py` | Superseded by `final_table.py` |
+| Tracked `__pycache__/*.pyc` files | Build artifacts (already in `.gitignore`) |
+
+Behaviour changes for anyone reusing the flags: `--paper-config` no longer
+switches the marginal penalty on (pass `--marginal-weight 1.0`), and
+`--decoded-joint` is a switch (RFF lift always).
