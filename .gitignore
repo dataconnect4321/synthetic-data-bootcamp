@@ -35,3 +35,7 @@ test_flip_fairness.cpython-312*
 *.pt
 Data/
 **cpython*
+
+# committed results (exception to the *.csv rule above)
+!results/
+!results/*.csv

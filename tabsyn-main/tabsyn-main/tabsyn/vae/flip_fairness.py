@@ -266,14 +266,17 @@ def linear_cka_t(A: torch.Tensor, B: torch.Tensor,
     <A^T A, B^T B>_F / (||A^T A|| ||B^T B||) is exactly Eqs. 5-6 (the
     (n-1)^2 factors cancel). Groups may differ in size.
 
-    center='group' (default, used by the final Adult setup): centering
-    columns (dim=0) turns A^T A into a within-group covariance. It discards
-    each group's mean, so a group whose activations are merely shifted
-    would still score ~1 - which is why disentanglement_loss pairs it with
-    the normalized group mean gap (mean_weight). Row centering was not used
-    for the final runs because a large offset shared by all groups
-    (measured shared-mean ratio ~2.2 on Adult's latent) dominates the
-    row-centred Gram and drowns out the group signal.
+    So under row centering A^T A is an uncentred neuron co-activation
+    (second-moment) matrix: each group's covariance plus the outer product
+    of its mean pattern. A large offset shared by all groups (shared mean
+    ~11x the spread on Adult's unmasked latent) dominates both groups'
+    matrices, so CKA^T can sit near 1 while group differences remain.
+
+    center='group' (dim=0, preset 'ours'): centering columns turns A^T A
+    into a within-group neuron covariance. It discards each group's mean,
+    so a group whose activations are merely shifted would still score ~1 -
+    which is why disentanglement_loss can add the normalized group mean gap
+    (mean_weight).
 
     Args:
         A: (n_A, p) activations of group A (rows = samples).
@@ -323,9 +326,34 @@ def group_mean_shift(A: torch.Tensor, B: torch.Tensor,
     return gap / (pooled.sum() + eps)
 
 
+def rbf_cka_t(A: torch.Tensor, B: torch.Tensor,
+              eps: float = 1e-8) -> torch.Tensor:
+    """Kernel CKA^T with an RBF kernel (Eqs. 5-6; Eq. 7 is the linear
+    special case). As in CKA^T(A, B) = CKA(A^T, B^T), the 'samples' are the
+    p activations: each group's p x p kernel compares activation columns
+    across that group's rows (squared distance averaged over the rows, so
+    groups of different sizes are comparable), with a shared, detached
+    median bandwidth, HSIC-centred over the activations."""
+    def sqdist(X):
+        Xt = X.t()                                   # p x n
+        sq = (Xt * Xt).sum(1, keepdim=True)
+        return (sq + sq.t() - 2 * Xt @ Xt.t()).clamp_min(0) / X.shape[0]
+    DA, DB = sqdist(A), sqdist(B)
+    with torch.no_grad():
+        both = torch.cat([DA[DA > 0], DB[DB > 0]])
+        s2 = (both.median() if both.numel()
+              else torch.tensor(1.0, device=A.device)).clamp_min(eps)
+    K, L = torch.exp(-DA / (2 * s2)), torch.exp(-DB / (2 * s2))
+    p = K.shape[0]
+    H = torch.eye(p, device=K.device, dtype=K.dtype) - 1.0 / p
+    Kc, Lc = H @ K @ H, H @ L @ H
+    return (Kc * Lc).sum() / (Kc.norm() * Lc.norm() + eps)
+
+
 def disentanglement_loss(rep: torch.Tensor, group: torch.Tensor,
                          mean_weight: float = 0.0,
-                         center: str = 'group') -> torch.Tensor:
+                         center: str = 'group',
+                         kernel: str = 'linear') -> torch.Tensor:
     """Negative mean pairwise CKA^T between protected groups (D' in Eq. 10),
     plus an optional group mean-shift penalty.
 
@@ -337,6 +365,10 @@ def disentanglement_loss(rep: torch.Tensor, group: torch.Tensor,
              (group_mean_shift). 0 gives the paper's pure -CKA^T.
         center: CKA^T centering, 'group' (default) or 'row' (see
              linear_cka_t).
+        kernel: 'linear' (Eq. 7), 'rbf' (Eqs. 5-6 with an RBF kernel over
+             the activations, rbf_cka_t) or 'rff_lift' (each row mapped by
+             random Fourier features - an RBF kernel over the rows - then
+             the linear CKA^T).
 
     Returns:
         Scalar loss; minimizing it makes the activation patterns (and, with
@@ -346,7 +378,11 @@ def disentanglement_loss(rep: torch.Tensor, group: torch.Tensor,
         a rank-1 Gram proportional to [[1,-1],[-1,1]] for every group, so
         CKA^T is constant (no signal).
     """
-    if center == 'row' and rep.shape[1] <= 2:
+    if kernel == 'rff_lift':
+        with torch.no_grad():
+            mu, sd = rep.mean(0), rep.std(0).clamp_min(1e-4)
+        rep = random_fourier_features((rep - mu) / sd)
+    if (center == 'row' or kernel == 'rbf') and rep.shape[1] <= 2:
         return None
     group_reps = _group_slices(rep, group)
     if len(group_reps) < 2:
@@ -356,8 +392,10 @@ def disentanglement_loss(rep: torch.Tensor, group: torch.Tensor,
     n_pairs = 0
     for i in range(len(group_reps)):
         for j in range(i + 1, len(group_reps)):
-            total = total - linear_cka_t(group_reps[i], group_reps[j],
-                                         center=center)
+            total = total - (
+                rbf_cka_t(group_reps[i], group_reps[j]) if kernel == 'rbf'
+                else linear_cka_t(group_reps[i], group_reps[j],
+                                  center=center))
             if mean_weight:
                 total = total + mean_weight * group_mean_shift(
                     group_reps[i], group_reps[j])
@@ -452,7 +490,9 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
                                      target_in_fairness=False,
                                      reduce='mean',
                                      center: str = 'group',
-                                     num_stage: str = 'summed') -> torch.Tensor:
+                                     num_stage: str = 'summed',
+                                     tokens: str = 'concat',
+                                     kernel: str = 'linear') -> torch.Tensor:
     """FLIP multi-stage disentanglement (Sec. 4.3.2 of the paper).
 
     Applies the negative-CKA^T disentanglement at three intervention
@@ -502,7 +542,21 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
     # Stage 1: latent space
     mu_flat = stages['mu_z'].reshape(stages['mu_z'].shape[0], -1)
     h_flat = stages['h'].reshape(stages['h'].shape[0], -1)
-    add(losses, disentanglement_loss(mu_flat, group, mean_weight, center))
+
+    def token_stage(rep, flat):
+        # tokens='concat': one CKA^T on all tokens concatenated;
+        # 'per_token': CKA^T per token (column), averaged - the paper
+        # does not say which for the latent and decoder stages
+        if tokens == 'concat':
+            return disentanglement_loss(flat, group, mean_weight, center,
+                                        kernel)
+        per = []
+        for t in range(rep.shape[1]):
+            add(per, disentanglement_loss(rep[:, t, :], group, mean_weight,
+                                          center, kernel))
+        return torch.stack(per).mean() if per else None
+
+    add(losses, token_stage(stages['mu_z'], mu_flat))
 
     # Stage 2: detokenizer - feature-wise, mean-aggregated
     feature_losses = []
@@ -510,10 +564,10 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
     if num_stage == 'pre' and num_pre is not None:
         for j in range(num_pre.shape[1]):
             add(feature_losses, disentanglement_loss(
-                num_pre[:, j, :], group, mean_weight, center))
+                num_pre[:, j, :], group, mean_weight, center, kernel))
     elif stages['recon_x_num'] is not None:
         add(feature_losses, disentanglement_loss(
-            stages['recon_x_num'], group, mean_weight, center))
+            stages['recon_x_num'], group, mean_weight, center, kernel))
     for i, cat_logits in enumerate(stages['recon_x_cat']):
         if cat_logits is None:
             continue
@@ -527,13 +581,13 @@ def multi_stage_disentanglement_loss(stages: dict, group: torch.Tensor,
             feature_losses.append(binary_logit_gap_w1(cat_logits, group))
         else:
             add(feature_losses, disentanglement_loss(
-                cat_logits, group, mean_weight, center))
+                cat_logits, group, mean_weight, center, kernel))
     if feature_losses:
         losses.append(torch.stack(feature_losses).mean())
 
     # Stage 3: decoder output. The decoder is nonlinear and can put group
     # differences back in, so it gets the same CKA^T + mean treatment.
-    add(losses, disentanglement_loss(h_flat, group, mean_weight, center))
+    add(losses, token_stage(stages['h'], h_flat))
 
     if not losses:
         return torch.tensor(0.0, device=device)

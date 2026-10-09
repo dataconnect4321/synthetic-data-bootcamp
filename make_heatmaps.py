@@ -1,7 +1,8 @@
 """Heatmap grid of the final results, in the style of the paper's Adult figure
 (Fig. 3: one panel per metric, lambda on the y-axis, darker green = better).
 
-    python make_heatmaps.py [--prefix fin] [--tier1] [--out FILE.png]
+    python make_heatmaps.py [--prefix pgrid] [--tier1] [--lams 0,2,4,8,12]
+                            [--out FILE.png]
 
 The paper's x-axis is the DP budget; these runs use no DP, so the columns are
 the three CV folds plus their mean - which also shows the fold spread the
@@ -11,12 +12,15 @@ A CSV with every plotted value is written next to the PNG (table view).
 Panels: Synth. AUC, alpha-precision, beta-recall, statistical parity,
 equalized odds, eps-identifiability (full pipeline only; tier-1 decodes
 near-copies of training rows, so it is shown as n/a there), true-sex BER
-(1 - leakage; tier-1 only), BER, A-NCB (full-cov), and the largest non-sex
-category share change (catches categories that vanish).
+(1 - leakage; tier-1 only), BER, A-NCB (full-cov GMM) with the
+sex-inferring adversary trained on the generated sex column (the paper's
+wording) and on the real data, validity, and the largest non-sex category
+share change (catches categories that vanish).
 """
 
 import argparse
 import glob
+import re
 import json
 import os
 import numpy as np
@@ -47,10 +51,16 @@ PANELS_FULL = [
     ('True-sex BER',        'true_sex_ber', 'true_sex_ber_real', 'half'),
     ('BER',                 'paper_metrics.syn.ber',
      'paper_metrics.real_test.ber', 'half'),
-    ('A-NCB',               'paper_metrics.syn_fullcov.a_ncb|'
-                            'paper_metrics.syn.a_ncb',
+    # A-NCB with the sex-inferring adversary trained on the generated sex
+    # column (the paper's wording) and on the real data (this repository)
+    ('A-NCB (adversary on\ngenerated sex)',
+     'paper_metrics.syn_own_adversary.a_ncb',
+     'paper_metrics.real_test_own_adversary.a_ncb', 'up'),
+    ('A-NCB (adversary\ntrained on real data)',
+     'paper_metrics.syn_fullcov.a_ncb|paper_metrics.syn.a_ncb',
      'paper_metrics.real_test_fullcov.a_ncb|paper_metrics.real_test.a_ncb',
      'up'),
+    ('Validity', 'paper_metrics.validity', 'paper_metrics.validity_real', 'up'),
     ('Max category share change', 'max_nonsex_share_tv', None, 'down'),
 ]
 # why a panel can be empty
@@ -96,8 +106,11 @@ def get(d, path):
 def load(prefix, tier1):
     suffix = '_t1' if tier1 else ''
     runs, skipped = {}, []
+    name_re = rf'{re.escape(prefix)}_f\d_lam\d+{re.escape(suffix)}\.json'
     for path in sorted(glob.glob(os.path.join(
-            OUT_DIR, f'{prefix}_f?_lam?{suffix}.json'))):
+            OUT_DIR, f'{prefix}_f?_lam*{suffix}.json'))):
+        if not re.fullmatch(name_re, os.path.basename(path)):
+            continue
         d = json.load(open(path))
         if d.get('collapsed') or 'paper_metrics' not in d:
             skipped.append(os.path.basename(path))
@@ -122,7 +135,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--lams', default=None,
                     help='comma-separated lambdas to show (default: all present)')
-    ap.add_argument('--prefix', default='fin')
+    ap.add_argument('--prefix', default='pgrid')
     ap.add_argument('--tier1', action='store_true')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
@@ -138,7 +151,7 @@ def main():
     cols = [f'fold {f}' for f in folds] + ['mean']
     panels = PANELS_FULL
 
-    fig, axes = plt.subplots(2, 5, figsize=(21, 8.2))
+    fig, axes = plt.subplots(2, 6, figsize=(25, 8.4))
     rows_csv = ['panel,lambda,' + ','.join(cols) + ',real_ref']
     for ax, (title, spath, rpath, direction) in zip(axes.flat, panels):
         M = np.full((len(lams), len(cols)), np.nan)
@@ -220,10 +233,16 @@ def main():
         else 'full pipeline (VAE + latent diffusion)'
     a = next(iter(runs.values()))['args']
     setup = ', '.join(x for x in [
+        f"preset {a['preset']}" if a.get('preset') else None,
+        (f"scrambling repair tau={a['repair_tau']:g} (baseline)"
+         if a.get('repair_tau') else None),
         'masked proxies' if a.get('mask_proxies') else 'raw proxies',
-        (f"decoded-joint {a['decoded_joint']}"
-         if a.get('decoded_joint', 'off') != 'off' else None),
-        (f"marginal {a.get('marginal_kind', 'tv')} x{a['marginal_weight']:g}"
+        # decoded_joint is a switch on this branch (RFF); older result files
+        # stored the variant name
+        ('decoded-joint ' + ('rff' if a['decoded_joint'] is True
+                             else a['decoded_joint'])
+         if a.get('decoded_joint') not in (None, False, 'off') else None),
+        (f"marginal {a.get('marginal_kind', 'kl')} x{a['marginal_weight']:g}"
          if a.get('marginal_weight') else 'marginal off'),
         f"stages {a.get('stage_reduce', 'mean')}",
         'no DP' if a.get('dp_noise') is None else f"DP noise {a['dp_noise']}",

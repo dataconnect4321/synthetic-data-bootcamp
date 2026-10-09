@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 from tabsyn.vae.flip_fairness import (
     linear_cka_t,
+    rbf_cka_t,
     disentanglement_loss,
     multi_stage_disentanglement_loss,
     group_mean_shift,
@@ -1186,6 +1187,59 @@ def test_marginal_guard_penalizes_vanishing_category():
     logits = torch.log(torch.tensor([[0.87, 0.13]])).repeat(n, 1)
     st = {'recon_x_num': X_num.clone(), 'recon_x_cat': [logits]}
     assert marginal_matching_penalty(st, X_num, X_cat).item() > 0.5
+
+
+
+# --------------------------------------------------------------------------
+# kernel / per-token CKA^T options (readings of Eqs. 5-7)
+# --------------------------------------------------------------------------
+
+def test_rbf_cka_t_identity_and_mean_shift():
+    """RBF CKA^T is 1 for identical groups, near 1 for two samples of one
+    distribution, and clearly lower when one group is mean-shifted."""
+    torch.manual_seed(0)
+    A, B = torch.randn(500, 20), torch.randn(500, 20)
+    assert torch.isclose(rbf_cka_t(A, A), torch.tensor(1.0), atol=1e-5)
+    same = rbf_cka_t(A, B)
+    shifted = rbf_cka_t(A, B + torch.linspace(0, 3, 20))
+    assert same > 0.9 and shifted < same - 0.1
+
+
+def test_kernel_options_give_finite_gradients():
+    torch.manual_seed(0)
+    g = torch.tensor([0] * 300 + [1] * 300)
+    X = torch.cat([torch.randn(300, 12), torch.randn(300, 12) + 0.5])
+    X.requires_grad_(True)
+    for kernel in ('linear', 'rbf', 'rff_lift'):
+        loss = disentanglement_loss(X, g, 0.0, 'row', kernel)
+        grad, = torch.autograd.grad(loss, X)
+        assert torch.isfinite(loss) and torch.isfinite(grad).all(), kernel
+
+
+def test_rff_lift_scores_two_column_inputs():
+    """Row-centred linear CKA^T is undefined for two columns (None); the RFF
+    lift maps them to many features, so it returns a loss."""
+    g = torch.tensor([0] * 50 + [1] * 50)
+    X = torch.randn(100, 2)
+    assert disentanglement_loss(X, g, 0.0, 'row', 'linear') is None
+    assert disentanglement_loss(X, g, 0.0, 'row', 'rff_lift') is not None
+
+
+def test_multi_stage_per_token_and_kernel_run():
+    """Every combination of the token and kernel options gives a finite
+    loss on a real forward pass (groups = the first categorical column)."""
+    torch.manual_seed(0)
+    model = _tiny_vae()
+    x_num = torch.randn(40, 3)
+    x_cat = torch.stack([torch.arange(40) % 2, torch.randint(0, 4, (40,))], 1)
+    stages = model.forward_with_stages(x_num, x_cat)
+    for tokens in ('concat', 'per_token'):
+        for kernel in ('linear', 'rbf', 'rff_lift'):
+            loss = multi_stage_disentanglement_loss(
+                stages, x_cat[:, 0], s_idx=0, mean_weight=0.0,
+                binary_w1=False, center='row', num_stage='pre',
+                tokens=tokens, kernel=kernel)
+            assert torch.isfinite(loss), (tokens, kernel)
 
 
 if __name__ == '__main__':

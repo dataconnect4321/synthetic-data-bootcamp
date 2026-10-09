@@ -144,7 +144,7 @@ TRADEOFF_PARAMS = {
     # outside the DP accounting, so this schedule is fixed in advance.
     # 'plateau' is TabSyn's version (start at BETA_MAX, multiply by
     # BETA_LAMBDA after BETA_PATIENCE epochs without a lower Phase-1 epoch
-    # loss) - used by run_adult_flip.py --paper-config, non-DP only.
+    # loss) - used by run_adult_flip.py, non-DP only.
     'BETA_SCHEDULE': 'fixed',
     'BETA_MAX': 1e-2,
     'BETA_MIN': 1e-5,
@@ -466,6 +466,11 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
             save_phase1_checkpoint(ckpt, raw, optimizer)
         if not plateau:
             beta = beta_at(epoch, params)
+        # PHASE2_BETA: the KL weight of Phase 2's ELBO, fixed (e.g. the
+        # banked Phase 1's final beta); otherwise a banked run restarts the
+        # schedule at BETA_MAX, since a bank stores only the weights
+        if phase == 2 and params.get('PHASE2_BETA') is not None:
+            beta = params['PHASE2_BETA']
 
         # Phase-2 LR drop: shrink the step size once disentanglement
         # starts so fairness updates perturb the quality representation
@@ -474,7 +479,7 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
             new_lr = params['LR'] * params['PHASE2_LR_SCALE']
             for g in optimizer.param_groups:
                 g['lr'] = new_lr
-            print(f'--- Phase 2: LR dropped to {new_lr:.2e} ---')
+            print(f'--- Phase 2: LR set to {new_lr:.2e} ---')
 
         epoch_loss = 0.0
         n_batches = 0
@@ -511,7 +516,13 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
             # With the batch-mean L_S (pass 2), the per-sample one stays at
             # weight 0: S has no CE term, so without it the S head would
             # get no per-sample gradient and Opacus's pre_step() raises.
-            loss_private = mse + ce + cur_beta * kld \
+            # Phase 2 keeps L_quality (ELBO + L_S): the paper uses it as the
+            # detokenizer-stage divergence penalty (Sec. 4.3.2).
+            # PHASE2_RECON_WEIGHT scales its reconstruction part in Phase 2
+            # (unstated in the paper; 1 = as in Phase 1).
+            w_rec = (params.get('PHASE2_RECON_WEIGHT', 1.0) if phase == 2
+                     else 1.0)
+            loss_private = w_rec * (mse + ce) + cur_beta * kld \
                 + (0.0 if ls_batch else 1.0) * loss_s
             has_coupled = ls_batch or phase == 2
             loss_private.backward(retain_graph=has_coupled)
@@ -547,15 +558,26 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                         for p_ in reference_vae.parameters():
                             p_.requires_grad_(False)
                     with torch.no_grad():
-                        ref_h, ref_mu, _ = reference_vae.VAE(bnum, bcat)
+                        ref_h, ref_mu, ref_lv = reference_vae.VAE(bnum, bcat)
                     h_flat = stages['h'].reshape(bnum.shape[0], -1)
+                    n_b = bnum.shape[0]
+                    if params.get('SWD_LATENT', 'mu') == 'z':
+                        # samples of q(z|x) (Eq. 10 is written over the
+                        # posterior), current and reference
+                        cur_lat = (stages['mu_z'] + torch.exp(
+                            0.5 * stages['std_z'])
+                            * torch.randn_like(stages['mu_z'])).reshape(n_b, -1)
+                        ref_lat = (ref_mu + torch.exp(0.5 * ref_lv)
+                                   * torch.randn_like(ref_mu)).reshape(n_b, -1)
+                    else:
+                        cur_lat, ref_lat = mu_flat, ref_mu.reshape(n_b, -1)
+                    n_proj = params.get('SWD_PROJECTIONS', 50)
                     div = 0.5 * (
                         torch.clamp(sliced_wasserstein_distance(
-                            ref_mu.reshape(bnum.shape[0], -1), mu_flat),
-                            max=cap)
+                            ref_lat, cur_lat, n_projections=n_proj), max=cap)
                         + torch.clamp(sliced_wasserstein_distance(
-                            ref_h.reshape(bnum.shape[0], -1), h_flat),
-                            max=cap))
+                            ref_h.reshape(n_b, -1), h_flat,
+                            n_projections=n_proj), max=cap))
                 else:
                     # latent stage only (frozen encoder)
                     if reference_encoder is None:
@@ -575,7 +597,9 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                     with torch.no_grad():
                         ref_mu = reference_encoder(bnum, bcat)
                     div = torch.clamp(sliced_wasserstein_distance(
-                        ref_mu.reshape(bnum.shape[0], -1), mu_flat), max=cap)
+                        ref_mu.reshape(bnum.shape[0], -1), mu_flat,
+                        n_projections=params.get('SWD_PROJECTIONS', 50)),
+                        max=cap)
                 disent = multi_stage_disentanglement_loss(
                     stages, bcat[:, s_idx].long(), s_idx=s_idx,
                     mean_weight=params.get('MEAN_SHIFT_WEIGHT', 1.0),
@@ -585,7 +609,9 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                                                    False),
                     reduce=params.get('STAGE_REDUCE', 'mean'),
                     center=params.get('CKA_CENTER', 'group'),
-                    num_stage=params.get('NUM_STAGE', 'summed'))
+                    num_stage=params.get('NUM_STAGE', 'summed'),
+                    tokens=params.get('CKA_TOKENS', 'concat'),
+                    kernel=params.get('CKA_KERNEL', 'linear'))
                 # lambda ramp over the first LAMBDA_RAMP_FRAC of Phase 2
                 # (0 = no ramp: full lambda from the first Phase-2 epoch)
                 ramp = params.get('LAMBDA_RAMP_FRAC', 0.25)
@@ -596,14 +622,19 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                     stages, bnum, bcat) \
                     if params.get('MARGINAL_WEIGHT', 0) else torch.tensor(0.0,
                         device=bnum.device)
-                loss_fair = div + lam_eff * disent \
+                # DIV_WEIGHT: the divergence anchor's weight (implicit 1 in
+                # Eq. 10)
+                loss_fair = params.get('DIV_WEIGHT', 1.0) * div \
+                    + lam_eff * disent \
                     + params.get('MARGINAL_WEIGHT', 0) * marg_pen
                 if params.get('DECODED_JOINT'):
                     loss_fair = loss_fair + lam_eff * decoded_joint_loss(
                         stages, bcat[:, s_idx].long(), s_idx,
                         t_idx=None if params.get('TARGET_IN_FAIRNESS')
                         else params.get('TARGET_IDX'),
-                        mean_weight=params.get('MEAN_SHIFT_WEIGHT', 1.0))
+                        mean_weight=params.get(
+                            'JOINT_MEAN_WEIGHT',
+                            params.get('MEAN_SHIFT_WEIGHT', 1.0)))
                 loss_coupled = (loss_fair if loss_coupled is None
                                 else loss_coupled + loss_fair)
 
@@ -682,6 +713,8 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                     beta *= params.get('BETA_LAMBDA', 0.7)
                     stall = 0
                     print(f'--- beta decayed to {beta:.2e} ---')
+        if phase == 1:
+            params['PHASE1_FINAL_BETA'] = float(beta)  # banked with the model
 
         if epoch % 10 == 0 or epoch == total_epochs - 1:
             msg = f'epoch {epoch:3d} [phase {phase}] loss={epoch_loss/max(1,n_batches):.4f}  beta={beta:.1e}'

@@ -1,8 +1,13 @@
 # EXPERIMENTS — evidence for the cleanup deletions
 
+The paper-faithful replication (the current default) is the last section,
+"Paper-faithful replication". The sections before it document the earlier
+setup, now `--preset ours`.
+
 Code version: `adultDataTest` at `experiments-archive-pre-cleanup` (sweep) and
-`dd76822`/`f0ab411` (final 3-fold runs). All sweep runs used the paper config
-(`--paper-config --ls-mode batch_mean`), fold 0, split-seed 42, seed 42.
+`dd76822`/`f0ab411` (final 3-fold runs). All sweep runs used the paper's
+training setup with the batch-mean L_S (then `--paper-config --ls-mode
+batch_mean`), fold 0, split-seed 42, seed 42.
 
 ## Caveat on the sweep evidence
 
@@ -118,6 +123,126 @@ Branched from `adultDataTest` at `97bd885`. Everything the final run plan
 | `aggregate_folds.py` | Superseded by `final_table.py` |
 | Tracked `__pycache__/*.pyc` files | Build artifacts (already in `.gitignore`) |
 
-Behaviour changes for anyone reusing the flags: `--paper-config` no longer
-switches the marginal penalty on (pass `--marginal-weight 1.0`), and
-`--decoded-joint` is a switch (RFF lift always).
+Behaviour changes for anyone reusing the flags (see also the next section):
+`--paper-config` and `--ls-mode` are gone (the paper's training setup and
+the batch-mean L_S are always on); the method is chosen with `--preset
+paper|ours` plus per-piece flags; `--decoded-joint` is a switch (RFF lift
+always).
+
+## Paper-faithful replication (`--preset paper`)
+
+Code: `adultDataClean` after the merge of PR #2. All runs unmasked unless
+stated, split-seed 42, seed 42; "tier-1" decodes each real row's latent (so
+every row has a known real person), "full" samples latents from the
+diffusion model. Fold-0 screens first, then a 3-fold λ grid. The cleaned-up
+default reproduces the grid's fold-0 λ=4 tier-1 run to four decimals.
+
+### Corrections to the implementation
+
+| Issue | Finding | Fix |
+|---|---|---|
+| Phase 2 objective | Sec. 4.3.2 keeps L_quality (ELBO + L_S) in Phase 2 as the detokenizer-stage divergence term; Eq. 10 alone reads as if it were dropped. An ablation that dropped it collapsed (λ=4 numeric W1 0.76, validity 0.20 without our guards) | ELBO kept (the only option now; the ablation was removed) |
+| β in Phase 2 from a bank | a bank stores only the weights, so Phase 2 restarted β at 1e-2 instead of the decayed ~8e-6 a single run would carry | `--phase2-beta` (number or `carry`; banks write their final β to `BANK.pt.json`) |
+| SWD stages | the paper anchors the latent AND decoder; we anchored the latent only | `--div-stages latent+decoder` (paper preset) |
+| Diffusion input | the paper trains diffusion on μ + σε; we trained on μ | μ + σε, always |
+
+### What moves (fold 0, tier-1, λ = 4 unless stated)
+
+| Setting | True-sex BER | Paper's BER (argmax) | Note |
+|---|---|---|---|
+| Paper disentanglement, β carried (8e-6), λ 0 → 4 | 0.139 → 0.140 | 0.131 → 0.156 | CKAᵀ 0.88 → 0.95 |
+| … summed stages, λ 4/8, 100/400 epochs | 0.139–0.141 | 0.089–0.162 | CKAᵀ up to 0.996; sex *more* separable inside the model (other-token probe 0.81 → 0.99) |
+| … Phase-2 β = 1e-2 | 0.140 | 0.413 (λ 0: 0.164) | sex token gap/σ 0.8; reproduces the paper's BER trend |
+| … + dim-0 CKAᵀ + mean gap + joint stage | 0.43–0.48 | 0.10–0.43 | `relationship` SP by real sex 0.54 → 0.07–0.23; W1 ~×2 |
+| Masked bank, paper disentanglement | 0.194 → 0.194 | — | masking alone does not let λ act |
+| Repair τ=1 bank (masked + scrambled) | 0.502 | — | repair removes the real proxies before training |
+
+Diagnostics on the saved models (scratch scripts, not kept): the latent's
+sex token is linearly recoverable at 1.000 at every λ; removing it changes
+CKAᵀ by 0.004–0.010; the decoder writes extra sex signal into columns that
+carry none in the real data (capital-gain/loss, age, fnlwgt: probe accuracy
+0.51 → 0.59–0.67); reconstruction does not use the sex token (collapsing or
+scrambling it changes the ELBO by ≤ 1e-4) while the SWD anchor and L_S hold
+its group gap in place (activation-space gradient effects +0.045 and +0.044
+vs CKAᵀ −0.035 at the end of λ=4 training).
+
+### 3-fold grid (λ 0/2/4/8/12, Phase-2 β = 1e-2, argmax)
+
+`results/paper_faithful_{tier1,full}_grid.{csv,txt}` and the heatmaps. Both
+of the paper's headline measures rise with λ — BER (generated sex) 0.27 →
+0.42 and A-NCB with the adversary trained on the generated sex (full GMM)
+0.28 → 0.58 (tier-1) / 0.49 → 0.71 (full, non-monotone) — while true-sex
+BER stays 0.139–0.140, the A-NCB with a real-trained adversary shows no
+trend, and a diagonal GMM reverses the A-NCB trend. α-precision falls with
+λ as in the paper; AUC and ε-identifiability stay flat.
+
+### Removed after these experiments
+
+| Removed | Why |
+|---|---|
+| ELBO-free Phase 2 (`--phase2-objective fair`) | not the paper (Sec. 4.3.2); collapses |
+| Group-conditional L_S (`--ls-mode group_mean`) | removes the person's sex from the generated label, but the label then follows other columns (synthetic BER 0.235 at λ=4); neither preset uses it |
+| Share-matched argmax (`--s-decode share`) | recovers the person's sex from the tilt (100% on a bank model); diagnostic only |
+| `--paper-config`, `--ls-mode`, `--paper-disent`, `scripts/run_final_sweep.sh` | folded into the defaults / `--preset` / `scripts/run_paper_grid.sh` |
+
+## Sensitivity sweep of the paper's unstated choices, and the final configuration
+
+All fold 0, tier-1, λ = 4 unless stated, unmasked bank, paper preset
+otherwise. "Real sex" metrics use each tier-1 row's source person.
+
+### Checks on the evaluation and the inputs
+
+| Check | Result |
+|---|---|
+| Income in the fairness terms (`--target-in-fairness`) | identical to the digit: income has two levels, and row-centred CKAᵀ is constant for two columns, so the paper's method cannot score it either way |
+| `--binary-w1` (W1 on two-level columns, ours) | λ 12: income gap between true-sex groups 0.198 → 0.105, AUC 0.914 → 0.903; true-sex BER 0.140 → 0.143 |
+| Group centring (dim 0) instead of row | AUC flat; income gap unchanged (a rate difference is a mean offset, which dim-0 removes); the paper's BER/A-NCB trend weaker (0.24/0.25 at λ 4 vs 0.41/0.43) |
+| Downstream AUC with sex as a feature | identical to ±0.001 at every λ (real data too: sex adds nothing beyond relationship / marital status) |
+| The paper's Fig. 3 numbers (no-DP column) | AUC 0.75 → 0.57, α 0.90 → 0.29, β 0.41 → 0.15 with λ 0 → 12, BER 0.41 → 0.50, A-NCB 0.32 → 0.92: their λ degrades the data broadly |
+
+### Readings of the method that could strengthen λ
+
+| Setting | True-sex BER | `relationship` SP, real sex | Note |
+|---|---|---|---|
+| Paper preset (reference) | 0.140 | 0.528 | |
+| Phase-2 LR ×3 / ×10 | 0.140 / 0.140 | 0.532 / 0.570 | scrambles the sex label even at λ 0 (paper BER 0.38) |
+| Phase-2 reconstruction weight 0.3 / 0.1 / 0.03 | 0.141 / 0.145 / 0.150 | 0.52 / 0.52 / 0.51 | W1 0.045 → 0.079: untargeted drift |
+| SWD weight 0.3 / 0.1 / 0 | 0.140 / 0.139 / 0.139 | 0.53 | the paper's BER/A-NCB improve further (0.49 / 0.79) |
+| SWD 10 / 500 projections; latent SWD on z | 0.140 | 0.52–0.53 | |
+| Per-token CKAᵀ (λ 4 / 12) | 0.140 / 0.140 | 0.53 | relationship token's CKAᵀ 0.65 → 0.97 while its sex probe stays 0.72–0.74; the paper's BER trend vanishes |
+| RBF-kernel CKAᵀ (λ 4 / 12) | 0.140 / 0.142 | 0.52–0.53 | gradient alignment 0.33 at the bank, ~0.07 after training |
+| RFF-lift CKAᵀ (λ 4 / 12) | 0.142 / 0.172 | 0.52 / 0.51 | latent probe 1.00 → 0.83; λ 12 trips the collapse guard (W1 0.156) |
+
+The global optimizer-level gradient clip (ours, norm 5) is post-processing
+under DP and was not limiting (Adam undoes a uniform rescale); checkpoint
+selection is not used (Phase 2 returns its final weights; diffusion early
+stopping is off).
+
+### What CKAᵀ sees (permutation and gradient tests on saved models)
+
+The real men/women split lowers CKAᵀ far below random 50/50 splits at every
+stage (latent 0.876 vs 1.000; relationship token 0.658 vs 0.999), and
+removing each group's mean representation brings it back to ~1 and a linear
+sex probe to chance: CKAᵀ registers the groups' mean differences. The cosine
+between the gradient that raises CKAᵀ and the gradient that defeats a sex
+probe is 0.02–0.18 at the bank and ~0.05 after Phase 2, so optimizing CKAᵀ
+barely acts on that information.
+
+### Ablation of the additions on the paper backbone
+
+| Arm | True-sex BER | Synthetic-trained BER | `relationship` SP, real sex | Income SP | AUC | Largest category shift |
+|---|---|---|---|---|---|---|
+| Backbone | 0.140 | 0.163 | 0.546 | 0.204 | 0.912 | 0.003 |
+| + mean gap at the stages | 0.139 | 0.163 | 0.558 | 0.163 | 0.912 | 0.003 |
+| + dim-0 CKAᵀ + mean gap | 0.148 | 0.166 | 0.553 | 0.177 | 0.901 | 0.012 |
+| + joint stage (income in, no guard) | 0.396 | 0.302 | 0.175 | 0.295 | 0.892 | 0.242 |
+| + mean gap + joint (income in, no guard) | 0.494 | 0.297 | 0.068 | 0.000 | 0.768 | 0.439 (collapsed) |
+| + joint, income out, no guard | 0.451 | 0.292 | 0.100 | 0.036 | 0.889 | 0.415 |
+| **+ mean gap + joint + KL guard, income in (final)** | **0.265** | **0.230** | **0.299** | **0.056** | **0.894** | **0.160** |
+| + mean gap + joint + KL guard, income out | 0.283 | 0.254 | 0.370 | 0.130 | 0.905 | 0.150 |
+| + joint + KL guard, masked, income in | 0.235 (masked real 0.195) | 0.168 | 0.439 | 0.282 | 0.888 | 0.104 |
+
+The joint stage is the active ingredient; the guard is what lets income stay
+in the fairness terms without the target collapsing; masking adds no real
+reduction on top. The 3-fold tier-1 check of the final configuration is in
+README Part 10.5 and `results/final_tier1_check.{csv,txt}`.
