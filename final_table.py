@@ -16,6 +16,7 @@ masking.
 
 import argparse
 import glob
+import re
 import json
 import os
 import sys
@@ -40,8 +41,14 @@ METRICS = [
      'paper_metrics.real_test_reencoded.ber', 'plain'),
     ('BER rel. to real (%)',   'paper_metrics.outcome_replication.ber_rel_pct',
      None, 'plain'),
-    # A-NCB: full-covariance GMM (sklearn default, likely the paper's
-    # setup), strict real-trained adversary, 10 seeds.
+    # A-NCB: full-covariance GMM, 10 seeds. The adversary that infers each
+    # row's sex is trained on the REAL data (this repository's reading) or
+    # on the table's own GENERATED sex column (the paper's wording read
+    # literally; it rewards a generated sex column that drifted from the row)
+    ('A-NCB (adversary on generated sex)', 'paper_metrics.syn_own_adversary.a_ncb',
+     'paper_metrics.real_test_own_adversary.a_ncb', 'plain'),
+    ('NCB on generated sex (no adversary)', 'paper_metrics.syn_own_adversary.ncb_stored',
+     'paper_metrics.real_test_own_adversary.ncb_stored', 'plain'),
     ('A-NCB',                  'paper_metrics.syn_fullcov.a_ncb|paper_metrics.syn.a_ncb',
      'paper_metrics.real_test_fullcov.a_ncb|paper_metrics.real_test.a_ncb', 'plain'),
     ('A-NCB (median of seeds)', 'paper_metrics.syn_fullcov.a_ncb_median|paper_metrics.syn.a_ncb_median',
@@ -112,12 +119,15 @@ def transform(v, mode):
     return v
 
 
-def load_runs(pattern):
+def load_runs(pattern, name_re=None):
     """Return {(lam, fold): run JSON} for valid (non-collapsed) runs
-    matching the pattern. Collapsed or unreadable runs are reported."""
+    matching the pattern (and name_re, if given). Collapsed or unreadable
+    runs are reported."""
     runs, skipped = {}, []
     for path in sorted(glob.glob(pattern)):
         name = os.path.basename(path)
+        if name_re and not re.fullmatch(name_re, name):
+            continue
         try:
             d = json.load(open(path))
         except (OSError, json.JSONDecodeError) as e:
@@ -180,15 +190,17 @@ def main():
                     help='aggregate the tier-1 runs instead of full diffusion')
     ap.add_argument('--lams', default=None,
                     help='comma-separated lambdas to show (default: all present)')
-    ap.add_argument('--prefix', default='pc',
-                    help='run-tag prefix: pc (raw) or re (re-encoded)')
+    ap.add_argument('--prefix', default='pgrid',
+                    help='run-tag prefix (pgrid: the paper grid; flip: the '
+                         '--preset ours sweep; rpb: the repair baseline)')
     ap.add_argument('--out', default=None,
                     help='also write the table to this file')
     args = ap.parse_args()
 
     suffix = '_t1' if args.tier1 else ''
-    pattern = os.path.join(OUT_DIR, f'{args.prefix}_f?_lam?{suffix}.json')
-    runs, skipped = load_runs(pattern)
+    pattern = os.path.join(OUT_DIR, f'{args.prefix}_f?_lam*{suffix}.json')
+    runs, skipped = load_runs(pattern, rf'{re.escape(args.prefix)}_f\d_lam\d+'
+                              rf'{re.escape(suffix)}\.json')
     if args.lams:
         keep = {int(float(x)) for x in args.lams.split(',')}
         runs = {k: v for k, v in runs.items() if k[0] in keep}

@@ -144,7 +144,7 @@ TRADEOFF_PARAMS = {
     # outside the DP accounting, so this schedule is fixed in advance.
     # 'plateau' is TabSyn's version (start at BETA_MAX, multiply by
     # BETA_LAMBDA after BETA_PATIENCE epochs without a lower Phase-1 epoch
-    # loss) - used by run_adult_flip.py --paper-config, non-DP only.
+    # loss) - used by run_adult_flip.py, non-DP only.
     'BETA_SCHEDULE': 'fixed',
     'BETA_MAX': 1e-2,
     'BETA_MIN': 1e-5,
@@ -466,6 +466,11 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
             save_phase1_checkpoint(ckpt, raw, optimizer)
         if not plateau:
             beta = beta_at(epoch, params)
+        # PHASE2_BETA: the KL weight of Phase 2's ELBO, fixed (e.g. the
+        # banked Phase 1's final beta); otherwise a banked run restarts the
+        # schedule at BETA_MAX, since a bank stores only the weights
+        if phase == 2 and params.get('PHASE2_BETA') is not None:
+            beta = params['PHASE2_BETA']
 
         # Phase-2 LR drop: shrink the step size once disentanglement
         # starts so fairness updates perturb the quality representation
@@ -511,6 +516,8 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
             # With the batch-mean L_S (pass 2), the per-sample one stays at
             # weight 0: S has no CE term, so without it the S head would
             # get no per-sample gradient and Opacus's pre_step() raises.
+            # Phase 2 keeps L_quality (ELBO + L_S): the paper uses it as the
+            # detokenizer-stage divergence penalty (Sec. 4.3.2).
             loss_private = mse + ce + cur_beta * kld \
                 + (0.0 if ls_batch else 1.0) * loss_s
             has_coupled = ls_batch or phase == 2
@@ -682,6 +689,8 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                     beta *= params.get('BETA_LAMBDA', 0.7)
                     stall = 0
                     print(f'--- beta decayed to {beta:.2e} ---')
+        if phase == 1:
+            params['PHASE1_FINAL_BETA'] = float(beta)  # banked with the model
 
         if epoch % 10 == 0 or epoch == total_epochs - 1:
             msg = f'epoch {epoch:3d} [phase {phase}] loss={epoch_loss/max(1,n_batches):.4f}  beta={beta:.1e}'

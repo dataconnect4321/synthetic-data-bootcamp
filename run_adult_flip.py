@@ -6,31 +6,43 @@ checks added in this reproduction.
 One run = one 3-fold-CV fold: the generator trains on 2/3 of the rows, the
 held-out 1/3 is the unseen real reference. Reuses the HMDA pipeline's
 training / diffusion / decoding code by pointing run_flip_demo's column
-configuration at Adult.
+configuration at Adult. See README Part 10.
 
-Final setup (FLIP + minimal fixes; see README):
-  --paper-config --ls-mode batch_mean   the paper's training setup
-  --mask-proxies                        merge auto-detected deterministic
-                                        proxy classes (Husband/Wife -> MASK)
-  --decoded-joint                       joint decoded-output CKA^T stage
-  --marginal-weight 1.0                 KL marginal guard (no deleted
-                                        categories)
-  --stage-reduce sum                    full lambda per stage
-  --s-decode sample                     generated sex drawn from its
-                                        probabilities, not argmax
+Default (--preset paper): FLIP as published.
+  Phase 1  ELBO (reconstruction + beta*KL, beta decayed TabSyn-style) + the
+           batch-mean L_S (Eq. 3), balanced batches of 4096, 3000 epochs
+  Phase 2  L_quality (ELBO + L_S, the detokenizer-stage divergence term)
+           + SWD to the Phase-1 model at the latent and decoder stages
+           + lambda * -CKA^T (linear, row-centred, Eq. 7) at the latent,
+           detokenizer (per-feature mean) and decoder stages; stages
+           averaged; no lambda ramp
+  Stage 2  latent diffusion on reparameterized latents mu + sigma*eps
+  Decode   argmax for every categorical column, sex included
+  Choices the paper does not state: Phase-2 beta 1e-2 (--phase2-beta),
+  100 Phase-2 epochs, stages averaged (--stage-reduce).
+
+--preset ours: this repository's additions (the earlier final setup) -
+  masked proxies, group-centred CKA^T + mean gap, binary W1, summed
+  numerics, SWD at the latent only, lambda ramp, the RFF joint
+  decoded-output stage, the KL marginal guard, summed stages, sampled sex.
+Any individual flag overrides the preset.
 
 Examples:
     # bank Phase 1 for a fold (tier-1 metrics of the Phase-1 model)
-    python run_adult_flip.py --paper-config --ls-mode batch_mean \\
-        --mask-proxies --fold 0 --phase2-epochs 0 --tier1 \\
-        --save-phase1 adult_results/ckpt/fin_f0.pt --tag fin_f0_bank
-    # Phase 2 at lambda=8 from the bank, full pipeline
-    python run_adult_flip.py --paper-config --ls-mode batch_mean \\
-        --mask-proxies --decoded-joint --marginal-weight 1.0 \\
-        --stage-reduce sum --s-decode sample --fold 0 --lam 8 \\
-        --phase1-checkpoint adult_results/ckpt/fin_f0.pt --tag flip_f0_lam8
+    python run_adult_flip.py --fold 0 --phase2-epochs 0 --tier1 \\
+        --save-phase1 adult_results/ckpt/raw_f0.pt --tag raw_f0_bank
+    # Phase 2 at lambda=4 from the bank, full pipeline (the paper)
+    python run_adult_flip.py --fold 0 --lam 4 \\
+        --phase1-checkpoint adult_results/ckpt/raw_f0.pt --tag pgrid_f0_lam4
+    # this repository's additions (masked bank: --save-phase1 with --preset ours)
+    python run_adult_flip.py --preset ours --fold 0 --lam 4 \\
+        --phase1-checkpoint adult_results/ckpt/fin_f0.pt --tag flip_f0_lam4
     # comparison baseline: scrambling repair, no in-model fairness
     python run_adult_flip.py ... --repair-tau 1.0 --lam 0 --tag rpb_f0_lam0
+    # re-decode a finished run's saved VAE + latents with the other sex
+    # decoding (scoring only; no training, no diffusion)
+    python run_adult_flip.py --from-run pgrid_f0_lam4 --s-decode sample \\
+        --tag pgrid_f0_lam4_sample
 """
 
 import os
@@ -84,6 +96,21 @@ SENSITIVE, TARGET = 'sex', 'income'
 DATA_DIR = os.path.join(HERE, 'Data')
 OUT_DIR = os.path.join(HERE, 'adult_results')
 
+# Method presets; every key is also a command-line flag that overrides it.
+PRESETS = {
+    # FLIP as published (Sec. 4.3); the beta value is not stated there
+    'paper': dict(cka_center='row', mean_gap_weight=0.0, binary_w1=False,
+                  num_stage='pre', div_stages='latent+decoder',
+                  lambda_ramp=0.0, decoded_joint=False, marginal_weight=0.0,
+                  stage_reduce='mean', mask_proxies=False, s_decode='argmax',
+                  phase2_beta='1e-2'),
+    # this repository's additions (README Part 10, EXPERIMENTS_ADULT.md)
+    'ours': dict(cka_center='group', mean_gap_weight=1.0, binary_w1=True,
+                 num_stage='summed', div_stages='latent', lambda_ramp=0.25,
+                 decoded_joint=True, marginal_weight=1.0, stage_reduce='sum',
+                 mask_proxies=True, s_decode='sample', phase2_beta='1e-2'),
+}
+
 
 def read_adult():
     kw = dict(names=ADULT_NAMES, skipinitialspace=True, na_values='?')
@@ -130,28 +157,30 @@ def build_params(args):
     params = copy.deepcopy(demo.TRADEOFF_PARAMS)
     params.update({
         'LAMBDA_FAIR': args.lam,
-        'MEAN_SHIFT_WEIGHT': 1.0,
-        'BINARY_W1': True,
         'USE_DP': args.dp_noise is not None,
         'SEED': args.seed,
         'PHASE1_EPOCHS': args.phase1_epochs,
         'PHASE2_EPOCHS': args.phase2_epochs,
         'SAMPLE_SIZE': None,
         'WEIGHT_DECAY': args.weight_decay,
-        'LS_MODE': args.ls_mode,
-        'MARGINAL_WEIGHT': args.marginal_weight,
+        # the paper's training setup: full data, batch 4096 (the fairness
+        # terms are batch statistics), small tokens, wide FFN, TabSyn's
+        # plateau beta decay, batch-mean L_S (Eq. 3)
+        'BATCH_SIZE': 4096, 'D_TOKEN': 4, 'FACTOR': 32,
+        'BETA_SCHEDULE': 'plateau', 'BETA_MAX': 1e-2, 'BETA_MIN': 1e-5,
+        'BETA_LAMBDA': 0.7, 'BETA_PATIENCE': 10, 'PHASE2_LR_SCALE': 1.0,
+        'LS_MODE': 'batch_mean',
+        # disentanglement (preset + flags)
+        'CKA_CENTER': args.cka_center,
+        'MEAN_SHIFT_WEIGHT': args.mean_gap_weight,
+        'BINARY_W1': args.binary_w1,
+        'NUM_STAGE': args.num_stage,
+        'DIV_STAGES': args.div_stages,
+        'LAMBDA_RAMP_FRAC': args.lambda_ramp,
         'STAGE_REDUCE': args.stage_reduce,
         'DECODED_JOINT': args.decoded_joint,
+        'MARGINAL_WEIGHT': args.marginal_weight,
     })
-    if args.paper_config:
-        # Paper training setup: full data, large batch (the fairness terms
-        # are batch statistics - small batches make them noisy), small
-        # tokens, wide FFN, plateau beta decay. PHASE2_EPOCHS comes from
-        # --phase2-epochs (0 to bank Phase 1) and is not overwritten.
-        params.update(PHASE1_EPOCHS=3000, BATCH_SIZE=4096, D_TOKEN=4,
-                      FACTOR=32, BETA_SCHEDULE='plateau',
-                      BETA_MAX=1e-2, BETA_MIN=1e-5,
-                      BETA_LAMBDA=0.7, BETA_PATIENCE=10, PHASE2_LR_SCALE=1.0)
     if args.dp_noise is not None:
         params['NOISE_MULTIPLIER'] = args.dp_noise
     dparams = copy.deepcopy(full.DIFFUSION_PARAMS)
@@ -228,28 +257,80 @@ def main():
                     help='seed for the fold split (fixed across --seed values '
                          'so seed sweeps vary only training, not data)')
     ap.add_argument('--seed', type=int, default=42)
-    ap.add_argument('--phase1-epochs', type=int, default=300)
+    ap.add_argument('--phase1-epochs', type=int, default=3000)
     ap.add_argument('--phase2-epochs', type=int, default=100)
     ap.add_argument('--weight-decay', type=float, default=0.0,
                     help='Adam L2 weight decay; the HMDA default (1e-2) '
                          'collapses the VAE to the mean on Adult')
-    ap.add_argument('--ls-mode', choices=['per_sample', 'batch_mean'],
-                    default='per_sample',
-                    help='L_S variant; batch_mean is the paper-literal Eq. 3')
-    ap.add_argument('--s-decode', choices=['argmax', 'sample'],
-                    default='argmax',
-                    help='decode the protected column by argmax or by '
+    # ---- method: a preset, each piece overridable ---------------------------
+    ap.add_argument('--preset', choices=sorted(PRESETS), default='paper',
+                    help="'paper': FLIP as published (default); 'ours': this "
+                         "repository's additions. Flags below override it")
+    ap.add_argument('--cka-center', choices=['row', 'group'], default=None,
+                    help="CKA^T centering: 'row' (dim=1, the paper's Eqs. "
+                         "5-7) or 'group' (dim=0; blind to group mean "
+                         'offsets, pair it with --mean-gap-weight)')
+    ap.add_argument('--mean-gap-weight', type=float, default=None,
+                    help='weight of the normalized group mean-gap term at '
+                         'every stage and in the joint stage (paper: 0)')
+    ap.add_argument('--binary-w1', action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help='two-level columns at the detokenizer stage: W1 of '
+                         'the logit gap instead of CKA^T (paper: off)')
+    ap.add_argument('--num-stage', choices=['pre', 'summed'], default=None,
+                    help="numeric detokenizer stage: 'pre' per-feature "
+                         "pre-aggregation logits (paper) or 'summed'")
+    ap.add_argument('--div-stages', choices=['latent+decoder', 'latent'],
+                    default=None,
+                    help='SWD divergence anchor at the latent and decoder '
+                         '(paper) or at the latent only')
+    ap.add_argument('--lambda-ramp', type=float, default=None,
+                    help='fraction of Phase 2 over which lambda ramps up '
+                         '(paper: 0, full lambda from the first epoch)')
+    ap.add_argument('--decoded-joint', action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help='joint decoded-output stage: CKA^T + mean gap on the '
+                         'whole decoded row, RFF-lifted, weighted by lambda')
+    ap.add_argument('--marginal-weight', type=float, default=None,
+                    help='weight of the KL marginal guard (stops the fairness '
+                         'terms from deleting categories; paper: 0)')
+    ap.add_argument('--stage-reduce', choices=['mean', 'sum'], default=None,
+                    help='combine the stages by mean or sum (full lambda per '
+                         'stage); the paper does not say')
+    ap.add_argument('--mask-proxies', action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help='merge each auto-detected near-deterministic proxy '
+                         'class (P(S|category) >= 0.95 pointing to different '
+                         'groups, e.g. Husband/Wife) into one new category in '
+                         'both folds before training (needs a bank trained '
+                         'the same way)')
+    ap.add_argument('--s-decode', choices=['argmax', 'sample'], default=None,
+                    help='decode the generated sex by argmax (paper) or by '
                          'sampling its probabilities. Under the batch-mean '
-                         'L_S every row sits within ~0.01 of uniform, so '
-                         'argmax either copies the true group through that '
-                         'tilt or collapses to one group; sampling gives the '
-                         'balanced assignment the paper (Sec. 4.2) intends')
+                         'L_S every row sits near 0.5, so argmax follows a '
+                         'small tilt that can track or invert the true sex; '
+                         'sampling gives a random assignment')
+    ap.add_argument('--phase2-beta', default=None,
+                    help="KL weight of Phase 2's ELBO: a number (preset: "
+                         "1e-2), or 'carry' for the bank's final Phase 1 "
+                         "beta (read from BANK.json). The paper decays beta "
+                         'in Phase 1 and does not state its Phase-2 value')
+    ap.add_argument('--from-run', default=None,
+                    help='re-decode a saved run (TAG or path to '
+                         'adult_results/runs/TAG.pt) instead of training: '
+                         'its Phase-2 VAE and latents, decoded with this '
+                         '--s-decode and scored under this --tag. Data and '
+                         'training flags are taken from the saved run')
+    ap.add_argument('--score-collapsed', action='store_true',
+                    help='score a run that fails the collapse guard instead '
+                         'of stopping; it stays flagged collapsed, so the '
+                         'tables still skip it')
+    ap.add_argument('--no-save-run', action='store_true',
+                    help='do not save the Phase-2 VAE and decoded latents to '
+                         'adult_results/runs/TAG.pt (saved by default, for '
+                         '--from-run)')
     ap.add_argument('--diff-epochs', type=int, default=2000)
     ap.add_argument('--diff-batch', type=int, default=4096)
-    ap.add_argument('--paper-config', action='store_true',
-                    help="the paper's training setup: full data, batch 4096, "
-                         '3000 Phase-1 epochs, d_token 4, factor 32, beta '
-                         'decay')
     ap.add_argument('--tier1', action='store_true',
                     help='skip diffusion: decode z = mu + sigma*eps from the '
                          'real training rows (reconstruct-through-the-latent). '
@@ -261,30 +342,29 @@ def main():
     ap.add_argument('--save-phase1', default=None,
                     help='save the VAE after training (with --phase2-epochs 0: '
                          'bank Phase 1)')
-    ap.add_argument('--mask-proxies', action='store_true',
-                    help='merge each auto-detected near-deterministic proxy '
-                         'class (P(S|category) >= 0.95 pointing to different '
-                         'groups, e.g. Husband/Wife) into one new category in '
-                         'both folds before training')
     ap.add_argument('--mask-label', default='MASK',
-                    help='name of the merged category')
-    ap.add_argument('--decoded-joint', action='store_true',
-                    help='add the joint decoded-output stage: CKA^T + mean '
-                         'gap on the whole decoded row (RFF-lifted), weighted '
-                         'by lambda')
-    ap.add_argument('--marginal-weight', type=float, default=0.0,
-                    help='weight of the KL marginal guard (stops the fairness '
-                         'terms from deleting categories)')
-    ap.add_argument('--stage-reduce', choices=['mean', 'sum'],
-                    default='mean',
-                    help='combine the latent / detokenizer / decoder stages '
-                         'by mean or sum (full lambda per stage)')
+                    help='name of the merged category (--mask-proxies)')
     ap.add_argument('--repair-tau', type=float, default=0.0,
                     help='COMPARISON BASELINE: scramble every non-target '
                          "column's link to sex with strength tau in [0, 1] "
                          "before training, keeping each column's overall "
                          'distribution (Feldman et al. repair)')
     args = ap.parse_args()
+    # --from-run: everything except the decoding and the output tag comes
+    # from the saved run, so the data preparation matches it exactly
+    saved_run = None
+    if args.from_run:
+        path = (args.from_run if args.from_run.endswith('.pt') else
+                os.path.join(OUT_DIR, 'runs', args.from_run + '.pt'))
+        saved_run = torch.load(path, map_location='cpu', weights_only=True)
+        for k, v in saved_run['args'].items():
+            if k not in ('tag', 's_decode', 'from_run', 'no_save_run',
+                         'score_collapsed'):
+                setattr(args, k, v)
+    # unset method flags come from the preset
+    for k, v in PRESETS[args.preset].items():
+        if getattr(args, k, None) is None:
+            setattr(args, k, v)
 
     tag = args.tag or f'lam{args.lam:g}_fold{args.fold}'
     t0 = time.time()
@@ -340,12 +420,38 @@ def main():
 
     # ---- Stage 1: FLIP VAE ------------------------------------------------
     print('\n[Stage 1] FLIP VAE')
-    vae, accountant, group_mech = demo.train_flip(
-        X_num, X_cat, categories, s_idx, params, device,
-        phase1_checkpoint=args.phase1_checkpoint,
-        factor=params.get('FACTOR', 8))
-    if args.save_phase1:
+    if saved_run is not None:
+        print(f'  SKIPPED (--from-run): Phase-2 VAE of {saved_run["tag"]}')
+        vae = demo.Model_VAE(params['NUM_LAYERS'], X_num.shape[1], categories,
+                             params['D_TOKEN'], n_head=1,
+                             factor=params.get('FACTOR', 8),
+                             bias=True).to(device)
+        vae.load_state_dict(saved_run['vae'])
+        accountant = group_mech = None
+    else:
+        if args.phase2_beta != 'carry':
+            params['PHASE2_BETA'] = float(args.phase2_beta)
+            print(f"  Phase 2 beta fixed at {params['PHASE2_BETA']:.2e}")
+        elif args.phase1_checkpoint:
+            # a single Phase-1 + Phase-2 run carries beta on its own
+            side = args.phase1_checkpoint + '.json'
+            if not os.path.exists(side):
+                raise SystemExit(f'--phase2-beta carry: {side} not found '
+                                 "(the bank's final Phase 1 beta)")
+            with open(side) as f:
+                params['PHASE2_BETA'] = json.load(f)['phase1_final_beta']
+            print(f"  Phase 2 beta carried from the bank: "
+                  f"{params['PHASE2_BETA']:.2e}")
+        vae, accountant, group_mech = demo.train_flip(
+            X_num, X_cat, categories, s_idx, params, device,
+            phase1_checkpoint=args.phase1_checkpoint,
+            factor=params.get('FACTOR', 8))
+    if args.save_phase1 and saved_run is None:
         torch.save(vae.state_dict(), args.save_phase1)
+        # the bank's final beta, for --phase2-beta carry
+        with open(args.save_phase1 + '.json', 'w') as f:
+            json.dump({'phase1_final_beta':
+                       params.get('PHASE1_FINAL_BETA')}, f)
         print(f'  saved VAE checkpoint to {args.save_phase1}')
 
     # ---- Stage 2: diffusion (or tier-1 decode) ------------------------------
@@ -355,27 +461,51 @@ def main():
     decode_kw = dict(X_num=X_num, params=params,
                      num_floor=(-data['means'] / data['stds']).values,
                      sample_idx=s_idx if args.s_decode == 'sample' else None)
-    if args.tier1:
+    if saved_run is not None:
+        print(f'\n[Stage 2] SKIPPED (--from-run): saved latents, '
+              f'--s-decode {args.s_decode}')
+        z_dec = saved_run['z'].to(device)
+        syn_num, syn_cat, stats_budgets = full.decode_latents(
+            vae, z_dec, device, **decode_kw)
+        diff_acc = None
+    elif args.tier1:
         # z = mu + sigma*eps from REAL rows ('std_z' is the encoder's
         # log-variance). Cannot collapse; row i is decoded from training row
         # i, so its true sex is known.
         print('\n[Stage 2] SKIPPED (--tier1): decoding z = mu + sigma*eps')
         sigma = torch.exp(0.5 * enc_out['std_z'])
-        z = enc_out['mu_z'] + sigma * torch.randn_like(sigma)
+        z_dec = enc_out['mu_z'] + sigma * torch.randn_like(sigma)
         syn_num, syn_cat, stats_budgets = full.decode_latents(
-            vae, z, device, **decode_kw)
+            vae, z_dec, device, **decode_kw)
         diff_acc = None
     else:
         print('\n[Stage 2] latent diffusion')
         mu_z = enc_out['mu_z']
         latents = mu_z.reshape(mu_z.shape[0], -1).cpu().numpy()
-        # trained on mu (std=None), as in the final runs
+        # trained on reparameterized latents z = mu + sigma*eps, fresh eps
+        # per batch (paper Sec. 4.1.2); the encoder's 'std_z' is its
+        # log-variance
+        std = torch.exp(0.5 * enc_out['std_z']).reshape(
+            mu_z.shape[0], -1).cpu().numpy()
         diff_model, z_mean, diff_acc = full.train_diffusion(
-            latents, params=dparams, device=device)
-        sampled = full.sample_from_diffusion(diff_model, z_mean, len(X_num),
-                                             mu_z.shape[1:], dparams, device)
+            latents, std=std, params=dparams, device=device)
+        z_dec = full.sample_from_diffusion(diff_model, z_mean, len(X_num),
+                                           mu_z.shape[1:], dparams, device)
         syn_num, syn_cat, stats_budgets = full.decode_latents(
-            vae, sampled, device, **decode_kw)
+            vae, z_dec, device, **decode_kw)
+
+    # Save the Phase-2 VAE and the decoded latents, so the run can be
+    # re-decoded (--from-run, another --s-decode) without retraining or
+    # re-running diffusion. Never fails the run.
+    if saved_run is None and not args.no_save_run:
+        try:
+            os.makedirs(os.path.join(OUT_DIR, 'runs'), exist_ok=True)
+            torch.save({'tag': tag, 'args': vars(args),
+                        'vae': vae.state_dict(),
+                        'z': torch.as_tensor(z_dec).detach().cpu()},
+                       os.path.join(OUT_DIR, 'runs', f'{tag}.pt'))
+        except Exception as e:  # noqa: BLE001
+            print(f'  WARNING: run not saved for --from-run ({e})')
 
     # Released CSV: numerics clipped/rounded to the real columns' format
     # (metrics below use the unrounded decode). Under DP the real min/max is
@@ -403,6 +533,13 @@ def main():
         te_n, te_c_raw, s_idx, ref=(tr_n, tr_c_raw)))
     real_test_masked = (ref_cached('real_test_masked', lambda: averaged_scores(
         te_n, te_c, s_idx, ref=(tr_n, tr_c))) if args.mask_proxies else None)
+    # A-NCB with the adversary trained on the table's OWN generated sex
+    # column (the paper's wording read literally). It rewards a generated
+    # sex column that has drifted from the row, so it is reported next to
+    # the real-trained version above, not instead of it.
+    syn_own = averaged_scores(syn_num, syn_cat, s_idx, ref=None)
+    real_test_own = ref_cached('real_test_own', lambda: averaged_scores(
+        te_n, te_c_raw, s_idx, ref=None))
     eps_id = None if args.tier1 else epsilon_identifiability(tr_n, tr_c,
                                                             syn_num, syn_cat)
     # Tier-1 only: true-sex leakage - a real-trained classifier recovering
@@ -432,7 +569,11 @@ def main():
     real_income_rate = float((tr_c[:, t_idx] == t_pos).mean())
     collapsed = (fid['num_w1_mean'] > 0.15
                  or abs(syn_income_rate - real_income_rate) > 0.05)
-    if collapsed:
+    if collapsed and args.score_collapsed:
+        print(f'  COLLAPSED (income {syn_income_rate:.3f}, W1 '
+              f'{fid["num_w1_mean"]:.3f}) - scored anyway '
+              f'(--score-collapsed); flagged, kept out of tables')
+    elif collapsed:
         result = {'tag': tag, 'args': vars(args), 'collapsed': True,
                   'syn_income_rate': syn_income_rate,
                   'real_income_rate': real_income_rate, 'fidelity': fid}
@@ -505,11 +646,14 @@ def main():
                    and max(v for j, v in all_tv.items() if j != s_idx) <= 0.05)
 
     result = {
-        'tag': tag, 'args': vars(args), 'n_train': len(X_num),
+        'tag': tag, 'args': vars(args), 'collapsed': collapsed,
+        'n_train': len(X_num),
         'n_test': len(te_n),
         'paper_metrics': {
             'syn': syn, 'real_test': real_test,
             'real_test_reencoded': real_test_masked,
+            'syn_own_adversary': syn_own,
+            'real_test_own_adversary': real_test_own,
             'eps_identifiability': eps_id,
             'decoded_leakage': leak, 'heldout_ceiling': ceiling_ho,
             'synthetic_sex_agreement': s_agree,
@@ -546,7 +690,11 @@ def main():
     print(f'  BER   syn={syn["ber"]:.3f}  real(test)={real_test["ber"]:.3f}  '
           f'(chance {syn["ber_chance"]:.2f})')
     print(f'  A-NCB syn={syn["a_ncb"]:.3f} (median {syn["a_ncb_median"]:.3f})'
-          f'  real(test)={real_test["a_ncb"]:.3f}')
+          f'  real(test)={real_test["a_ncb"]:.3f}  [adversary trained on '
+          f'real data]')
+    print(f'  A-NCB syn={syn_own["a_ncb"]:.3f}  real(test)='
+          f'{real_test_own["a_ncb"]:.3f}  [adversary trained on the '
+          f'generated sex]')
     if real_test_masked is not None:
         print(f'  real reference after masking: BER '
               f'{real_test_masked["ber"]:.3f}  A-NCB '
