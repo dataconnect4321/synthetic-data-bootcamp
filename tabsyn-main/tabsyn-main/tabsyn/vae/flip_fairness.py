@@ -266,14 +266,17 @@ def linear_cka_t(A: torch.Tensor, B: torch.Tensor,
     <A^T A, B^T B>_F / (||A^T A|| ||B^T B||) is exactly Eqs. 5-6 (the
     (n-1)^2 factors cancel). Groups may differ in size.
 
-    center='group' (default, used by the final Adult setup): centering
-    columns (dim=0) turns A^T A into a within-group covariance. It discards
-    each group's mean, so a group whose activations are merely shifted
-    would still score ~1 - which is why disentanglement_loss pairs it with
-    the normalized group mean gap (mean_weight). Row centering was not used
-    for the final runs because a large offset shared by all groups
-    (measured shared-mean ratio ~2.2 on Adult's latent) dominates the
-    row-centred Gram and drowns out the group signal.
+    So under row centering A^T A is an uncentred neuron co-activation
+    (second-moment) matrix: each group's covariance plus the outer product
+    of its mean pattern. A large offset shared by all groups (shared mean
+    ~11x the spread on Adult's unmasked latent) dominates both groups'
+    matrices, so CKA^T can sit near 1 while group differences remain.
+
+    center='group' (dim=0, preset 'ours'): centering columns turns A^T A
+    into a within-group neuron covariance. It discards each group's mean,
+    so a group whose activations are merely shifted would still score ~1 -
+    which is why disentanglement_loss can add the normalized group mean gap
+    (mean_weight).
 
     Args:
         A: (n_A, p) activations of group A (rows = samples).

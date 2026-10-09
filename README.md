@@ -1268,6 +1268,31 @@ sex label. λ = 4 is the recommended setting; λ = 8 trips the collapse guard on
 2 of 3 folds. Synthetic-trained BER stays below true-sex BER: some sex signal
 survives in patterns a real-trained classifier does not use.
 
+Full pipeline (VAE + diffusion on μ + σε), 3 folds
+(`results/heatmap_final_full.png`, `results/final_full_grid.{csv,txt}`; no run
+collapsed), next to the paper-faithful backbone's full-pipeline grid:
+
+| | backbone λ 0 / 2 / 4 / 8 / 12 | final λ 0 / 2 / 4 |
+|---|---|---|
+| A-NCB, real-trained adversary (real 0.33) | 0.44 / 0.37 / 0.54 / 0.41 / 0.36 | 0.42 / 0.53 / **0.61** |
+| Income statistical parity | 0.22 / 0.21 / 0.21 / 0.17 / 0.20 | 0.25 / 0.19 / **0.12** |
+| Equalized odds | 0.11 / 0.10 / 0.10 / 0.06 / 0.09 | 0.14 / 0.04 / 0.05 |
+| ε-identifiability | 0.24 / 0.26 / 0.24 / 0.25 / 0.23 | 0.37 / 0.25 / 0.21 |
+| BER (paper, generated sex) | 0.28 / 0.30 / 0.39 / 0.41 / 0.42 | 0.17 / 0.31 / 0.30 |
+| A-NCB, adversary on generated sex | 0.49 / 0.37 / 0.52 / 0.51 / 0.71 | 0.45 / 0.58 / 0.57 |
+| AUC (real 0.93) | 0.91 throughout | 0.909 / 0.902 / 0.896 |
+| α / β-recall | 0.95–0.91 / 0.32–0.34 | 0.99 / 0.47 → 0.88 / 0.29 |
+| Validity (real 0.98) | 0.70–0.75 | 0.97 / 0.71 / 0.72 |
+
+Both rise on the paper's two measures (BER and the generated-sex A-NCB) and
+lose α-precision with λ. Only the final configuration moves the measures
+that need real change: the real-trained A-NCB rises and income parity falls
+(0.21 → 0.12 at λ 4, against the backbone's flat 0.21). Its ε-identifiability
+falls with λ partly because λ = 0 starts less private (the KL guard keeps
+λ = 0 closest to the real data); at λ 4 the two are at similar levels (0.21
+vs 0.24). The paper's own figure shows the same directions with larger
+magnitudes and a much larger quality loss (10.3).
+
 ### 10.6 Evaluation and running
 
 Per fold, no averaging across datasets: BER (Def. 1, on the generated sex)
