@@ -25,6 +25,9 @@ Default (--preset paper): FLIP as published.
   masked proxies, group-centred CKA^T + mean gap, binary W1, summed
   numerics, SWD at the latent only, lambda ramp, the RFF joint
   decoded-output stage, the KL marginal guard, summed stages, sampled sex.
+--preset final (recommended): the paper preset plus the RFF joint
+  decoded-output stage with the mean gap and the KL marginal guard; income
+  stays in the fairness terms (task-agnostic).
 Any individual flag overrides the preset.
 
 Examples:
@@ -103,12 +106,22 @@ PRESETS = {
                   num_stage='pre', div_stages='latent+decoder',
                   lambda_ramp=0.0, decoded_joint=False, marginal_weight=0.0,
                   stage_reduce='mean', mask_proxies=False, s_decode='argmax',
-                  phase2_beta='1e-2'),
+                  phase2_beta='1e-2', target_in_fairness=True),
     # this repository's additions (README Part 10, EXPERIMENTS_ADULT.md)
     'ours': dict(cka_center='group', mean_gap_weight=1.0, binary_w1=True,
                  num_stage='summed', div_stages='latent', lambda_ramp=0.25,
                  decoded_joint=True, marginal_weight=1.0, stage_reduce='sum',
-                 mask_proxies=True, s_decode='sample', phase2_beta='1e-2'),
+                 mask_proxies=True, s_decode='sample', phase2_beta='1e-2',
+                 target_in_fairness=False),
+    # recommended: the paper backbone (task-agnostic, income included) plus
+    # a direct dependence penalty on the decoded output - the RFF joint stage
+    # with the mean gap (an MMD between the groups' decoded rows) - and the
+    # KL marginal guard against levelling down (README Part 10.5)
+    'final': dict(cka_center='row', mean_gap_weight=1.0, binary_w1=False,
+                  num_stage='pre', div_stages='latent+decoder',
+                  lambda_ramp=0.0, decoded_joint=True, marginal_weight=1.0,
+                  stage_reduce='mean', mask_proxies=False, s_decode='argmax',
+                  phase2_beta='1e-2', target_in_fairness=True),
 }
 
 
@@ -168,7 +181,9 @@ def build_params(args):
         # plateau beta decay, batch-mean L_S (Eq. 3)
         'BATCH_SIZE': 4096, 'D_TOKEN': 4, 'FACTOR': 32,
         'BETA_SCHEDULE': 'plateau', 'BETA_MAX': 1e-2, 'BETA_MIN': 1e-5,
-        'BETA_LAMBDA': 0.7, 'BETA_PATIENCE': 10, 'PHASE2_LR_SCALE': 1.0,
+        'BETA_LAMBDA': 0.7, 'BETA_PATIENCE': 10,
+        'PHASE2_LR_SCALE': args.phase2_lr_scale,
+        'PHASE2_RECON_WEIGHT': args.phase2_recon_weight,
         'LS_MODE': 'batch_mean',
         # disentanglement (preset + flags)
         'CKA_CENTER': args.cka_center,
@@ -180,6 +195,14 @@ def build_params(args):
         'STAGE_REDUCE': args.stage_reduce,
         'DECODED_JOINT': args.decoded_joint,
         'MARGINAL_WEIGHT': args.marginal_weight,
+        'TARGET_IN_FAIRNESS': args.target_in_fairness,
+        'CKA_TOKENS': args.cka_tokens,
+        'CKA_KERNEL': args.cka_kernel,
+        'JOINT_MEAN_WEIGHT': (args.joint_mean_gap if args.joint_mean_gap
+                              is not None else args.mean_gap_weight),
+        'DIV_WEIGHT': args.div_weight,
+        'SWD_PROJECTIONS': args.swd_projections,
+        'SWD_LATENT': args.swd_latent,
     })
     if args.dp_noise is not None:
         params['NOISE_MULTIPLIER'] = args.dp_noise
@@ -259,13 +282,23 @@ def main():
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--phase1-epochs', type=int, default=3000)
     ap.add_argument('--phase2-epochs', type=int, default=100)
+    ap.add_argument('--phase2-recon-weight', type=float, default=1.0,
+                    help='weight of the reconstruction loss (MSE + CE) in '
+                         "Phase 2's L_quality; below 1 lets lambda and the "
+                         'SWD anchor count for more (the paper does not '
+                         'weight it; 0 drops it)')
+    ap.add_argument('--phase2-lr-scale', type=float, default=1.0,
+                    help='Phase-2 learning rate as a multiple of the Phase-1 '
+                         'rate (1e-3); the paper does not state it')
     ap.add_argument('--weight-decay', type=float, default=0.0,
                     help='Adam L2 weight decay; the HMDA default (1e-2) '
                          'collapses the VAE to the mean on Adult')
     # ---- method: a preset, each piece overridable ---------------------------
     ap.add_argument('--preset', choices=sorted(PRESETS), default='paper',
-                    help="'paper': FLIP as published (default); 'ours': this "
-                         "repository's additions. Flags below override it")
+                    help="'paper': FLIP as published (default); 'final': "
+                         "the paper plus the joint stage, mean gap and KL "
+                         "guard (recommended); 'ours': the earlier additions "
+                         "(masked, group-centred). Flags below override it")
     ap.add_argument('--cka-center', choices=['row', 'group'], default=None,
                     help="CKA^T centering: 'row' (dim=1, the paper's Eqs. "
                          "5-7) or 'group' (dim=0; blind to group mean "
@@ -304,6 +337,37 @@ def main():
                          'groups, e.g. Husband/Wife) into one new category in '
                          'both folds before training (needs a bank trained '
                          'the same way)')
+    ap.add_argument('--div-weight', type=float, default=1.0,
+                    help='weight of the SWD divergence anchor (implicit 1 '
+                         'in Eq. 10)')
+    ap.add_argument('--swd-projections', type=int, default=50,
+                    help='random 1-D projections per SWD estimate (the '
+                         'paper does not say)')
+    ap.add_argument('--swd-latent', choices=['mu', 'z'], default='mu',
+                    help='latent-stage SWD on the encoder means or on '
+                         'samples z = mu + sigma*eps (Eq. 10 is written over '
+                         'q(z|x))')
+    ap.add_argument('--joint-mean-gap', type=float, default=None,
+                    help='mean-gap weight inside the joint decoded-output '
+                         'stage (default: --mean-gap-weight)')
+    ap.add_argument('--cka-kernel', choices=['linear', 'rbf', 'rff_lift'],
+                    default='linear',
+                    help="CKA^T kernel: 'linear' (Eq. 7), 'rbf' (Eqs. 5-6 with "
+                         "an RBF kernel over the activations) or 'rff_lift' "
+                         '(rows mapped by random Fourier features, then '
+                         'linear CKA^T)')
+    ap.add_argument('--cka-tokens', choices=['concat', 'per_token'],
+                    default='concat',
+                    help='latent and decoder stages: one CKA^T on all tokens '
+                         'concatenated, or CKA^T per token averaged (the '
+                         'paper does not say)')
+    ap.add_argument('--target-in-fairness',
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help='include the target (income) in the detokenizer-'
+                         'stage and joint-stage fairness terms (paper: yes - '
+                         'every non-protected column is a potential target); '
+                         "off keeps the income rates' link to sex out of reach "
+                         'of the fairness terms')
     ap.add_argument('--s-decode', choices=['argmax', 'sample'], default=None,
                     help='decode the generated sex by argmax (paper) or by '
                          'sampling its probabilities. Under the batch-mean '
@@ -611,20 +675,26 @@ def main():
     from sklearn.ensemble import HistGradientBoostingClassifier
     from sklearn.metrics import roc_auc_score
 
-    def _util_feats(num, cat):
-        keep = [j for j in range(cat.shape[1]) if j not in (s_idx, t_idx)]
+    # The downstream model uses every column but the target (sex included,
+    # as a standard income model would); the version without sex is kept
+    # alongside (on Adult the two agree to ~0.001).
+    def _util_feats(num, cat, with_sex=True):
+        keep = [j for j in range(cat.shape[1])
+                if j != t_idx and (with_sex or j != s_idx)]
         return np.concatenate([num] + [np.eye(categories[j])[cat[:, j]]
                                        for j in keep], axis=1)
-    util_auc = float(roc_auc_score(
-        te_c[:, t_idx] == t_pos,
-        HistGradientBoostingClassifier(random_state=0).fit(
-            _util_feats(syn_num, syn_cat), syn_cat[:, t_idx] == t_pos)
-        .predict_proba(_util_feats(te_n, te_c))[:, 1]))
-    util_auc_real = ref_cached('util_auc_real', lambda: float(roc_auc_score(
-        te_c[:, t_idx] == t_pos,
-        HistGradientBoostingClassifier(random_state=0).fit(
-            _util_feats(tr_n, tr_c), tr_c[:, t_idx] == t_pos)
-        .predict_proba(_util_feats(te_n, te_c))[:, 1])))
+
+    def _auc(train_num, train_cat, with_sex):
+        return float(roc_auc_score(
+            te_c[:, t_idx] == t_pos,
+            HistGradientBoostingClassifier(random_state=0).fit(
+                _util_feats(train_num, train_cat, with_sex),
+                train_cat[:, t_idx] == t_pos)
+            .predict_proba(_util_feats(te_n, te_c, with_sex))[:, 1]))
+    util_auc = _auc(syn_num, syn_cat, True)
+    util_auc_no_sex = _auc(syn_num, syn_cat, False)
+    util_auc_real = ref_cached('util_auc_real_with_sex',
+                               lambda: _auc(tr_n, tr_c, True))
     # 'male wife' rate: (sex, category) pairs absent from the real data
     imposs = impossible_combination_rate(syn_cat, tr_c_raw, s_idx,
                                          exclude=(t_idx,))
@@ -667,6 +737,7 @@ def main():
             'true_group_target_gap': true_gap,
             'downstream_sp_eo': ds,
             'downstream_auc': util_auc, 'downstream_auc_real': util_auc_real,
+            'downstream_auc_no_sex': util_auc_no_sex,
             'outcome_replication': rel, 'match_valid': match_valid,
             'impossible_combination_rate': imposs,
             'impossible_combination_rate_real': imposs_real,

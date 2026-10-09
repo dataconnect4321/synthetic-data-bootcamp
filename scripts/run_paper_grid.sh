@@ -5,7 +5,8 @@
 # $JOBS runs at a time. Re-running skips finished runs.
 #
 #   bash scripts/run_paper_grid.sh                 # FLIP as published
-#   PRESET=ours bash scripts/run_paper_grid.sh     # this repository's additions
+#   PRESET=final LAMS="0 2 4" bash scripts/run_paper_grid.sh   # recommended
+#   PRESET=ours bash scripts/run_paper_grid.sh     # the earlier additions
 #   REPAIR=1 bash scripts/run_paper_grid.sh        # + scrambling-repair baseline
 #   LAMS="0 4" FOLDS="0" TIER1_ONLY=1 bash scripts/run_paper_grid.sh
 #
@@ -21,8 +22,9 @@ FOLDS=${FOLDS:-"0 1 2"}
 JOBS=${JOBS:-3}
 case $PRESET in
   paper) P=pgrid; BANK=raw ;;   # unmasked banks
+  final) P=final; BANK=raw ;;   # unmasked banks (same Phase 1 as paper)
   ours)  P=flip;  BANK=fin ;;   # masked banks (the preset masks proxies)
-  *) echo "PRESET must be paper or ours"; exit 1 ;;
+  *) echo "PRESET must be paper, final or ours"; exit 1 ;;
 esac
 L=adult_results/logs
 mkdir -p $L adult_results/ckpt

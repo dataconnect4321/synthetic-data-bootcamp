@@ -10,6 +10,7 @@ real held-out fold and writes adult_results/PREFIX{SUFFIX|_full}_grid_report.csv
 
     python paper_grid_report.py [PREFIX] [SUFFIX]   # defaults: pgrid _t1
     python paper_grid_report.py pgrid ""            # full-pipeline runs
+    python paper_grid_report.py final _t1 0,2,4     # another prefix / lambdas
 """
 import sys, json
 import numpy as np
@@ -21,7 +22,9 @@ from tabsyn.vae.paper_metrics import fairness_scores
 
 PREFIX = sys.argv[1] if len(sys.argv) > 1 else 'pgrid'
 SUFFIX = sys.argv[2] if len(sys.argv) > 2 else '_t1'   # '' = full pipeline
-LAMS, FOLDS = [0, 2, 4, 8, 12], [0, 1, 2]
+LAMS = ([int(x) for x in sys.argv[3].split(',')] if len(sys.argv) > 3
+        else [0, 2, 4, 8, 12])
+FOLDS = [0, 1, 2]
 NUM, CAT = R.NUMERIC, R.CATEGORICAL
 s_idx = CAT.index('sex')
 SEEDS = range(5)

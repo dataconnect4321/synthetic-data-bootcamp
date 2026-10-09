@@ -1103,8 +1103,9 @@ These are the honest boundaries of what the implementation supports.
 `run_adult_flip.py` runs FLIP on UCI Adult (protected attribute `sex`; 6
 numeric + 8 categorical columns as in the paper's Table 2), one 3-fold-CV
 fold per run. Its default (`--preset paper`) is **FLIP as published**;
-`--preset ours` switches on this repository's additions (10.4). Every piece
-of either preset is also a flag of its own, so any mix can be run.
+`--preset final` (recommended, 10.5) adds a direct dependence penalty on the
+decoded output; `--preset ours` is the earlier set of additions (10.4).
+Every piece of each preset is also a flag of its own, so any mix can be run.
 
 ### 10.1 FLIP as published (the default)
 
@@ -1116,16 +1117,24 @@ of either preset is also a flag of its own, so any mix can be run.
 | Diffusion | on reparameterized latents μ + σε (Sec. 4.1.2) | same |
 | Decoding | TabSyn's argmax | argmax for every categorical column, sex included |
 | Input data | Adult as is | no masking, no repair |
+| Target (income) | task-agnostic: every non-protected column is a potential target | income stays in the fairness terms (`--target-in-fairness`) |
 
-Choices the paper does not state, and the values used:
+Choices the paper does not state, and the values used (each was varied in
+the sensitivity sweep of 10.3; none changes the conclusions):
 
 | Unstated in the paper | Used | Flag |
 |---|---|---|
 | β in Phase 2's ELBO | 1e-2 (a fixed value; `carry` keeps the bank's decayed ~8e-6) | `--phase2-beta` |
 | How the three stages combine | averaged | `--stage-reduce` |
-| Phase 2 length | 100 epochs (~500 steps) | `--phase2-epochs` |
+| Phase 2 length / learning rate | 100 epochs (~500 steps) / 1e-3 | `--phase2-epochs`, `--phase2-lr-scale` |
+| Weight of Phase 2's reconstruction / of the SWD anchor | 1 / 1 | `--phase2-recon-weight`, `--div-weight` |
+| SWD projections; latent anchor on μ or samples | 50; μ | `--swd-projections`, `--swd-latent` |
+| Latent and decoder stages: tokens concatenated or per token | concatenated | `--cka-tokens` |
+| CKA kernel (Eqs. 5–6 allow any; Eq. 7 is the linear case) | linear | `--cka-kernel {linear,rbf,rff_lift}` |
+| Detokenizer inputs | each column's logits (row centring removes the per-row shift that does not change predictions); sex head excluded (L_S); two-level columns drop out (constant CKAᵀ) | — |
 | What the A-NCB adversary is trained on | both reported: the synthetic table's own generated sex column ("A-NCB, adversary on generated sex") and the real training fold | — |
 | GMM covariance for A-NCB | full (diagonal in the sensitivity analysis) | — |
+| Downstream AUC features | all columns but income (sex included); the no-sex version is recorded too | — |
 
 ### 10.2 Results: 3 folds, λ ∈ {0, 2, 4, 8, 12}, no DP
 
@@ -1179,11 +1188,31 @@ released rows reveal about real people:
 - **Feature-wise fairness (Fig. 4)** shows the same split: `relationship`'s
   statistical parity falls from 0.485 to 0.18–0.25 when computed with the
   generated sex, and stays at 0.52–0.54 with each person's real sex.
+- **No reading of the unstated choices changes this** (fold 0, tier-1):
+  Phase-2 learning rate ×3/×10, reconstruction weight down to 0.03, SWD
+  weight 0–1 / 10–500 projections / samples, per-token CKAᵀ, RBF and RFF
+  kernels, both centrings, income in or out. Each moves the generated label
+  (and with it the paper's metrics) or adds untargeted drift; true-sex BER
+  stays 0.139–0.150 (0.172 only for the RFF kernel at λ = 12, which trips the
+  collapse guard).
+- **CKAᵀ detects the sex difference but does not remove it.** Against random
+  50/50 splits of the same rows, the real men/women split lowers CKAᵀ at every
+  stage (e.g. 0.88 vs 1.00 at the latent, hundreds of standard deviations),
+  essentially through the groups' mean representations. But its gradient is
+  nearly orthogonal to removing sex (cosine with the direction that defeats
+  a sex probe: 0.02–0.18 before training, ~0.05 after): CKAᵀ is a ratio that
+  can be raised by reshaping shared structure. Per-token CKAᵀ drives the
+  relationship token to 0.97 while that token still reveals sex at 0.74.
+- **The paper's own Adult figure** shows quality falling sharply with λ
+  (AUC 0.75 → 0.57, α-precision 0.90 → 0.29 at λ = 12, no DP) while its BER
+  and A-NCB improve: a regime where λ degrades the data broadly. The text's
+  method does not reach it here; whatever their implementation does beyond
+  the text, its fairness gains come with that loss of utility.
 
 These are readings of a paper that leaves the evaluation's adversary, the
 Phase-2 β and the stage combination unstated; with them fixed in advance,
-the Adult heatmap's fairness trends are reproduced, and they are trends in
-the generated sex label.
+the Adult heatmap's BER and A-NCB trends are reproduced, and they are trends
+in the generated sex label.
 
 ### 10.4 This repository's additions (`--preset ours`)
 
@@ -1206,7 +1235,40 @@ lowers `relationship`'s statistical parity by real sex from 0.54 to
 0.4–0.8 unmasked). Details and the earlier
 3-fold sweep: `EXPERIMENTS_ADULT.md`.
 
-### 10.5 Evaluation and running
+### 10.5 Recommended configuration (`--preset final`)
+
+The paper backbone (10.1, task-agnostic: income stays in the fairness terms)
+plus the **RFF joint decoded-output stage with its mean gap** — the gap
+between the groups' mean random-Fourier features of the decoded row
+approximates the MMD between men's and women's decoded rows, i.e. the
+Hilbert-Schmidt dependence on sex the paper's title refers to — and the
+**KL marginal guard**, which stops the joint stage from levelling the target
+or deleting sex-skewed categories. Fold-0 ablation (λ = 4): the joint stage is
+the active ingredient; the mean gap and dim-0 CKAᵀ at the three stages add
+little on their own; without the guard, including income collapses the
+target (AUC 0.32–0.77); masking adds no real reduction on top.
+
+3-fold tier-1 check (`results/final_tier1_check.{csv,txt}`), mean over folds:
+
+| | paper backbone, any λ | final λ0 | final λ2 | **final λ4** | final λ8 |
+|---|---|---|---|---|---|
+| True-sex BER (real 0.139; fair 0.5) | 0.139 | 0.138 | 0.188 | **0.259** | 0.396 |
+| Synthetic-trained BER (real ~0.16) | 0.160 | 0.159 | 0.187 | **0.219** | 0.269 |
+| `relationship` SP by real sex | 0.54–0.56 | 0.540 | 0.485 | **0.378** | 0.186 |
+| A-NCB, real-trained adversary | 0.31–0.46 | 0.439 | 0.483 | **0.658** | 0.733 |
+| Income SP (downstream) | 0.18–0.21 | 0.254 | 0.218 | **0.119** | 0.045 |
+| AUC (real 0.926) | 0.912 | 0.911 | 0.901 | **0.894** | 0.855 |
+| Validity (real 0.98) / W1 | 0.70–0.75 / 0.04–0.05 | 0.977 / 0.032 | 0.713 / 0.036 | **0.716 / 0.054** | 0.685 / 0.072 |
+| Largest category share change | 0.00 | 0.00 | 0.07 | **0.14** | 0.18 |
+
+Real leakage falls steadily with λ, confirmed by a classifier trained on the
+synthetic data itself, and the strict (real-trained) A-NCB rises — the trend
+the paper reports, here from disentanglement rather than from the generated
+sex label. λ = 4 is the recommended setting; λ = 8 trips the collapse guard on
+2 of 3 folds. Synthetic-trained BER stays below true-sex BER: some sex signal
+survives in patterns a real-trained classifier does not use.
+
+### 10.6 Evaluation and running
 
 Per fold, no averaging across datasets: BER (Def. 1, on the generated sex)
 and true-sex BER (tier-1: against each row's real sex); A-NCB (FAMD + 2-cluster
@@ -1225,7 +1287,9 @@ python paper_grid_report.py pgrid _t1               # tier-1 table (+ A-NCB vari
 python paper_grid_report.py pgrid ""                # full-pipeline table
 python paper_grid_heatmap.py pgrid _t1
 python paper_grid_heatmap.py pgrid ""
-PRESET=ours REPAIR=1 bash scripts/run_paper_grid.sh  # additions + repair baseline
+PRESET=final LAMS="0 2 4" bash scripts/run_paper_grid.sh   # recommended
+python paper_grid_report.py final _t1 0,2,4
+PRESET=ours REPAIR=1 bash scripts/run_paper_grid.sh  # earlier additions + repair baseline
 python final_table.py --prefix flip                 # per-run table for any prefix
 python make_heatmaps.py --prefix flip
 ```
