@@ -111,6 +111,15 @@ pkill -f "run_experiment.py --experiment eps_10"
 
 ## Adult (UCI): reproducing the FLIP paper
 
+> **Current Adult work is in `run_adult_flip.py`, not these config experiments.**
+> README Part 10 describes the setup, results and commands (`--preset paper`
+> by default, `--preset final` recommended); `EXPERIMENTS_ADULT.md` records
+> what was tried; `results/` holds the 3-fold tables and heatmaps. The
+> `adult*` experiments below (2026-10-01 to 10-04) are kept as a record of the
+> first attempts. Their main conclusion, that linear CKAᵀ alone does not make
+> the data independent of sex, still holds; the batch-mean L_S they
+> introduced is now the only L_S in `run_adult_flip.py`.
+
 These experiments reproduce the paper's headline Adult result (Figure 3 and the FLIP rows of Table 3): λ=4 with no DP and with ε≈3, plus λ=0 as a reference. Put the UCI files in `Data/adult/`; you need `adult.data` and `adult.test`.
 
 | Experiment | What it changes | Predicted ε (demo / full) |
