@@ -1,4 +1,4 @@
-# EXPERIMENTS — evidence for the cleanup deletions
+# Adult experiments: evidence for the presets and the cleanup deletions
 
 The paper-faithful replication (the current default) is the last section,
 "Paper-faithful replication". The sections before it document the earlier

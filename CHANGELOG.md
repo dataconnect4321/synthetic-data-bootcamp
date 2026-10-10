@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-10-09: Adult reproduction (`run_adult_flip.py`, PR #3)
+
+The Adult work moved from `configs/flip.yaml` experiments to a dedicated
+driver, `run_adult_flip.py`, with one 3-fold-CV fold per run. Full details,
+results and commands are in README Part 10; what was tried and removed is in
+`EXPERIMENTS_ADULT.md`.
+
+### Presets
+
+- **`--preset paper` (default): FLIP as published.**
+  - Phase 1: ELBO + batch-mean L_S (Eq. 3), β plateau-decayed 1e-2 → ~1e-5.
+  - Phase 2: L_quality kept at the detokenizer (Sec. 4.3.2), SWD at the latent and decoder, λ·(−CKAᵀ) at all three stages with row centring (Eqs. 5–7).
+  - Diffusion on μ + σε (now always on); argmax decoding; income stays in the fairness terms (task-agnostic).
+- **`--preset final` (recommended):** the paper backbone plus an RFF joint stage on the decoded row with a mean gap (≈ MMD between the groups' decoded rows) and a KL marginal guard.
+- **`--preset ours`:** the earlier additions (group centring, mean gap, binary W1, proxy masking), kept for comparison.
+
+Every piece of a preset is also its own flag. The paper's unstated choices are flags too: `--phase2-beta`, `--stage-reduce`, `--phase2-lr-scale`, `--phase2-recon-weight`, `--div-weight`, `--swd-projections`, `--swd-latent`, `--cka-tokens`, `--cka-kernel {linear,rbf,rff_lift}`.
+
+### Evaluation
+
+- **True-sex BER (tier-1):** each real row's latent is decoded, and a classifier trained on real data predicts the row's real sex. This measures leakage that the paper's BER, computed on the generated sex column, cannot see.
+- **A-NCB with two adversaries:** one trained on the synthetic table's own generated sex column (the paper's reading) and one trained on the real training fold.
+- Downstream AUC now includes sex (no-sex AUC recorded too).
+- New metrics: validity (rules learned from real data) and the largest category share change.
+- Released CSVs are rounded to each real column's format.
+- Each run is saved to `adult_results/runs/`; `--from-run` re-decodes a saved run without retraining.
+
+### Findings
+
+- On Adult, FLIP as published leaves true-sex BER at the real data's 0.139 for every λ (0–12).
+- The paper's BER and A-NCB trends do reproduce. They come from noise in the generated sex label, not from removing proxies.
+- CKAᵀ detects group differences, but its gradient is nearly orthogonal to removing sex information.
+- With `--preset final` at λ = 4 (3 folds):
+  - true-sex BER is 0.26, against 0.14 for the backbone;
+  - income SP falls 0.21 → 0.12;
+  - real-trained A-NCB rises to 0.61;
+  - AUC is 0.896, against 0.91 for the backbone.
+
+### Removed
+
+`--paper-config`, `--ls-mode`, `--paper-disent`, share-matched decoding, the fair Phase-2 objective, group-mean L_S, MMD, the sex adversary, S-column tempering, the merge/expand variant and `compare_to_paper.py`. The evidence for each removal is in `EXPERIMENTS_ADULT.md`.
+
+### Tests and scripts
+
+- 130 tests.
+- Sweeps: `scripts/run_paper_grid.sh`.
+- Tables and heatmaps: `paper_grid_report.py`, `paper_grid_heatmap.py`, `final_table.py`, `make_heatmaps.py`.
+
 ## 2026-10-03: the paper's training setup and evaluation protocol
 
 This change lets the pipeline run the way the FLIP paper describes, so the Adult results can be checked against it before the method is applied to HMDA. Every new behaviour is opt-in through config. The defaults are unchanged, and `baseline --predict-eps` still gives 197 / 261.

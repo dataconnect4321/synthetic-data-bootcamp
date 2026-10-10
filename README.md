@@ -21,6 +21,12 @@ order:
    data — its root cause and fix.
 7. **The full pipeline** (`run_flip_full_pipeline.py`) — the true
    two-stage TabSyn pipeline with FLIP, closing the demo's fidelity gap.
+8. **What a good result looks like** and **the limits of the guarantees**
+   (Parts 8–9).
+9. **The Adult reproduction** (Part 10, `run_adult_flip.py`) — FLIP as
+   published on UCI Adult (the default), why it does not remove sex
+   leakage there, and the recommended `--preset final`, which adds a
+   dependence penalty on the decoded output. Results are in `results/`.
 
 ---
 
@@ -1328,7 +1334,7 @@ What was tried and removed is recorded in `EXPERIMENTS_ADULT.md`;
 ## Running everything
 
 ```bash
-# Unit tests (126 tests)
+# Unit tests (130 tests)
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests -q -p no:cacheprovider
 
 # Experiments from configs/flip.yaml (see EXPERIMENTS.md)
@@ -1336,6 +1342,11 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests -q -p no:cacheprovide
 .venv/bin/python run_experiment.py --experiment eps_10 --predict-eps   # composed ε, no training
 .venv/bin/python run_experiment.py --experiment eps_10 --stages demo   # FLIP VAE + Gaussian latent prior
 .venv/bin/python run_experiment.py --experiment eps_10 --stages full   # FLIP VAE + DP latent diffusion (slow)
+
+# Adult reproduction (Part 10.6 has the full set of commands)
+.venv/bin/python preprocess_adult.py
+.venv/bin/python run_adult_flip.py --fold 0 --lam 4 --tier1                  # FLIP as published
+.venv/bin/python run_adult_flip.py --preset final --fold 0 --lam 4           # recommended, full pipeline
 
 # The scripts also run standalone with their built-in defaults
 .venv/bin/python run_flip_demo.py

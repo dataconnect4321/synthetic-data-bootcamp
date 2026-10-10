@@ -1,5 +1,7 @@
 # Architecture: FLIP fair and private synthetic HMDA data
 
+> The same code also reproduces the paper on UCI Adult (`run_adult_flip.py`); see README Part 10 and the Adult rows of the module map below.
+
 This repo implements **FLIP** (Fair Latent Intervention under Privacy guarantees, Zhang et al. 2025, arXiv:2508.21815) on top of **TabSyn** (a VAE plus latent diffusion generator for tabular data). The goal is synthetic mortgage-application data in which loan origination doesn't depend on race, trained under differential privacy (DP).
 
 - **Vendored:** `tabsyn-main/tabsyn-main/` is upstream TabSyn, mostly unchanged.
@@ -60,7 +62,8 @@ flowchart TD
 | Balanced group sampling (Sec. 4.2.1, Eq. 11) | `PoissonGroupSampler` (default) and `BalancedGroupSampler` in `flip_fairness.py` |
 | Uniform attribute loss L_S (Eq. 3) | `uniform_attribute_loss_per_sample` |
 | Hilbert-Schmidt disentanglement, CKA^T (Eqs. 5–7) | `linear_cka_t` centers each row across activations (= A·H) and computes ⟨AᵀA, BᵀB⟩_F / (‖AᵀA‖‖BᵀB‖); `disentanglement_loss` averages −CKA^T over group pairs |
-| Multi-stage intervention (Sec. 4.3.2) | `multi_stage_disentanglement_loss` over `mu_z`, per-feature output-layer logits (pre-aggregation for numerics), and decoder `h` |
+| Multi-stage intervention (Sec. 4.3.2) | `multi_stage_disentanglement_loss` over `mu_z`, per-feature output-layer logits (pre-aggregation for numerics), and decoder `h`; options for tokens concatenated or per token and for linear, RBF or RFF-lifted kernels (`rbf_cka_t`) |
+| (Adult `--preset final`, not in the paper) | `decoded_joint_loss`: RFF features of the decoded row with a mean gap (≈ MMD between groups), plus a KL marginal guard |
 | Divergence penalty D (Eq. 10) | `sliced_wasserstein_distance` at the latent and decoder stages against a frozen Phase-1 VAE |
 | Task-agnostic fairness evaluation (Secs. 3.2.2, 5.3.2) | `fairness_eval.py`: BER, A-NCB, per-feature task fairness |
 | DP-SGD with RDP accounting (Sec. 4.4) | Opacus `DPOptimizer` + `RDPAccountant`; `compose_rdp_budgets` for end-to-end ε |
@@ -81,6 +84,14 @@ flowchart TD
 | `tests/test_flip_fairness.py` | — | 71 unit tests for `flip_fairness.py` and `forward_with_stages` |
 | `tests/test_metrics.py` | — | 9 tests for the demo's metric fixes and `fairness_eval.py` |
 | `run_flip_demo_tmp.py` | 476 | Stale older copy of the demo. **Unused** |
+| `run_adult_flip.py` | — | Adult reproduction driver (README Part 10): presets `paper` / `final` / `ours`, one CV fold per run, tier-1 and full pipeline, all paper and leakage metrics |
+| `preprocess_adult.py` | — | UCI Adult → `Data/adult_preprocessed.csv` |
+| `paper_grid_report.py`, `paper_grid_heatmap.py`, `final_table.py`, `make_heatmaps.py` | — | Tables and paper-style heatmaps over a λ × fold grid of Adult runs |
+| `scripts/run_paper_grid.sh` | — | Runs an Adult λ × fold grid (`PRESET`, `LAMS`, `FOLDS`, `TIER1_ONLY`) |
+| `results/` | — | Committed Adult tables and heatmaps |
+
+The `flip_fairness.py` line count and the test counts above date from the HMDA
+work; there are now 130 tests.
 
 ## Code structure review
 
