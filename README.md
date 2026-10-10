@@ -1,7 +1,29 @@
 # FINALREADME — TabSyn + FLIP: Fair and Private Tabular Data Synthesis
 
-This document is the complete write-up of this repository. It explains, in
-order:
+This document is the complete write-up of this repository. The method was
+first built on **HMDA mortgage data** (protected attribute: race; Parts 1–9
+use it for their examples) and then used to reproduce the paper on **UCI
+Adult** (protected attribute: sex; Part 10), the paper's own benchmark.
+**The current results are the Adult ones.**
+
+| | HMDA (mortgage applications) | UCI Adult (census income) |
+|---|---|---|
+| Driver | `run_experiment.py` / `run_flip_demo.py` / `run_flip_full_pipeline.py` | `run_adult_flip.py` |
+| Rows used | 12k sample (24.7k in `eps_10_full_data`) | 45,222 (48,842 minus rows with `?`), 3-fold CV |
+| Protected attribute | race (3 largest groups) | sex (Male 67.5%, Female 32.5%) |
+| Target | loan originated | income > $50K (24.8%: men 31.2%, women 11.4%) |
+| DP | on (DP-SGD + group mechanism) | off (the paper's ε = ∞ setting) |
+| Status | method development; no current results (8.1) | 3-fold results, tables and heatmaps in `results/` |
+
+**Adult in brief** (Part 10). FLIP as written reproduces the paper's trends
+in its own metrics (BER on the generated sex label rises from 0.28 to 0.42
+over λ 0 → 12), but the released rows reveal each real person's sex as
+well as the real data does (true-sex BER 0.139 at every λ). The recommended
+`--preset final` adds a dependence penalty on the decoded row; at λ = 4 it
+raises true-sex BER to 0.26 and cuts income parity from 0.21 to 0.12, with
+AUC going from 0.91 to 0.90.
+
+It explains, in order:
 
 1. **The original TabSyn system** — what it is, how it works, and the
    mathematics behind it, at a level of detail sufficient to understand
@@ -178,7 +200,11 @@ data. Two things it does not provide:
    mortgage data used here, White applicants' loans originate at ~61%
    while several minority groups originate at ~32–43%), a faithful
    generative model is a *bias-copying machine* — the synthetic data
-   reproduces, and thereby launders, the disparity.
+   reproduces, and thereby launders, the disparity. On Adult, 31% of men
+   but 11% of women earn over $50K, and sex is written into other columns:
+   `relationship` is `Husband` for 18,665 men and 1 woman and `Wife` for
+   2,090 women and 1 man, so a generator that copies these columns copies
+   sex even if the sex column itself is randomized.
 2. **Privacy.** A VAE/diffusion pipeline trained by ordinary SGD has no
    formal guarantee that it won't memorize and regurgitate individual
    training records (membership inference / record reconstruction risks).
@@ -834,7 +860,8 @@ pipeline are the honest ones to report.
 ### 8.1 The three axes and their target values
 
 A successful FLIP run moves **fairness up** while keeping **fidelity and
-privacy** in acceptable ranges. Concretely, on the HMDA data:
+privacy** in acceptable ranges. The table below was written for the HMDA
+data; 8.4 gives the Adult targets and what was measured.
 
 | Metric | Definition | Good | Why |
 |---|---|---|---|
@@ -937,11 +964,49 @@ expectations, not measurements:** no vanilla-TabSyn or DP-only baseline
 has been run in this repo; the comparison table above describes what
 each method *should* do by construction.
 
+### 8.4 On Adult: targets and what was measured
+
+Adult is scored with the paper's metrics (Sec. 5.3) on the held-out fold,
+plus a leakage measure on real people (true-sex BER). Real data scored as
+if it were synthetic sets the reference. Paper: Fig. 3, no DP. Ours: 3-fold
+means, full pipeline unless marked tier-1 (10.2, 10.5; `results/`).
+
+| Metric | Good | Real data | Paper λ 0 → 4 | FLIP as written, λ 0 → 4 | `--preset final`, λ 0 → 4 |
+|---|---|---|---|---|---|
+| True-sex BER (tier-1): a real-trained classifier recovers each row's real sex | → 0.5 | 0.139 | not reported | 0.139 → 0.139 | 0.138 → **0.259** |
+| BER (paper Def. 1, on the generated sex) | → 0.5 | 0.141 | 0.41 → 0.50 | 0.28 → 0.39 | 0.17 → 0.30 |
+| A-NCB, adversary trained on real data | ↑ (1 = balanced) | 0.33 | — | 0.44 → 0.54 (no trend over λ 0–12) | 0.42 → **0.61** |
+| A-NCB, adversary on the generated sex | ↑ | 0.42 | 0.32 → 0.92 | 0.49 → 0.52 | 0.45 → 0.57 |
+| Income statistical parity (downstream) | ↓ | 0.18 | 0.18 → 0.13 | 0.22 → 0.21 | 0.25 → **0.12** |
+| Equalized odds | ↓ | 0.07 | 0.12 → 0.15 | 0.11 → 0.10 | 0.14 → 0.05 |
+| Synthetic AUC (train on synthetic, test on real) | high | 0.93 | 0.75 → 0.70 | 0.91 → 0.91 | 0.909 → 0.896 |
+| α-precision / β-recall | high | 0.99 / 0.50 | 0.90 / 0.41 → 0.64 / 0.27 | 0.95 → 0.93 / 0.32–0.34 | 0.99 / 0.47 → 0.88 / 0.29 |
+| ε-identifiability (risk of re-identifying a real row) | ↓ | — | 0.21 → 0.10 | 0.24 → 0.24 | 0.37 → 0.21 |
+| Validity (rules learned from real data) | → real | 0.98 | — | 0.70–0.75 | 0.97 → 0.72 |
+
+How to read it:
+- **True-sex BER says whether the released rows still reveal sex.** The
+  paper's BER uses the generated sex label, so it rises whenever that label
+  becomes noisy, even with every proxy intact (10.3).
+- **0.5 is the ceiling, not just a direction**: chance for two groups. The
+  final preset at λ = 4 closes about a third of the gap from 0.139 to 0.5;
+  λ = 8 reaches 0.40 but trips the collapse guard on 2 of 3 folds.
+- **The paper's quality loss is much larger** (AUC −0.05 at λ 4 and −0.18 at
+  λ 12; α-precision 0.90 → 0.29). Ours costs 0.013 AUC at λ 4; validity
+  falls from 0.97 to 0.72 as the penalty breaks some real-data rules.
+- **Post-hoc repair is a strong baseline here.** Re-encoding rows with the
+  sex-linked categories repaired (`--repair-tau 1`, tier-1) reaches true-sex
+  BER 0.50 at AUC 0.88 and validity 0.88, by flattening proxy columns
+  wholesale rather than through training. No DP, PreFair or TabularARGN
+  baselines were run.
+
 ---
 
 ## Part 9 — Limitations of the Guarantees (read before citing results)
 
-These are the honest boundaries of what the implementation supports.
+These are the honest boundaries of what the implementation supports. The
+DP items apply to the HMDA pipeline; **the Adult results are without DP**
+(the paper's ε = ∞ setting), so they carry no privacy guarantee.
 
 1. **The fairness losses are covered by a separate record-level Gaussian
    mechanism, and all budgets are COMPOSED into one total.** DP-SGD's
@@ -1139,6 +1204,28 @@ fold per run. Its default (`--preset paper`) is **FLIP as published**;
 `--preset final` (recommended, 10.5) adds a direct dependence penalty on the
 decoded output; `--preset ours` is the earlier set of additions (10.4).
 Every piece of each preset is also a flag of its own, so any mix can be run.
+
+### 10.0 The data
+
+UCI Adult (1994 US census extract): `adult.data` and `adult.test` merged,
+rows with any `?` dropped, which leaves **45,222 rows** (the paper reports
+43,914 without stating its filter). Put both files in `Data/`.
+
+| | |
+|---|---|
+| Protected attribute | `sex`: Male 30,527 (67.5%), Female 14,695 (32.5%) |
+| Target | `income` > $50K: 24.8% overall, **31.2% of men, 11.4% of women** |
+| Numeric (6) | `age` (17–90), `fnlwgt`, `education-num`, `capital-gain` (0 for 91.6%), `capital-loss` (0 for 95.3%), `hours-per-week` |
+| Categorical (8) | `sex` (2), `income` (2), `workclass` (7), `marital-status` (7), `occupation` (14), `relationship` (6), `race` (5), `native-country` (41) |
+| Dropped | `education` (a text label of `education-num`), as in the paper's Table 2 |
+| Folds | 3-fold CV, seed 42: ~30,150 training and ~15,070 test rows per fold; numeric scaling from the training fold only |
+
+**Sex proxies.** `relationship` nearly encodes sex: `Husband` is 18,665 men
+and 1 woman, `Wife` 2,090 women and 1 man, `Unmarried` 76% women.
+`marital-status` carries it too (`Married-civ-spouse` 89% men, `Widowed` 81%
+women). A real-trained classifier predicts sex from the other columns with
+balanced error **0.139** (the true-sex BER of real data); this is the
+leakage FLIP is meant to remove, and 0.5 is the target.
 
 ### 10.1 FLIP as published (the default)
 
