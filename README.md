@@ -21,8 +21,7 @@ order:
    data — its root cause and fix.
 7. **The full pipeline** (`run_flip_full_pipeline.py`) — the true
    two-stage TabSyn pipeline with FLIP, closing the demo's fidelity gap.
-8. **What a good result looks like** and **the limits of the guarantees**
-   (Parts 8–9).
+8. **The limits of the guarantees** (Part 9) — read before citing results.
 9. **The Adult reproduction** (Part 10, `run_adult_flip.py`) — FLIP as
    published on UCI Adult (the default), why it does not remove sex
    leakage there, and the recommended `--preset final`, which adds a
@@ -373,6 +372,12 @@ so the decoded protected column is close to random rather than a
 definite per-row assignment. It is a **mean** like MSE/CE; an earlier
 version summed it, which outweighed reconstruction by ~batch size.
 
+This per-row variant is the default of the HMDA demo (`LS_VARIANT:
+'per_sample'`). The Adult reproduction (`run_adult_flip.py`, Part 10) trains
+Eq. 3 as written, the batch-mean loss above (`LS_MODE: 'batch_mean'`), since
+it runs without DP; the per-row variant collapsed argmax decoding of the
+protected column to a single group there.
+
 #### 2.1.6 `BalancedGroupSampler` — balanced mini-batches (Sec. 4.2.1, Eq. 11)
 
 A `torch.utils.data.Sampler` that builds every mini-batch with an **equal
@@ -632,7 +637,13 @@ This is the heart of the integration. Changes:
 ## Part 4 — Deviations from the Paper
 
 The implementation is faithful to the paper's method, with these
-deliberate deviations, all forced by engineering reality:
+deliberate deviations, all forced by engineering reality. They describe the
+HMDA pipeline (`run_flip_demo.py`, `run_flip_full_pipeline.py`); the Adult
+reproduction's default, `--preset paper`, follows the paper more closely
+(batch-mean L_S, adaptive β, no DP; see 10.1 for its choices where the paper
+is silent). Adult's recommended `--preset final` goes beyond the paper on
+purpose: it adds a dependence penalty on the decoded row with a KL marginal
+guard (10.5), because CKAᵀ alone did not remove sex leakage there (10.3).
 
 1. **The demo's generator was a Gaussian stand-in, not TabSyn's diffusion
    prior — now superseded by a full-pipeline script.** The paper (and full
@@ -694,7 +705,8 @@ deliberate deviations, all forced by engineering reality:
    row in a batch, so DP-SGD cannot clip it per record; the per-row mean
    is DP-decomposable but makes each row's protected-attribute
    prediction uncertain, so the synthetic protected column is close to
-   random rather than a definite per-row assignment (see 2.1.5).
+   random rather than a definite per-row assignment (see 2.1.5). HMDA demo
+   only: the Adult reproduction uses Eq. 3's batch mean.
 
 7. **The diffusion stage is DP-trained.** The paper (Sec. 4) says only the
    VAE needs DP because latents are post-processing of the private
@@ -715,7 +727,9 @@ deliberate deviations, all forced by engineering reality:
 10. **Fixed β.** Sec. 4.3.1 decreases β adaptively as TabSyn does (on a
     validation-loss plateau). The demo uses a fixed `BETA`; an adaptive
     schedule driven by held-out loss would be a data-dependent choice
-    outside the privacy accounting.
+    outside the privacy accounting. HMDA demo only: the Adult reproduction
+    (no DP) decays β on a training-loss plateau, 1e-2 → ~1e-5, as TabSyn
+    does (`BETA_SCHEDULE: 'plateau'`).
 
 11. **Three protected groups.** The paper's protected attribute is binary.
     The disentanglement loss averages CKAᵀ over all group pairs, and the
@@ -858,6 +872,15 @@ disentanglement is not yet removing group information; see
   information scrubs the outcome disparity. Vanilla TabSyn has *no*
   mechanism to do this — its objective is pure fidelity, so its DP
   difference should match the real data's (it faithfully copies the bias).
+
+  **Not borne out on Adult.** This is the paper's reasoning, and the Adult
+  reproduction contradicts it (10.3): CKAᵀ detects the sex difference but
+  its gradient barely acts on it, the latent keeps a lossless copy of sex,
+  and a classifier trained on real data recovers each row's real sex from
+  the synthetic row as well as from the real one (true-sex BER 0.139 at
+  every λ). The paper's BER and A-NCB improve only because the generated
+  sex label becomes noisy. Removing the leakage took a direct dependence
+  penalty on the decoded row (`--preset final`, 10.5).
 - **Fidelity degrades gracefully because of the SWD anchor and two-phase
   design.** Without the anchor, disentanglement could collapse the
   representation; with it, the model keeps everything except the
