@@ -840,7 +840,7 @@ privacy** in acceptable ranges. Concretely, on the HMDA data:
 |---|---|---|---|
 | **DP difference** (demographic parity difference) | max−min of the outcome (loan-origination) rate across protected groups in the *synthetic* data | **Much lower than the real data's** (real ≈ 0.17–0.30 here; synthetic should approach 0) | This is the paper's headline claim: the synthetic data should not encode the real data's group disparity. The uniform-attribute loss equalizes predicted group rates; the disentanglement loss prevents other features from carrying group information that could re-create the disparity downstream. |
 | **DP ratio** | min/max group outcome rate | **→ 1.0** (real data ≈ 0.70–0.72 for the three groups used) | Scale-free version of the same claim; 1.0 = perfect parity. |
-| **BER** (paper Def. 1) | Balanced error of a classifier predicting the protected attribute from all other synthetic columns | **→ 1 − 1/\|S\|** (0.667 for 3 groups) | The paper's task-agnostic test: if the other columns cannot predict the group, no downstream task can recover it. Read with fidelity: a collapsed generator also scores near ideal. |
+| **BER** (paper Def. 1) | Balanced error of a classifier predicting the protected attribute from all other synthetic columns | **→ 1 − 1/\|S\|**, chance level (0.5 for a binary attribute such as Adult's sex; 0.667 for HMDA's 3 race groups). Higher is better only up to chance: a classifier that is reliably wrong still carries the information | The paper's task-agnostic test: if the other columns cannot predict the group, no downstream task can recover it. Read with fidelity: a collapsed generator also scores near ideal. |
 | **A-NCB** (paper Def. 2, adversarial) | Group balance of a 2-cluster split of the other columns, with groups predicted adversarially | **→ 1.0** | Catches what randomizing the protected column hides: if clusters still align with predicted groups, the bias lives in the other columns. |
 | **Numeric W1** (normalized Wasserstein-1) | Per-column earth-mover distance between real and synthetic marginals, divided by the real column's std | **≤ 0.2** (moderate ≤ 0.4) | The synthetic data must still *be useful*: marginals should match. W1 is the standard marginal-fidelity metric; normalizing by std makes it dimensionless and comparable across columns. |
 | **Categorical TV** (total variation) | ½·ℓ1 distance between real and synthetic frequency distributions per column | **≤ 0.15** (moderate ≤ 0.3) | The categorical analogue of W1. TV = 0 means identical frequency tables. |
@@ -848,7 +848,11 @@ privacy** in acceptable ranges. Concretely, on the HMDA data:
 | **DCR ratio** (distance-to-closest-record) | mean min-distance(synthetic→real) ÷ mean min-distance(real holdout→real train) | **≥ 1.0** | The standard privacy *empirical* check: synthetic records should be no closer to real records than real records are to each other. < 1.0 suggests memorization (overfitting); ≫ 1 can also indicate the synthetic data is too diffuse — values in the 1–10 band with good fidelity are healthy. |
 | **ε (DP guarantee)** | Rényi-DP-converted privacy budget at the chosen δ | **Small, and reported** | The formal guarantee. ε ≤ 1 is strong; ε ≤ 5–10 is typical research-grade. **Caveat:** the guarantee applies to the DP-SGD-trained VAE stage only, and only to the per-sample-decomposable portion of the loss (see *Limitations* below). The demo's original ε ≈ 0.52 was an artifact of an incorrect accountant; the corrected accountant reports ε ≈ 80 at the demo's settings. |
 
-**No current results.** Numbers previously quoted here came from runs
+**Current results are for Adult**, in Part 10 (10.2 and 10.5) and
+`results/`: 3-fold tables and heatmaps for FLIP as published and for the
+recommended `--preset final`.
+
+**No current HMDA results.** Numbers previously quoted here came from runs
 made before the fixes listed in `CHANGELOG.md` (clip at the standardized
 mean, summed L_S, CKAᵀ centering, report crash) and do not describe the
 current code. The recorded HMDA runs in ARCHITECTURE.md also predate
