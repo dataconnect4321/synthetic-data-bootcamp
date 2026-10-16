@@ -45,6 +45,7 @@ the paper's Fig. 3) are in `results/heatmap_paper_compare_fold0_*.png`:
 | | |
 |---|---|
 | `aim_fair/FINAL_COMPARISON.md` | head-to-head results, the winner and why |
+| `aim_fair/ARCHITECTURE.md` | architecture diagram of the AIM hybrid (privacy boundary, post-processing steps, code map) |
 | `aim_fair/WRITEUP.md` | why we moved away from FLIP; how the AIM hybrid works; A-NCB caveats; limitations |
 | `VAE_CHANGES.md` | the VAE changes: Eq. 13 DP, external scoring, metrics |
 | `aim_fair/README.md` | AIM setup and files |

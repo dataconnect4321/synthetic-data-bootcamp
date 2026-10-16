@@ -5,6 +5,7 @@ fairness (proxy repair) and realism (proxy masking, consistency rules, pair
 redraw) applied to AIM's noisy measurements. All of it is post-processing,
 so the epsilon covers the whole release.
 
+- Architecture diagram: `ARCHITECTURE.md`.
 - What it does and why: `WRITEUP.md`.
 - Head-to-head with the best VAE method: `FINAL_COMPARISON.md`.
 
