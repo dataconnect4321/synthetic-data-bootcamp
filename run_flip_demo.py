@@ -46,6 +46,8 @@ from tabsyn.vae.flip_fairness import (
     BalancedGroupSampler,
     PoissonGroupSampler,
     RDPAccountant,
+    GroupwiseRDPAccountant,
+    eq13_sigma_global,
     GroupLevelDPMechanism,
     dp_release_mean_std,
     compose_rdp_budgets,
@@ -327,6 +329,34 @@ def beta_at(epoch, params):
                params['BETA_MIN'])
 
 
+def _group_clip_optimizer_cls():
+    """DPOptimizer with a per-sample clipping norm (Eq. 13 / IDP-SGD):
+    record i is clipped to sample_max_norms[i] instead of max_grad_norm;
+    the noise stays noise_multiplier * max_grad_norm."""
+    from opacus.optimizers import DPOptimizer
+    from opacus.optimizers.optimizer import (_check_processed_flag,
+                                             _mark_as_processed)
+
+    class GroupClipDPOptimizer(DPOptimizer):
+        sample_max_norms = None
+
+        def clip_and_accumulate(self):
+            if self.sample_max_norms is None or len(self.grad_samples[0]) == 0:
+                return super().clip_and_accumulate()
+            norms = torch.stack([g.reshape(len(g), -1).norm(2, dim=-1)
+                                 for g in self.grad_samples], 1).norm(2, dim=1)
+            factor = (self.sample_max_norms.to(norms.device)
+                      / (norms + 1e-6)).clamp(max=1.0)
+            for p in self.params:
+                _check_processed_flag(p.grad_sample)
+                gs = self._get_flat_grad_sample(p).to(p.dtype)
+                g = torch.einsum('i,i...', factor.to(gs.device, p.dtype), gs)
+                p.summed_grad = g if p.summed_grad is None else p.summed_grad + g
+                _mark_as_processed(p.grad_sample)
+
+    return GroupClipDPOptimizer
+
+
 def train_flip(X_num, X_cat, categories, s_idx, params, device,
                phase1_checkpoint=None, factor=None):
     """Two-phase FLIP VAE training (balanced sampling, optional DP-SGD).
@@ -382,6 +412,20 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
         register_tabsyn_grad_samplers()
         model = GradSampleModule(model, strict=False)
         dp_params = get_dp_trainable_parameters(model)
+        # Eq. 13 (GROUP_SIGMAS, one noise multiplier per group code): the
+        # global multiplier and per-group clipping c_p = C*sigma_g/sigma_p
+        group_sigmas = params.get('GROUP_SIGMAS')
+        if group_sigmas:
+            counts = np.bincount(groups, minlength=len(group_sigmas))
+            params['NOISE_MULTIPLIER'] = eq13_sigma_global(group_sigmas,
+                                                           counts)
+            clip_scale = torch.tensor(
+                [params['NOISE_MULTIPLIER'] / s_ for s_ in group_sigmas],
+                dtype=torch.float32)
+            print(f"Eq. 13: group sigmas {group_sigmas} -> sigma_global "
+                  f"{params['NOISE_MULTIPLIER']:.3f}, clip scale "
+                  f"{clip_scale.tolist()}")
+            DPOptimizer = _group_clip_optimizer_cls()
         optimizer = DPOptimizer(
             optimizer=torch.optim.Adam(dp_params, lr=params['LR'],
                                        eps=params['ADAM_EPS'],
@@ -400,10 +444,16 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
         else:
             m_minority = int(np.bincount(groups).min())
             gamma_max = per_group / m_minority
-        accountant = RDPAccountant(
-            noise_multiplier=params['NOISE_MULTIPLIER'],
-            sample_rate=gamma_max,
-            delta=params['DP_DELTA'])
+        if group_sigmas:
+            # per-group Poisson rates q_p = per_group / m_p (Eq. 12)
+            rates = [per_group / c for c in counts]
+            accountant = GroupwiseRDPAccountant(group_sigmas, rates,
+                                                params['DP_DELTA'])
+        else:
+            accountant = RDPAccountant(
+                noise_multiplier=params['NOISE_MULTIPLIER'],
+                sample_rate=gamma_max,
+                delta=params['DP_DELTA'])
         # Gaussian mechanism for the batch-coupled fairness terms
         # (SWD anchor + CKA^T): their gradients cannot be decomposed per
         # sample, so record-level DP-SGD does not cover them. Clipping
@@ -416,6 +466,13 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
             max_group_grad_norm=params['MAX_GROUP_GRAD_NORM'],
             noise_multiplier=params['GROUP_NOISE_MULTIPLIER'],
             sample_rate=gamma_max if params.get('SAMPLER', 'poisson') == 'poisson' else None)
+        # COUPLED_DP='paper': the batch-coupled terms go through DP-SGD's
+        # per-sample clipping with the rest of the loss (one backward), as
+        # the paper most plausibly did. Each record's own share is clipped,
+        # but its influence on the OTHER records' shares (via the batch
+        # mean / group matrices) is not, so epsilon is nominal for them.
+        if params.get('COUPLED_DP', 'group') == 'paper':
+            group_mech = None
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=params['LR'],
                                      eps=params['ADAM_EPS'],
@@ -477,6 +534,11 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
         # gently instead of destroying it.
         if phase == 2 and epoch == phase1_epochs:
             new_lr = params['LR'] * params['PHASE2_LR_SCALE']
+            if params.get('MASK_S_TOKEN'):
+                # Phase 2: the decoder reads the batch mean of the sex token
+                raw.VAE.s_token_mask = (model.Reconstructor.d_numerical
+                                        + s_idx)
+                print(f'--- Phase 2: sex token masked before the decoder ---')
             for g in optimizer.param_groups:
                 g['lr'] = new_lr
             print(f'--- Phase 2: LR set to {new_lr:.2e} ---')
@@ -486,6 +548,10 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
         cur_beta = beta
 
         for bnum, bcat in loader:
+            if params['USE_DP'] and params.get('GROUP_SIGMAS'):
+                optimizer.sample_max_norms = (
+                    params['MAX_GRAD_NORM']
+                    * clip_scale[bcat[:, s_idx].long().cpu()])
             bnum, bcat = bnum.to(device), bcat.to(device)
             model.train()
             optimizer.zero_grad()
@@ -525,7 +591,11 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
             loss_private = w_rec * (mse + ce) + cur_beta * kld \
                 + (0.0 if ls_batch else 1.0) * loss_s
             has_coupled = ls_batch or phase == 2
-            loss_private.backward(retain_graph=has_coupled)
+            # paper-style DP: one combined backward through Opacus below
+            paper_dp = (params['USE_DP'] and
+                        params.get('COUPLED_DP', 'group') == 'paper')
+            if not (paper_dp and has_coupled):
+                loss_private.backward(retain_graph=has_coupled)
 
             # ---- Pass 2: batch-coupled terms (group-level DP) -----------
             # The paper's batch-mean L_S (Eq. 3), the SWD anchor and CKA^T
@@ -571,12 +641,25 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                                    * torch.randn_like(ref_mu)).reshape(n_b, -1)
                     else:
                         cur_lat, ref_lat = mu_flat, ref_mu.reshape(n_b, -1)
+                    ref_hf = ref_h.reshape(n_b, -1)
+                    if params.get('SWD_GROUP_CENTER'):
+                        # remove the Phase-1 sex mean gap from the anchor's
+                        # targets, so SWD does not pull the groups apart
+                        gs = bcat[:, s_idx]
+                        with torch.no_grad():
+                            ref_lat, ref_hf = ref_lat.clone(), ref_hf.clone()
+                            for t_ in (ref_lat, ref_hf):
+                                pooled = t_.mean(0, keepdim=True)
+                                for u in torch.unique(gs):
+                                    m_ = gs == u
+                                    t_[m_] = t_[m_] - t_[m_].mean(
+                                        0, keepdim=True) + pooled
                     n_proj = params.get('SWD_PROJECTIONS', 50)
                     div = 0.5 * (
                         torch.clamp(sliced_wasserstein_distance(
                             ref_lat, cur_lat, n_projections=n_proj), max=cap)
                         + torch.clamp(sliced_wasserstein_distance(
-                            ref_h.reshape(n_b, -1), h_flat,
+                            ref_hf, h_flat,
                             n_projections=n_proj), max=cap))
                 else:
                     # latent stage only (frozen encoder)
@@ -611,7 +694,9 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                     center=params.get('CKA_CENTER', 'group'),
                     num_stage=params.get('NUM_STAGE', 'summed'),
                     tokens=params.get('CKA_TOKENS', 'concat'),
-                    kernel=params.get('CKA_KERNEL', 'linear'))
+                    kernel=params.get('CKA_KERNEL', 'linear'),
+                    latent=params.get('CKA_LATENT', 'mu'),
+                    exclude_s_token=params.get('CKA_EXCLUDE_S', False))
                 # lambda ramp over the first LAMBDA_RAMP_FRAC of Phase 2
                 # (0 = no ramp: full lambda from the first Phase-2 epoch)
                 ramp = params.get('LAMBDA_RAMP_FRAC', 0.25)
@@ -634,12 +719,16 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                         else params.get('TARGET_IDX'),
                         mean_weight=params.get(
                             'JOINT_MEAN_WEIGHT',
-                            params.get('MEAN_SHIFT_WEIGHT', 1.0)))
+                            params.get('MEAN_SHIFT_WEIGHT', 1.0)),
+                        weighting=params.get('JOINT_WEIGHTING', 'dim'),
+                        measure=params.get('JOINT_MEASURE', 'ckat_gap'))
                 loss_coupled = (loss_fair if loss_coupled is None
                                 else loss_coupled + loss_fair)
 
             if has_coupled:
-                if group_mech is not None:
+                if paper_dp:
+                    (loss_private + loss_coupled).backward()
+                elif group_mech is not None:
                     # Capture the fairness gradient WITHOUT Opacus's hooks:
                     # they would try to pop activation buffers already
                     # consumed by pass 1 (IndexError) and misattribute the
@@ -676,8 +765,11 @@ def train_flip(X_num, X_cat, categories, s_idx, params, device,
                         dp_params, params['MAX_OPTIMIZER_GRAD_NORM'])
                     optimizer.original_optimizer.step()
             else:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), params['MAX_OPTIMIZER_GRAD_NORM'])
+                # MAX_OPTIMIZER_GRAD_NORM None/0: no clip (TabSyn and the
+                # paper clip nothing without DP)
+                if params.get('MAX_OPTIMIZER_GRAD_NORM'):
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), params['MAX_OPTIMIZER_GRAD_NORM'])
                 optimizer.step()
             if accountant is not None:
                 accountant.step()

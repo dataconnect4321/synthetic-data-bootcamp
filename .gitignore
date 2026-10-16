@@ -39,3 +39,8 @@ Data/
 # committed results (exception to the *.csv rule above)
 !results/
 !results/*.csv
+
+# AIM comparison: local environment and generated outputs
+aim_fair/.venv/
+aim_fair/out/
+aim_fair/data/

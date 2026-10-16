@@ -24,6 +24,7 @@ array, `cat` an (n, d_cat) array of integer category codes, and `s_idx` the
 protected column's position within `cat`.
 """
 
+import math
 import numpy as np
 import torch
 from sklearn.ensemble import HistGradientBoostingClassifier
@@ -78,10 +79,10 @@ def chance_ber(n_groups):
     return (n_groups - 1) / n_groups
 
 
-def famd_coordinates(num, cat_features):
+def famd_coordinates(num, cat_features, n_components=None):
     """Factorial analysis of mixed data: PCA over standardized numeric
     columns and centered one-hot indicators scaled by 1/sqrt(p_k).
-    Returns all component scores (rows x components)."""
+    Returns the first n_components component scores (all if None)."""
     blocks = []
     if num.shape[1]:
         sd = num.std(axis=0)
@@ -98,7 +99,8 @@ def famd_coordinates(num, cat_features):
     Z = np.concatenate(blocks, axis=1)
     U, S, _ = np.linalg.svd(Z, full_matrices=False)
     keep = S > 1e-8
-    return U[:, keep] * S[keep]
+    coords = U[:, keep] * S[keep]
+    return coords if n_components is None else coords[:, :n_components]
 
 
 def normalized_cluster_balance(clusters, groups):
@@ -119,17 +121,22 @@ def normalized_cluster_balance(clusters, groups):
 
 
 def cluster_features(num, cat, s_idx, n_clusters=2, seed=0,
-                     covariance_type='full', n_init=1):
+                     covariance_type='full', n_init=1, famd_components=2):
     """GMM cluster ids of the FAMD-embedded non-protected columns.
 
     Full covariance with one initialization is sklearn's default and the
     likely paper setup; on Adult it recovers the married / not-married
     split. (A diagonal-covariance fit splits off a ~11% cluster unrelated to
-    sex, which keeps A-NCB near 1 for real and synthetic data alike.) The
-    fit can land on different splits per seed: average over seeds and
-    report the median too."""
+    sex, which keeps A-NCB near 1 for real and synthetic data alike.)
+
+    famd_components: the paper clusters "all FAMD components" without
+    saying how many were computed; 2 is prince.FAMD's default. On Adult the
+    GMM on the first 2 components finds the married / not-married split for
+    every seed (seed sd ~0), while on all components it mostly splits off a
+    tiny outlier cluster (seed sd ~0.3). None = all components."""
     _, _, _, num_f, cat_f = _split_features(num, cat, s_idx)
-    coords = famd_coordinates(num_f.astype(np.float64), cat_f)
+    coords = famd_coordinates(num_f.astype(np.float64), cat_f,
+                              famd_components)
     gmm = GaussianMixture(n_components=n_clusters,
                           covariance_type=covariance_type,
                           n_init=n_init, random_state=seed)
@@ -407,10 +414,156 @@ def fit_validity_rules(num_raw, cat, num_names, cat_names, cat_labels=None,
     return rules
 
 
-def validity_report(rules, num_raw, cat, tol=1e-6, top=5):
-    """Score a table against fitted rules. Returns the share of rows that
-    break no rule, per-type violation rates (share of rows breaking at least
-    one rule of that type) and the most-violated individual rules."""
+def fit_validity_rules_dp(num_raw, cat, num_names, cat_names,
+                          noise_multiplier, cat_labels=None, seed=0,
+                          fd_purity=0.99, fd_support=0.01,
+                          pair_expected=20.0):
+    """Plausibility rules learned from DP-noised counts (for rejection
+    sampling under DP).
+
+    Released once with the Gaussian mechanism: every 2-way contingency
+    table of the categorical columns. A record adds 1 to each of the
+    k(k-1)/2 tables, so the L2 sensitivity is sqrt(k(k-1)/2) and the noise
+    std is noise_multiplier times that; the release costs
+    alpha / (2 noise_multiplier^2) of RDP at every order alpha.
+    Rules (everything else is post-processing of the noisy tables):
+      integer  numeric column stored as whole numbers (public schema)
+      fd       A=a -> B=b when the noisy purity >= fd_purity and A=a has a
+               noisy share >= fd_support
+      pair     a pair whose noisy count is below 3 noise std although
+               independence (noisy margins) predicts >= 15 noise std and
+               >= pair_expected rows
+    No range or conditional-range rules: those need order statistics of
+    raw values, which have no bounded sensitivity.
+
+    Returns (rules, rdp) with rdp = {alpha: rdp} for compose_rdp_budgets.
+    """
+    num_raw, cat = np.asarray(num_raw, float), np.asarray(cat)
+    k = cat.shape[1]
+    sizes = [int(cat[:, j].max()) + 1 if cat_labels is None
+             else len(cat_labels[j]) for j in range(k)]
+    lab = (lambda j, c: str(cat_labels[j][c])) if cat_labels is not None         else (lambda j, c: str(c))
+    sens = math.sqrt(k * (k - 1) / 2)
+    std = noise_multiplier * sens
+    rng = np.random.default_rng(seed)
+    rules = {'range': [], 'integer': [], 'cond': [], 'fd': [], 'pair': []}
+    for i, name in enumerate(num_names):
+        x = num_raw[:, i]
+        if np.allclose(x, np.round(x), rtol=0, atol=1e-3):
+            rules['integer'].append((i, name))
+    for a in range(k):
+        for b in range(a + 1, k):
+            tab = np.zeros((sizes[a], sizes[b]))
+            np.add.at(tab, (cat[:, a], cat[:, b]), 1)
+            tab = tab + rng.normal(0.0, std, tab.shape)
+            n = max(tab.sum(), 1.0)
+            ra, rb = tab.sum(1).clip(0), tab.sum(0).clip(0)
+            exp = np.outer(ra, rb) / n
+            for va, vb in zip(*np.where((tab < np.minimum(2 * std,
+                                                          0.05 * exp)) &
+                                        (exp >= max(6 * std,
+                                                    pair_expected)))):
+                rules['pair'].append((a, int(va), b, int(vb),
+                                      f'{cat_names[a]}={lab(a, va)} & '
+                                      f'{cat_names[b]}={lab(b, vb)}'))
+            # implications on counts clipped at 0: negative noise would
+            # otherwise inflate the purity and create false rules
+            tab_c = tab.clip(min=0)
+            for x, y, t in ((a, b, tab_c), (b, a, tab_c.T)):
+                rows = t.sum(1).clip(0)
+                cols = t.sum(0).clip(0)
+                for vx in np.where(rows / n >= fd_support)[0]:
+                    vy = int(t[vx].argmax())
+                    # upper confidence bound on the count outside vy
+                    # (2 noise std per remaining cell, combined)
+                    rest = rows[vx] - t[vx, vy] +                         2 * std * math.sqrt(max(t.shape[1] - 1, 1))
+                    if (rest <= (1 - fd_purity) * rows[vx]
+                            and cols[vy] / n < 0.99):
+                        rules['fd'].append((x, int(vx), y, vy,
+                                            f'{cat_names[x]}={lab(x, vx)} -> '
+                                            f'{cat_names[y]}={lab(y, vy)}'))
+    alphas = [1 + x / 10.0 for x in range(1, 100)] + list(range(11, 505))
+    rdp = {a_: a_ / (2.0 * noise_multiplier ** 2) for a_ in alphas}
+    return rules, rdp
+
+
+def constrained_repair(cat, probs, rules, protect=(), max_edits=3):
+    """Constrained decoding: fix rows that break a categorical rule (pair
+    or fd) with the changes the generator itself finds most likely,
+    instead of discarding them.
+
+    cat: (n, k) decoded category codes; probs: list of (n, |cat_j|) per-
+    column probabilities from the decoder; protect: columns never edited
+    (e.g. the protected attribute, so a repair cannot re-link a proxy to
+    it). Each violating row gets greedy single-column edits - the edit
+    that leaves the fewest violations, ties broken by the smallest drop in
+    that column's log-probability - until it breaks no categorical rule or
+    max_edits edits were made. Numeric rules are not touched.
+
+    Post-processing of the generator's output against given rules: it adds
+    no privacy cost beyond the rules' own release.
+
+    Returns (repaired codes, info dict).
+    """
+    cat = np.asarray(cat).copy()
+    pair = list(rules.get('pair', []))
+    fd = list(rules.get('fd', []))
+    if not pair and not fd:
+        return cat, {'rows_changed': 0.0, 'unresolved': 0.0, 'edits': {}}
+    logp = [np.log(np.clip(np.asarray(p), 1e-12, None)) for p in probs]
+    involved = sorted({r[0] for r in pair + fd} | {r[2] for r in pair + fd})
+    editable = [j for j in involved if j not in set(protect)]
+
+    def nviol(row):
+        v = 0
+        for a, va, b, vb, _ in pair:
+            v += row[a] == va and row[b] == vb
+        for a, va, b, vb, _ in fd:
+            v += row[a] == va and row[b] != vb
+        return v
+
+    bad = np.zeros(len(cat), bool)
+    for a, va, b, vb, _ in pair:
+        bad |= (cat[:, a] == va) & (cat[:, b] == vb)
+    for a, va, b, vb, _ in fd:
+        bad |= (cat[:, a] == va) & (cat[:, b] != vb)
+    edits = {j: 0 for j in editable}
+    changed = unresolved = 0
+    for i in np.where(bad)[0]:
+        row = cat[i].copy()
+        v, k = nviol(row), 0
+        while v > 0 and k < max_edits:
+            best = None
+            for j in editable:
+                cur = row[j]
+                for c in range(logp[j].shape[1]):
+                    if c == cur:
+                        continue
+                    row[j] = c
+                    nv = nviol(row)
+                    row[j] = cur
+                    if nv >= v:
+                        continue
+                    key = (nv, logp[j][i, cur] - logp[j][i, c])
+                    if best is None or key < best[0]:
+                        best = (key, j, c)
+            if best is None:
+                break
+            (nv, _), j, c = best
+            row[j] = c
+            edits[j] += 1
+            k += 1
+            v = nv
+        changed += k > 0
+        unresolved += v > 0
+        cat[i] = row
+    n = max(len(cat), 1)
+    return cat, {'rows_changed': changed / n, 'unresolved': unresolved / n,
+                 'edits': edits}
+
+
+def _violations(rules, num_raw, cat, tol=1e-6):
+    """Per-type row masks of rule violations, and per-rule violation rates."""
     num_raw, cat = np.asarray(num_raw, float), np.asarray(cat)
     n = len(cat)
     bad = {k: np.zeros(n, bool) for k in rules}
@@ -436,6 +589,24 @@ def validity_report(rules, num_raw, cat, tol=1e-6, top=5):
         v = (cat[:, a] == va) & (cat[:, b] == vb)
         bad['pair'] |= v
         worst.append((v.mean(), f'pair: {desc}'))
+    return bad, worst
+
+
+def invalid_rows(rules, num_raw, cat, tol=1e-6):
+    """Boolean mask of rows that break at least one rule (any type)."""
+    bad, _ = _violations(rules, num_raw, cat, tol)
+    out = np.zeros(len(cat), bool)
+    for v in bad.values():
+        out |= v
+    return out
+
+
+def validity_report(rules, num_raw, cat, tol=1e-6, top=5):
+    """Score a table against fitted rules. Returns the share of rows that
+    break no rule, per-type violation rates (share of rows breaking at least
+    one rule of that type) and the most-violated individual rules."""
+    n = len(cat)
+    bad, worst = _violations(rules, num_raw, cat, tol)
     any_bad = np.zeros(n, bool)
     for v in bad.values():
         any_bad |= v

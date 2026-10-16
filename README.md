@@ -23,6 +23,16 @@ well as the real data does (true-sex BER 0.139 at every λ). The recommended
 raises true-sex BER to 0.26 and cuts income parity from 0.21 to 0.12, with
 AUC going from 0.91 to 0.90.
 
+**Pivot to AIM.** Under DP, FLIP's guarantee is only nominal and the VAE
+latent space does none of the fairness work. The project therefore moved
+to the **AIM hybrid** (`aim_fair/`): AIM / Private-PGM with proxy repair,
+masking and consistency fixes applied to its noisy measurements.
+
+- At a rigorous ε = 3 it matches the VAE's no-DP income parity, with
+  realistic rows.
+- See `aim_fair/WRITEUP.md`, `aim_fair/FINAL_COMPARISON.md` and
+  `VAE_CHANGES.md`.
+
 It explains, in order:
 
 1. **The original TabSyn system** — what it is, how it works, and the

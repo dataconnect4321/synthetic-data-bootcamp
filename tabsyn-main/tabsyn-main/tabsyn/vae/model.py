@@ -308,12 +308,26 @@ class VAE(nn.Module):
         std_z = self.encoder_logvar(x)
 
         z = self.reparameterize(mu_z, std_z)
+        # the sample the decoder sees, for a latent stage on q(z|x)
+        self.last_z = z
 
-        
         batch_size = x_num.size(0)
-        h = self.decoder(z[:,1:])
-        
+        h = self.decode_tokens(z[:,1:])
+
         return h, mu_z, std_z
+
+    # index (in z[:, 1:]) of a token replaced by its batch mean before the
+    # decoder (Phase-2 option: the decoder can no longer read S from it)
+    s_token_mask = None
+
+    def decode_tokens(self, zt):
+        if self.s_token_mask is not None:
+            k = self.s_token_mask
+            zt = torch.cat([zt[:, :k],
+                            zt[:, k:k + 1].mean(0, keepdim=True)
+                            .expand(len(zt), 1, zt.shape[2]),
+                            zt[:, k + 1:]], 1)
+        return self.decoder(zt)
 
 class Reconstructor(nn.Module):
     def __init__(self, d_numerical, categories, d_token):
@@ -391,6 +405,8 @@ class Model_VAE(nn.Module):
             'recon_x_cat': recon_x_cat,
             'recon_num_pre': recon_num_pre,
             'std_z': std_z,
+            # the sampled latent the decoder used (z = mu + sigma*eps)
+            'z': self.VAE.last_z,
         }
 
 

@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-10-16: Pivot from FLIP to the AIM hybrid (`aim_fair/`)
+
+- **`aim_fair/`: AIM / Private-PGM at a rigorous ε.** Fairness and realism
+  are post-processing of its noisy measurements:
+  - proxy masking;
+  - Feldman-style repair of every column, income included, to the pooled
+    distribution;
+  - consistency rules from a pre-specified test;
+  - pair redraw from the model conditional with marginal re-matching.
+
+  Write-up: `aim_fair/WRITEUP.md`. Verdict against the best VAE process:
+  `aim_fair/FINAL_COMPARISON.md`.
+- **VAE.**
+  - Paper-style Eq. 13 per-group DP (`--dp-group-sigmas`, `--dp-coupled
+    paper`, `calibrate_dp.py`).
+  - `--score-csv` for external tables.
+  - New metrics: tstr sex BER, validity and impossible rows; A-NCB on 2
+    FAMD components.
+  - Off-by-default diagnostic options.
+
+  See `VAE_CHANGES.md`.
+- **Scripts:** `scripts/run_best_vae_dp.sh` and `aim_fair/run_final.sh`.
+
 ## 2026-10-09: Adult reproduction (`run_adult_flip.py`, PR #3)
 
 The Adult work moved from `configs/flip.yaml` experiments to a dedicated

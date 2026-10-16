@@ -152,3 +152,67 @@ def test_validity_rules_catch_each_violation_type():
     assert rep['by_type']['integer'] == 0.25
     assert rep['by_type']['cond'] >= 0.25
     assert rep['by_type']['fd'] >= 0.25 or rep['by_type']['pair'] >= 0.25
+    # the per-row mask flags exactly the rows the report counts as invalid
+    from tabsyn.vae.paper_metrics import invalid_rows
+    mask = invalid_rows(rules, bad_num, bad_cat)
+    assert mask.tolist() == [True, True, True, True]
+    assert np.isclose(mask.mean(), 1 - rep['valid_rate'])
+    assert np.isclose(invalid_rows(rules, num, cat).mean(), 1 - real['valid_rate'])
+
+
+def test_dp_validity_rules_find_planted_impossible_pair():
+    """The DP rule learner bans a combination that never occurs (male
+    'wife'), keeps common combinations, and reports the Gaussian RDP."""
+    from tabsyn.vae.paper_metrics import fit_validity_rules_dp
+    rng = np.random.default_rng(0)
+    n = 30000
+    sex = rng.integers(0, 2, n)                       # 0 female, 1 male
+    rel = np.where(sex == 1, rng.choice([0, 2], n), rng.choice([1, 2], n))
+    other = rng.integers(0, 3, n)                     # independent column
+    cat = np.stack([sex, rel, other], 1)
+    num = rng.integers(0, 50, (n, 1)).astype(float)
+    rules, rdp = fit_validity_rules_dp(num, cat, ['x'], ['sex', 'rel', 'o'],
+                                       noise_multiplier=5.0, seed=1)
+    pairs = {(a, va, b, vb) for a, va, b, vb, _ in rules['pair']}
+    assert (0, 1, 1, 1) in pairs          # male & rel=1 ("wife")
+    assert (0, 0, 1, 0) in pairs          # female & rel=0 ("husband")
+    assert all(a != 2 and b != 2 for a, _, b, _ in pairs)
+    assert rules['integer'] == [(0, 'x')]
+    assert abs(rdp[2] - 2 / (2 * 25.0)) < 1e-12
+
+
+def test_constrained_repair_fixes_with_model_preference_and_protects():
+    """A 'female husband' is fixed by editing relationship (sex protected)
+    to the most probable valid category; valid rows are untouched."""
+    from tabsyn.vae.paper_metrics import constrained_repair
+    # columns: 0 sex (0 F, 1 M), 1 relationship (0 husband, 1 wife, 2 other)
+    rules = {'pair': [(0, 0, 1, 0, 'F & husband'), (0, 1, 1, 1, 'M & wife')],
+             'fd': []}
+    cat = np.array([[0, 0],     # female husband -> invalid
+                    [1, 0],     # male husband   -> valid
+                    [1, 1]])    # male wife      -> invalid
+    p_sex = np.array([[0.4, 0.6], [0.1, 0.9], [0.2, 0.8]])
+    p_rel = np.array([[0.5, 0.1, 0.4],    # row 0: 'other' beats 'wife'
+                      [0.9, 0.05, 0.05],
+                      [0.3, 0.3, 0.4]])
+    out, info = constrained_repair(cat, [p_sex, p_rel], rules, protect=(0,))
+    assert out[:, 0].tolist() == [0, 1, 1]           # sex never edited
+    assert out[0, 1] == 2 and out[2, 1] == 2         # most probable valid fix
+    assert out[1].tolist() == [1, 0]                 # valid row untouched
+    assert info['unresolved'] == 0 and abs(info['rows_changed'] - 2 / 3) < 1e-9
+    # without protection the cheaper fix for row 0 is flipping sex (0.6 > 0.4)
+    out2, _ = constrained_repair(cat, [p_sex, p_rel], rules, protect=())
+    assert out2[0].tolist() == [1, 0]
+
+
+def test_famd_components_truncates_and_default_is_two():
+    import inspect
+    from tabsyn.vae.paper_metrics import famd_coordinates, cluster_features
+    rng = np.random.default_rng(0)
+    num = rng.normal(size=(200, 3))
+    cat = rng.integers(0, 4, (200, 3))
+    full = famd_coordinates(num, cat)
+    two = famd_coordinates(num, cat, 2)
+    assert two.shape == (200, 2) and np.allclose(two, full[:, :2])
+    assert inspect.signature(cluster_features).parameters[
+        'famd_components'].default == 2

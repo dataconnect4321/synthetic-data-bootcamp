@@ -294,7 +294,7 @@ def sample_from_diffusion(diffusion_model, mean, n_gen, latent_shape,
 @torch.no_grad()
 def decode_latents(vae_model, latents, device, X_num=None, params=None,
                    num_floor=None, sample_idx=None, num_means=None,
-                   num_stds=None):
+                   num_stds=None, bounds=None, sample_all=False):
     """Decode sampled latents back to data space through the frozen VAE
     decoder + Reconstructor, with a DP-released range-clip backstop.
 
@@ -307,19 +307,28 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None,
     (dp_release_mean_std), spent once into the privacy budget.
     """
     vae_model.eval()
-    h = vae_model.VAE.decoder(latents[:, 1:])
+    h = vae_model.VAE.decode_tokens(latents[:, 1:])
     recon_num, recon_cat = vae_model.Reconstructor(h)
 
     syn_num = recon_num.cpu().numpy()
     syn_cat = np.stack([c.argmax(dim=-1).cpu().numpy() for c in recon_cat],
                        axis=1)
-    if sample_idx is not None:
+    if sample_all:
+        # every categorical drawn from its softmax instead of argmax
+        syn_cat = np.stack([torch.multinomial(torch.softmax(c, dim=-1), 1)
+                            .squeeze(1).cpu().numpy() for c in recon_cat],
+                           axis=1)
+    elif sample_idx is not None:
         # L_S drives this column's logits to uniform, so argmax would emit one
         # constant class; drawing from the softmax gives the random assignment.
         probs = torch.softmax(recon_cat[sample_idx], dim=-1)
         syn_cat[:, sample_idx] = torch.multinomial(probs, 1).squeeze(1).cpu().numpy()
 
-    if X_num is not None and params is not None:
+    if bounds is not None:
+        # range-clip bounds released earlier in the run: re-used, so a
+        # re-decode (e.g. rejection sampling) spends no extra budget
+        syn_num = np.clip(syn_num, bounds[0][None, :], bounds[1][None, :])
+    elif X_num is not None and params is not None:
         Xn = X_num.to(device)
         r_mean, r_std, stats_budget = dp_release_mean_std(
             Xn, params['STATS_NOISE_MULTIPLIER'],
@@ -328,6 +337,7 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None,
         lo = (r_mean - k * r_std).cpu().numpy()
         hi = (r_mean + k * r_std).cpu().numpy()
         syn_num = np.clip(syn_num, lo[None, :], hi[None, :])
+        decode_latents.last_bounds = (lo, hi)
     # Domain-knowledge clamp: all numeric columns in this dataset (loan
     # amount, income, LTV, property value, tract population) are
     # non-negative by definition. Public knowledge, no privacy cost.
@@ -338,7 +348,7 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None,
         syn_num = np.maximum(syn_num, num_floor[None, :])
     else:
         syn_num = clip_nonnegative(syn_num, num_means, num_stds)
-    if X_num is not None and params is not None:
+    if bounds is None and X_num is not None and params is not None:
         return syn_num, syn_cat, [stats_budget]
     return syn_num, syn_cat, []
 

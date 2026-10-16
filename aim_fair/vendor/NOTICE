@@ -1,0 +1,14 @@
+Vendored from https://github.com/ryan112358/mbi (Private-PGM / AIM),
+Apache License 2.0 (see LICENSE), fetched 2026-10-14:
+
+  aim_reference.py   mechanisms/aim.py         unmodified (McKenna et al.,
+                                               PVLDB 2022, arXiv:2201.12677)
+  mechanism.py       mechanisms/mechanism.py   unmodified
+  cdp2adp.py         mechanisms/cdp2adp.py     one change: the unused
+                                               "import matplotlib.pyplot" is
+                                               commented out (Copyright 2020
+                                               IBM, Apache 2.0, see its header)
+
+The library itself (package `mbi`) is installed from the same repository into
+aim_fair/.venv and is not vendored. aim_fair/fair_aim.py subclasses the AIM
+class from aim_reference.py; it does not modify the vendored files.
