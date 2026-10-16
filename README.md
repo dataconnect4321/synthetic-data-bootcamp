@@ -32,6 +32,14 @@ produces far more realistic data. The VAE keeps a lower equalized-odds gap.
 
 Full numbers: `results/final_aim_vs_vae.csv`.
 
+The FLIP replication heatmaps (fold 0, lambda x epsilon, our values against
+the paper's Fig. 3) are in `results/heatmap_paper_compare_fold0_*.png`:
+
+- `_argmax`: sex decoded by argmax (TabSyn);
+- `_sampled`: sex sampled from its probabilities;
+- `_real_leakage`: true-sex BER and real-trained A-NCB, which the paper's
+  metrics cannot show.
+
 ## Documents
 
 | | |
@@ -56,6 +64,9 @@ PRESET=final LAMS="0 4" bash scripts/run_paper_grid.sh
 bash scripts/run_best_vae_dp.sh
 
 python aim_fair/summarize.py          # -> adult_results/final_aim_vs_vae.csv
+
+# FLIP-as-published heatmap in the paper's Fig. 3 layout (lambda x eps, fold 0)
+bash scripts/run_heatmap_fold0.sh && python paper_heatmap_compare.py
 ```
 
 Adult goes in `Data/adult.data` and `Data/adult.test` (UCI). Outputs go to
@@ -70,10 +81,11 @@ Adult goes in `Data/adult.data` and `Data/adult.test` (UCI). Outputs go to
 | `run_flip_demo.py`, `run_flip_full_pipeline.py` | VAE training and diffusion pipeline used by the driver |
 | `fairness_eval.py` | fairness metrics used by the pipeline |
 | `calibrate_dp.py` | noise multipliers for a target epsilon (Eq. 13) |
+| `paper_heatmap_compare.py` | heatmaps of FLIP as published against the paper's Fig. 3, plus real-leakage panels |
 | `tabsyn-main/` | TabSyn (vendored) with the FLIP fairness terms in `tabsyn/vae/` |
-| `scripts/` | VAE run scripts |
+| `scripts/` | VAE run scripts (best VAE process, heatmap runs) |
 | `tests/` | unit tests |
-| `results/` | final comparison table |
+| `results/` | final comparison table and the fold-0 heatmaps |
 
 Earlier work (HMDA experiments, FLIP replication grids, reports) is on
 `main`.
