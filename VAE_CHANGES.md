@@ -3,7 +3,7 @@
 The best VAE process is FLIP on Adult with this repository's output-level
 joint stage: `run_adult_flip.py --preset final --lam 4`.
 
-- The `final` preset is already on `main` (README Part 10.5): FLIP as
+- The `final` preset is already on `main`: FLIP as
   published, plus an RFF dependence penalty on the decoded output with the
   mean gap (an MMD between the groups' decoded rows) and a KL guard on the
   marginals.

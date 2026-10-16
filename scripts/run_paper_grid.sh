@@ -1,5 +1,5 @@
 #!/bin/bash
-# Adult lambda grid (README Part 10). For each fold: bank Phase 1, then
+# Adult lambda grid. For each fold: bank Phase 1, then
 # Phase 2 at every lambda, tier-1 first (fast, scored against each row's real
 # person) and then the full pipeline (VAE + latent diffusion), at most
 # $JOBS runs at a time. Re-running skips finished runs.
@@ -11,8 +11,7 @@
 #   LAMS="0 4" FOLDS="0" TIER1_ONLY=1 bash scripts/run_paper_grid.sh
 #
 # Results: adult_results/{prefix}_f{fold}_lam{lambda}[_t1].json, prefix pgrid
-# (paper) or flip (ours); tables / heatmaps: paper_grid_report.py +
-# paper_grid_heatmap.py, or final_table.py / make_heatmaps.py.
+# (paper), final (final) or flip (ours).
 cd "$(dirname "$0")/.."
 export PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8
 PY=${PY:-python}
