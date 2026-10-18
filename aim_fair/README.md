@@ -1,9 +1,12 @@
 # aim_fair: the AIM hybrid
 
-Differentially private synthetic Adult data from AIM / Private-PGM, with
-fairness (proxy repair) and realism (proxy masking, consistency rules, pair
-redraw) applied to AIM's noisy measurements. All of it is post-processing,
-so the epsilon covers the whole release.
+Differentially private synthetic Adult data from AIM / Private-PGM:
+
+- Numeric bins are learned privately from 5% of the budget (`dp_schema.py`).
+- Fairness (proxy repair) and realism (proxy masking, consistency rules, pair
+  redraw) are applied to AIM's noisy measurements, as post-processing.
+
+The epsilon covers the whole release, bins included.
 
 - Architecture diagram: `ARCHITECTURE.md`.
 - What it does and why: `WRITEUP.md`.
@@ -15,11 +18,14 @@ so the epsilon covers the whole release.
 |---|---|
 | `vendor/` | AIM reference code from https://github.com/ryan112358/mbi (Apache 2.0, see `vendor/NOTICE`) |
 | `fair_aim.py` | `FairAIM`: AIM's measuring loop, then masking, repair, rules and pair redraw |
-| `adult_domain.py` | public bin edges, encoding and decoding |
+| `dp_schema.py` | private numeric bins: noisy histograms (5% of rho), spike bins, ordered edges, within-bin decoding |
+| `adult_domain.py` | public bin edges, encoding and decoding (with or without the private schema) |
+| `check_schema.py` | how well public vs private bins reproduce the real numeric values |
 | `export_folds.py` | writes the same 3-fold splits as `run_adult_flip.py` (main environment) |
-| `run_aim.py` | measure one fold and write the refits |
-| `run_final.sh` | final setting on 3 folds plus the plain-AIM baseline, scored |
-| `summarize.py` | final AIM-vs-VAE table |
+| `run_aim.py` | measure one fold (private bins by default, `--public-bins` for the fixed edges) and write the refits |
+| `run_final.sh` | final setting on 3 folds x 10 refits plus the plain-AIM baseline, scored |
+| `summarize.py` | AIM-vs-VAE table |
+| `final_chart.py` | final chart and table vs the FLIP reproduction and the paper (`RESULTS.md`) |
 | `test_aim_fair.py` | self-tests |
 
 ## Setup

@@ -48,6 +48,11 @@ samples. Every step reads only the noisy measurements or the model fitted
 to them, so by DP's post-processing property (Dwork & Roth, 2014) none of it
 costs privacy budget.
 
+0. **Private bins.** Numeric bins are learned under DP from 5% of the
+   zCDP budget (`dp_schema.py`): Gaussian noisy histograms on a public fine
+   grid; heaped values (e.g. 40/50/60 hours, $15,024 capital gain) as their
+   own bins; ordered equal-frequency bins elsewhere. This is the only step
+   besides AIM's measuring that reads the data, and it is inside the budget.
 1. **Proxy masking.** Category levels that are near-deterministic for one
    sex are merged into one level, by summing their cells in every noisy
    table.
@@ -95,9 +100,15 @@ variant comes from the same private measurements per fold.
 | plain | `--tau 0 --no-mask --no-fix` | 0.211 | 0.167 | 0.905 | 0.91 | 0.6% | 0.248 | 0.16 |
 | repair only | `--no-mask --no-fix` | 0.125 | 0.080 | 0.889 | 0.62 | 16% | 0.248 | 0.51 |
 | repair + mask | `--no-fix` | 0.139 | 0.136 | 0.884 | 0.72 | 0% | 0.248 | 0.50 |
-| **final** (+ rules, pair redraw) | (defaults) | **0.139 ± 0.02** | **0.138 ± 0.03** | 0.889 | **0.89** | **0%** | **0.248** | **0.50** |
+| final, public bins (+ rules, pair redraw) | `--public-bins` | **0.139 ± 0.02** | **0.138 ± 0.03** | 0.889 | **0.89** | **0%** | **0.248** | **0.50** |
 
-Real data: validity 0.98, 0% impossible rows, >50K rate 0.248.
+| **final, private bins** | (defaults) | 0.147 ± 0.02 | 0.126 ± 0.02 | 0.890 | 0.89 | **0%** | 0.247 | **0.50** |
+
+Real data: validity 0.98, 0% impossible rows, >50K rate 0.248. The
+private-bin row is 3 folds x 10 refits. It halves numeric distortion
+(W1 0.045 → 0.024) at the same EO, AUC and validity; its parity is about
+0.01 higher because realistic hours and capital-gain values teach the income
+model a sharper real-world link (see the README).
 
 Two dropped alternatives (experiment code, not on this branch):
 

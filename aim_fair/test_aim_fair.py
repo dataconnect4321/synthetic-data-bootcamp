@@ -195,7 +195,58 @@ def test_gibbs_fix_removes_violations_and_keeps_other_columns():
     assert all(after <= before + 1e-9 for before, after in rep.values())
 
 
+def test_dp_schema_edges_ordered_with_singleton_spikes():
+    import dp_schema as DS
+    rng = np.random.default_rng(0)
+    n = 30000
+    hours = np.where(rng.random(n) < 0.5, 40,
+                     np.where(rng.random(n) < 0.3, 50,
+                              rng.integers(1, 100, n)))
+    gain = np.where(rng.random(n) < 0.9, 0,
+                    np.where(rng.random(n) < 0.3, 15024,
+                             rng.integers(1, 100000, n)))
+    age = rng.integers(17, 91, n)
+    df = pd.DataFrame({'hours-per-week': hours, 'capital-gain': gain,
+                       'age': age})
+    cols = list(df.columns)
+    schema = DS.build(df, cols, rho_total=0.2, public_edges=AD.EDGES,
+                      rng=np.random.default_rng(1))
+    for c in cols:
+        e = np.asarray(schema[c]['edges'])
+        assert np.all(np.diff(e) > 0), c                   # ordered, no overlap
+        lo, hi = DS.RANGE[c]
+        assert e[0] == lo and e[-1] == hi + 1, c           # covers the range
+        assert len(e) - 1 <= DS.MAX_BINS, c
+        for s in schema[c]['spikes']:                      # singleton bins
+            i = np.searchsorted(e, s)
+            assert e[i] == s and e[i + 1] == s + 1, (c, s)
+    assert schema['age']['source'] == 'public'             # no heaping
+    assert schema['hours-per-week']['source'] == 'dp'
+    assert {40.0, 50.0} <= set(schema['hours-per-week']['spikes'])
+    assert {0.0, 15024.0} <= set(schema['capital-gain']['spikes'])
+    # decoding stays inside each bin and reproduces the spikes exactly
+    for c in ('hours-per-week', 'capital-gain'):
+        e = np.asarray(schema[c]['edges'])
+        x = df[c].to_numpy()
+        k = np.searchsorted(e, x, side='right') - 1
+        dec = DS.decode_column(k, schema[c]['decode'], e, rng)
+        assert np.all((dec >= e[k]) & (dec < e[k + 1])), c
+        for s in schema[c]['spikes']:
+            assert np.all(dec[x == s] == s)
+
+
+def test_dp_schema_budget():
+    import dp_schema as DS
+    cols = AD.NUMERIC
+    sigma = DS.sigma_for(0.2242, cols)
+    rho_each = DS.SCHEMA_RHO_SHARE * 0.2242 / DS.n_releases(cols)
+    assert np.isclose(sigma, 1 / np.sqrt(2 * rho_each))   # L2 sensitivity 1
+    assert DS.n_releases(cols) == len(cols) + 2           # + integer gain/loss
+
+
 if __name__ == '__main__':
+    test_dp_schema_edges_ordered_with_singleton_spikes()
+    test_dp_schema_budget()
     test_log_conditional_matches_joint()
     test_gibbs_fix_removes_violations_and_keeps_other_columns()
     test_mask_detects_and_merges_sex_specific_levels()

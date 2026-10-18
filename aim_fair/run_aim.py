@@ -1,11 +1,13 @@
 """Generate Adult synthetic data with the AIM hybrid for one CV fold.
 
 Uses the aim_fair/.venv environment (mbi + JAX). Reads the fold written by
-export_folds.py, discretizes with public bin edges, runs AIM over all 2-way
-marginals at (epsilon, delta) and saves the noisy measurements, then writes
-one synthetic table per refit (--refits seeds) from them: proxy masking,
-repair (tau), consistency rules and pair redraw (fair_aim.FairAIM.synthesize).
-Refits and variants are post-processing of the same private measurements.
+export_folds.py; learns the numeric bins privately (dp_schema.py, 5% of the
+zCDP budget; --public-bins for the fixed public edges); runs AIM over all
+2-way marginals with the rest of the budget and saves the noisy measurements
+with the bins; then writes one synthetic table per refit (--refits seeds):
+proxy masking, repair (tau), consistency rules and pair redraw
+(fair_aim.FairAIM.synthesize). Refits and variants are post-processing of the
+same private measurements.
 
     aim_fair/.venv/Scripts/python aim_fair/run_aim.py --fold 0 --epsilon 3
     # plain AIM from the same measurements:
@@ -29,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 import adult_domain as AD
+import dp_schema as DS
 from fair_aim import FairAIM
 from mbi import Dataset, Domain, LinearMeasurement
 
@@ -40,8 +43,9 @@ def main():
     ap.add_argument('--fold', type=int, default=0)
     ap.add_argument('--epsilon', type=float, default=3.0)
     ap.add_argument('--delta', type=float, default=1e-5)
-    ap.add_argument('--refits', type=int, nargs='+', default=[0, 1, 2],
-                    help='seeds of the refits written from the measurements')
+    ap.add_argument('--refits', type=int, nargs='*', default=[0, 1, 2],
+                    help='seeds of the refits written from the measurements '
+                         '(none: measure only)')
     ap.add_argument('--tau', type=float, default=1.0,
                     help='repair amount (0 = no repair)')
     ap.add_argument('--no-mask', action='store_true',
@@ -51,6 +55,9 @@ def main():
     ap.add_argument('--load', default=None,
                     help='reuse saved noisy measurements instead of running '
                          'AIM (post-processing only)')
+    ap.add_argument('--public-bins', action='store_true',
+                    help='fixed public numeric bins (adult_domain.EDGES) '
+                         'instead of the private schema; AIM gets all of rho')
     ap.add_argument('--mask-label', default='MASK')
     ap.add_argument('--max-model-size', type=float, default=80)
     ap.add_argument('--max-iters', type=int, default=1000)
@@ -67,27 +74,43 @@ def main():
     # public schema: the category labels (sorted, as in run_adult_flip.py)
     categories = {c: sorted(train[c].astype(str).unique())
                   for c in AD.CATEGORICAL}
-    sizes = AD.domain_sizes(categories)
-    domain = Domain(list(sizes), list(sizes.values()))
     mech = FairAIM(a.epsilon, a.delta, prng=np.random.RandomState(a.seed),
                    max_model_size=a.max_model_size, max_iters=a.max_iters,
                    rounds=a.rounds)
+    rho_total, schema = mech.rho, None
     if a.load:
         with open(a.load, 'rb') as f:
-            mech.measurements = [LinearMeasurement(np.asarray(y), tuple(cl),
-                                                   stddev=sd)
-                                 for cl, y, sd in pickle.load(f)]
+            saved = pickle.load(f)
+        if isinstance(saved, list):       # older files: measurements only
+            saved = {'measurements': saved, 'schema': None}
+        schema = saved['schema']
+        mech.measurements = [LinearMeasurement(np.asarray(y), tuple(cl),
+                                               stddev=sd)
+                             for cl, y, sd in saved['measurements']]
         mech.potentials = None
-    else:
-        data = Dataset(AD.encode(train, categories), domain)
+    elif not a.public_bins:
+        schema = DS.build(train, AD.NUMERIC, rho_total, AD.EDGES,
+                          np.random.default_rng(10_000 + a.seed))
+        mech.rho = rho_total * (1 - DS.SCHEMA_RHO_SHARE)
+        print(f'[{tag}] private schema: '
+              + ', '.join(f"{c} {schema[c]['source']} "
+                          f"({len(schema[c]['edges']) - 1} bins)"
+                          for c in AD.NUMERIC)
+              + f'; AIM rho {mech.rho:.4f} of {rho_total:.4f}', flush=True)
+    sizes = AD.domain_sizes(categories, schema)
+    domain = Domain(list(sizes), list(sizes.values()))
+    if not a.load:
+        data = Dataset(AD.encode(train, categories, schema), domain)
         workload = [(cl, 1.0) for cl in itertools.combinations(
             domain.attributes, 2) if domain.size(cl) <= 10000]
         print(f'[{tag}] {len(train)} rows, {len(workload)} workload '
               f'marginals, rho={mech.rho:.4f}', flush=True)
         mech.run(data, workload)
         with open(os.path.join(out_dir, f'{tag}_measurements.pkl'), 'wb') as f:
-            pickle.dump([(tuple(m.clique), np.asarray(m.noisy_measurement),
-                          float(m.stddev)) for m in mech.measurements], f)
+            pickle.dump({'measurements': [
+                (tuple(m.clique), np.asarray(m.noisy_measurement),
+                 float(m.stddev)) for m in mech.measurements],
+                'schema': schema, 'rho_total': rho_total}, f)
 
     repair_cols = [c for c in domain.attributes if c != 'sex']
     info = {}
@@ -103,7 +126,7 @@ def main():
         for c, members in li['merges']:   # merged level = last code
             cats[c] = [v for k, v in enumerate(categories[c])
                        if k not in members] + [a.mask_label]
-        AD.decode(codes, cats, seed=r).to_csv(
+        AD.decode(codes, cats, seed=r, schema=schema).to_csv(
             os.path.join(out_dir, f'{tag}_r{r}_synthetic.csv'), index=False)
         info[f'r{r}'] = {
             'merged': {c: [categories[c][k] for k in m]
@@ -114,7 +137,11 @@ def main():
                if k in li}}
         print(f'[{tag}] refit {r} written {info[f"r{r}"]}', flush=True)
     with open(os.path.join(out_dir, f'{tag}.json'), 'w') as f:
-        json.dump({'tag': tag, 'args': vars(a), 'rho': mech.rho,
+        json.dump({'tag': tag, 'args': vars(a), 'rho_aim': mech.rho,
+                   'rho_total': rho_total,
+                   'schema': {c: {k: v for k, v in schema[c].items()
+                                  if k != 'decode'} for c in AD.NUMERIC}
+                   if schema else None,
                    'refits': info, 'runtime_s': time.time() - t0}, f,
                   indent=1, default=str)
     print(f'[{tag}] done in {time.time() - t0:.0f}s', flush=True)

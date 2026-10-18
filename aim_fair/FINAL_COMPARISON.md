@@ -1,19 +1,22 @@
 # Final comparison: AIM hybrid vs. VAE (FLIP + joint stage) on UCI Adult
 
 **Winner: the AIM hybrid.** It is the only method with a rigorous privacy
-guarantee. It produces far more realistic data and reaches about the same
-income parity. Our VAE method keeps a real advantage on equalized odds, so
-the margin is not total.
+guarantee. It produces far more realistic data and reaches similar income
+parity. Our VAE method keeps a real advantage on equalized odds, so the
+margin is not total. AIM figures below use the final setting with private
+numeric bins; the comparison with FLIP's own reported numbers is in
+`RESULTS.md`.
 
 ## The two contenders
 
 | | AIM hybrid (best AIM process) | VAE (best VAE process) |
 |---|---|---|
 | Generator | AIM on Private-PGM: noisy 1- and 2-way count tables, a graphical model, then sampling | FLIP (TabSyn VAE + diffusion) with our output-level joint fairness stage |
+| Numeric bins | learned privately from 5% of the zCDP budget (`dp_schema.py`): heaped values get their own bins | not applicable |
 | Fairness | the noisy tables are repaired before the final fit: every column's distribution is made equal across sexes (Feldman et al., 2015; tau = 1, income included, pooled target) | joint dependence penalty on the decoded output, lambda = 4 |
 | Realism | proxy levels (Husband/Wife) merged; consistency rules from a pre-specified test on the noisy tables; broken pairs redrawn from the model; marginals re-matched | none (rejection under DP caused selection bias) |
 | Privacy | **epsilon 3, rigorous for the whole release.** All fairness and realism steps are post-processing. | DP-SGD on the VAE only, at a **nominal** epsilon (batch-coupled terms and the diffusion stage are not covered) |
-| Evidence | 3 folds x 3 refits from each fold's private measurements | 3 folds without DP; epsilon 3 on fold 0 only |
+| Evidence | 3 folds x 10 refits from each fold's private measurements | 3 folds without DP; epsilon 3 on fold 0 only |
 
 ## Results
 
@@ -23,31 +26,32 @@ AIM runs at a rigorous epsilon 3, the VAE without any privacy.
 | | AIM hybrid, eps 3 | VAE, lambda 4, no DP | AIM plain, eps 3 | VAE, lambda 0, no DP |
 |---|---|---|---|---|
 | **Downstream fairness** (income model trained on synthetic, tested on real people) | | | | |
-| Income parity (lower better) | 0.139 ± 0.02 | **0.132 ± 0.03** | 0.211 | 0.246 |
-| Equalized-odds gap (lower better) | 0.138 ± 0.03 | **0.044 ± 0.06** | 0.167 | 0.125 |
+| Income parity (lower better) | 0.147 ± 0.02 | **0.132 ± 0.03** | 0.208 | 0.246 |
+| Equalized-odds gap (lower better) | 0.126 ± 0.02 | **0.044 ± 0.06** | 0.143 | 0.125 |
 | **Sex leakage** | | | | |
 | BER on the synthetic label (0.5 = no link) | **0.50** | 0.30 | 0.16 | 0.17 |
-| Release teaches real sex, folded tstr (0.5 = no) | **0.45** | 0.42 | 0.14 | 0.15 |
+| Release teaches real sex, folded tstr (0.5 = no) | **0.43** | 0.42 | 0.14 | 0.15 |
 | **Realism and utility** | | | | |
 | Validity (real data 0.98) | **0.89** | 0.72 | 0.91 | 0.97 |
-| Impossible rows (real 0%) | **0%** | 19% | 0.6% | 1.3% |
-| alpha-precision / beta-recall | **0.985 / 0.38** | 0.885 / 0.30 | 0.992 / 0.45 | 0.990 / 0.48 |
-| Income AUC on real people (real-trained 0.93) | 0.889 | **0.897** | 0.905 | 0.910 |
-| >50K rate (real 0.248) | **0.248** | 0.250 | 0.248 | 0.249 |
+| Impossible rows (real 0%) | **0%** | 19% | 0.7% | 1.3% |
+| Numeric distortion, mean W1 (lower better) | **0.024** | 0.051 | 0.024 | 0.036 |
+| alpha-precision / beta-recall | **0.984 / 0.39** | 0.885 / 0.30 | 0.993 / 0.46 | 0.990 / 0.48 |
+| Income AUC on real people (real-trained 0.93) | 0.890 | **0.897** | 0.904 | 0.910 |
+| >50K rate (real 0.248) | **0.247** | 0.250 | 0.247 | 0.249 |
 | **Privacy** | **rigorous eps 3** | none | rigorous eps 3 | none |
-| eps-identifiability (empirical, lower better) | 0.35 | **0.24** | 0.42 | 0.40 |
+| eps-identifiability (empirical, lower better) | 0.35 | **0.24** | 0.43 | 0.40 |
 
 **Same privacy level, fold 0 only, epsilon 3** (the VAE's epsilon is
 nominal):
 
 | | AIM hybrid | VAE, lambda 4 | FLIP as published, lambda 4 |
 |---|---|---|---|
-| Income parity | 0.129 | **0.091** | 0.226 |
-| EO gap | 0.139 | **0.080** | 0.112 |
-| Folded tstr | 0.46 | 0.46 | 0.17 |
-| Validity / impossible rows | **0.89 / 0%** | 0.67 / 26% | 0.53 / 45% |
-| AUC | **0.893** | 0.887 | 0.903 |
-| alpha / beta | **0.985 / 0.38** | 0.89 / 0.20 | 0.89 / 0.18 |
+| Income parity | 0.161 | **0.091** | 0.235 |
+| EO gap | 0.150 | **0.080** | 0.096 |
+| Folded tstr | 0.45 | 0.46 | 0.17 |
+| Validity / impossible rows | **0.89 / 0%** | 0.67 / 26% | 0.56 / 43% |
+| AUC | **0.902** | 0.887 | 0.902 |
+| alpha / beta | **0.985 / 0.39** | 0.89 / 0.20 | 0.90 / 0.19 |
 
 Reproduce:
 
@@ -69,18 +73,18 @@ Then `python aim_fair/summarize.py` writes
    - At epsilon 1 the VAE breaks down (income parity 0.33).
 2. **Much more realistic data.**
    - Validity is 0.89 vs 0.72 (0.67 at epsilon 3), and impossible rows are
-     0% vs 19–26%.
-   - alpha-precision 0.985 vs 0.885: synthetic rows sit where real rows
+     0% vs 19–26%. Numeric distortion is half the VAE's (W1 0.024 vs
+     0.051): heaped hours and real capital-gain amounts are reproduced.
+   - alpha-precision 0.984 vs 0.885: synthetic rows sit where real rows
      are.
    - The VAE's fairness comes with a fifth of rows being contradictory
      (e.g. female "Husbands").
 3. **Comparable fairness on the 3-fold evidence.**
-   - Income parity is 0.139 vs 0.132, within the VAE's own fold-to-fold
+   - Income parity is 0.147 vs 0.132, within the VAE's own fold-to-fold
      spread (0.10–0.16).
-   - Sex leakage is equal or better: BER 0.50 vs 0.30, tstr 0.45 vs 0.42.
-4. **Stability.** AIM's results vary less across folds (parity sd 0.02 vs
-   0.03, validity sd 0.001 vs 0.02). The VAE's best numbers came from its
-   best fold.
+   - Sex leakage is equal or better: BER 0.50 vs 0.30, tstr 0.43 vs 0.42.
+4. **Stability.** AIM's realism varies less across folds (validity sd
+   0.002 vs 0.02). The VAE's best numbers came from its best fold.
 5. **Interpretable and cheap to adjust.**
    - The repair states exactly what changes: P(column | sex) becomes equal.
    - New variants take minutes from the saved private measurements, with no
@@ -89,16 +93,16 @@ Then `python aim_fair/summarize.py` writes
 
 ## Where the VAE is still better
 
-- **Equalized odds.** EO gap 0.044 vs 0.138 on 3 folds, and 0.080 vs 0.139
+- **Equalized odds.** EO gap 0.044 vs 0.126 on 3 folds, and 0.080 vs 0.150
   at epsilon 3 on fold 0.
   - The VAE's errors are more even between real high-earning men and women,
     though with large fold-to-fold variance (0.006–0.115).
   - AIM's gap likely comes from the merged spouse level. It is still a
     real-world proxy (about 61% of real men vs 15% of real women are
     spouses), so the "married" income premium lands on real men.
-- **Income parity at epsilon 3 on fold 0:** 0.091 vs 0.129. This is a
+- **Income parity at epsilon 3 on fold 0:** 0.091 vs 0.161. This is a
   single run at nominal privacy, but a gap worth noting.
-- **Utility and empirical privacy:** slightly higher AUC (0.897 vs 0.889)
+- **Utility and empirical privacy:** slightly higher AUC (0.897 vs 0.890)
   and lower eps-identifiability (0.24 vs 0.35). The latter matters less for
   AIM, whose formal guarantee covers any attacker.
 - **Scaling to wide data.** AIM's cost grows with the number of columns and
@@ -124,11 +128,14 @@ synthesis. Even then, its impossible rows need handling.
   realism (validity 0.74 → 0.67, impossible rows 17% → 26%) but not
   fairness (parity 0.099 → 0.091), so epsilon-3 runs on all folds would
   sharpen the realism gap; the effect on fairness is unknown.
+- **Public vs private bins.** With the fixed public bins the AIM hybrid
+  scores parity 0.135 (vs 0.147) at the same EO, AUC and validity, but its
+  numeric values are less realistic (W1 0.045). See the README.
 - **A-NCB is excluded from the verdict.**
   - On Adult it reduces to one married/not-married axis.
   - The real-trained version rewards incoherent rows: AIM 0.22, VAE 0.45
     with 19% impossible rows.
-  - The own-S version rewards label drift: AIM 0.91, VAE 0.72.
+  - The own-S version rewards label drift: AIM 0.92, VAE 0.72.
   - See `WRITEUP.md`.
 - **Both methods rewrite real sex differences.** The AIM release says men and
   women have the same hours, occupations and incomes. Its income links to

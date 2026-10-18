@@ -26,16 +26,17 @@ METRICS = {
     'alpha_precision': lambda p: p['alpha_precision'],
     'beta_recall': lambda p: p['beta_recall'],
     'eps_identifiability': lambda p: p['eps_identifiability'],
+    'num_w1_mean': lambda p: p['_fid']['num_w1_mean'],
     'ancb_real_trained': lambda p: p['syn']['a_ncb'],
     'ancb_own_s': lambda p: p['syn_own_adversary']['a_ncb'],
 }
 METHODS = [   # name, tag pattern, refits
-    ('AIM hybrid, eps 3', 'aim_e3_f{f}_r{r}', 3),
-    ('AIM plain, eps 3', 'aimplain_e3_f{f}_r{r}', 3),
+    ('AIM hybrid, eps 3 (private bins)', 'aimfinal_e3_f{f}_r{r}', 10),
+    ('AIM plain, eps 3 (private bins)', 'aimfinalplain_e3_f{f}_r{r}', 10),
+    ('AIM hybrid, eps 3 (public bins)', 'aimpublic_e3_f{f}_r{r}', 10),
+    ('AIM plain, eps 3 (public bins)', 'aimpublicplain_e3_f{f}_r{r}', 10),
     ('VAE final lambda 4, no DP', 'final_f{f}_lam4', 1),
-    ('VAE final lambda 0, no DP', 'final_f{f}_lam0', 1),
     ('VAE final lambda 4, eps 3 (nominal)', 'best_vae_e3_f{f}_lam4', 1),
-    ('VAE final lambda 0, eps 3 (nominal)', 'best_vae_e3_f{f}_lam0', 1),
 ]
 
 
@@ -44,7 +45,8 @@ def scores(tag):
     if not os.path.exists(path):
         return None
     with open(path) as fh:
-        p = json.load(fh)['paper_metrics']
+        d = json.load(fh)
+    p = dict(d['paper_metrics'], _fid=d.get('fidelity') or {'num_w1_mean': np.nan})
     return [fn(p) for fn in METRICS.values()]
 
 

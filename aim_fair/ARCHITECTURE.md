@@ -1,7 +1,7 @@
 # AIM hybrid: architecture
 
-The real data is touched only inside the **privacy boundary**, AIM's
-measuring loop, which spends the whole (epsilon, delta) budget. Everything
+The real data is touched only inside the **privacy boundary**: the private
+bins (5% of the budget) and AIM's measuring loop (95%). Everything
 after the noisy measurements is post-processing. It reads only those
 measurements or a model fitted to them, so it costs no budget, and any
 number of refits or variants can come from one private release.
@@ -9,10 +9,12 @@ number of refits or variants can come from one private release.
 ```mermaid
 flowchart TD
     REAL[("Real Adult fold<br/>(training rows)")]
-    SCHEMA["Public schema<br/>fixed bin edges, category lists<br/><i>adult_domain.py</i>"]
+    SCHEMA["Public schema<br/>category lists, fine grids for numerics<br/><i>adult_domain.py</i>"]
 
     subgraph DP["Privacy boundary: zCDP, epsilon = 3, delta = 1e-5"]
         direction TB
+        BINS["Private bins (5% of rho)<br/>noisy fine histograms -> spike bins,<br/>ordered edges, within-bin decoding<br/><i>dp_schema.py</i>"]
+        BINS -->|"bins"| SEL
         SEL["Select a 1- or 2-way marginal<br/>(exponential mechanism)"]
         MEAS["Measure its counts<br/>+ Gaussian noise"]
         FIT0["Refit Private-PGM<br/>(Mirror Descent)"]
@@ -37,7 +39,7 @@ flowchart TD
         RULES --> REDRAW
     end
 
-    DECODE["Decode bins to values<br/><i>adult_domain.decode</i>"]
+    DECODE["Decode bins to values<br/>(private within-bin shares)<br/><i>adult_domain.decode</i>"]
     OUT[("Synthetic table<br/><i>aim_e3_fF_rR_synthetic.csv</i>")]
     SCORE["Score with the VAE's metrics<br/><i>run_adult_flip.py --score-csv --mask-proxies</i>"]
     CMP["AIM vs VAE table<br/><i>summarize.py -> FINAL_COMPARISON.md</i>"]
@@ -51,7 +53,7 @@ flowchart TD
     classDef priv fill:#fde8e8,stroke:#c0392b,color:#1a1a1a
     classDef free fill:#e8f4ea,stroke:#2e7d32,color:#1a1a1a
     classDef data fill:#eef2fb,stroke:#3949ab,color:#1a1a1a
-    class SEL,MEAS,FIT0 priv
+    class BINS,SEL,MEAS,FIT0 priv
     class RAW,MASK,RULES,PLANS,PUSH,FIT,SAMPLE,REDRAW,MATCH free
     class REAL,NOISY,OUT data
 ```
@@ -60,7 +62,8 @@ flowchart TD
 
 | Step | What it does | Code |
 |---|---|---|
-| Public schema | Fixed bin edges and category lists, not learned from the data, so they need no budget | `adult_domain.py` |
+| Public schema | Category lists and the fine grids the private bins start from; not learned from the data | `adult_domain.py` |
+| Private bins | 5% of rho: noisy histograms give heaped-value bins and ordered edges; AIM gets the other 95% | `dp_schema.py` |
 | AIM measuring | Adaptively selects marginals and measures them with Gaussian noise under zCDP; saves the noisy tables | `FairAIM.run` (AIM, McKenna et al. 2022) |
 | 1 Proxy masking | Merges category levels that encode sex by definition, read from the measured noisy sex × column tables | `detect_proxy_classes_model`, `merge_categories` |
 | 2 Repair | Moves every column's per-sex distribution, income included, to the pooled one (Feldman et al. 2015, applied to the tables), then refits | `repair_plans`, `repair_measurements` |

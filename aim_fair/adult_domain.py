@@ -6,6 +6,10 @@ numbers), not quantiles of the data: data-dependent edges would be an extra
 release outside the privacy accounting. Category lists are the public schema.
 Decoding draws an integer uniformly inside each bin (exact for one-value
 bins such as capital-gain = 0, hours = 40 or each education-num value).
+
+Optionally, a private schema (dp_schema.build) replaces the edges and the
+within-bin decoding of some numeric columns; its edges are data-adaptive
+but released under DP and composed with AIM's budget.
 """
 import numpy as np
 import pandas as pd
@@ -28,18 +32,22 @@ EDGES = {
 }
 
 
-def domain_sizes(categories):
+def edges_of(c, schema=None):
+    return np.asarray(schema[c]['edges'] if schema else EDGES[c], float)
+
+
+def domain_sizes(categories, schema=None):
     """{attribute: number of values}; categories: {col: list of labels}."""
-    sizes = {c: len(EDGES[c]) - 1 for c in NUMERIC}
+    sizes = {c: len(edges_of(c, schema)) - 1 for c in NUMERIC}
     sizes.update({c: len(categories[c]) for c in CATEGORICAL})
     return sizes
 
 
-def encode(df, categories):
+def encode(df, categories, schema=None):
     """Raw Adult frame -> {attribute: int array} for mbi.Dataset."""
     out = {}
     for c in NUMERIC:
-        e = np.asarray(EDGES[c])
+        e = edges_of(c, schema)
         x = np.clip(df[c].to_numpy(), e[0], e[-1] - 1)
         out[c] = (np.searchsorted(e, x, side='right') - 1).astype(np.int64)
     for c in CATEGORICAL:
@@ -48,14 +56,20 @@ def encode(df, categories):
     return out
 
 
-def decode(codes, categories, seed=0):
-    """{attribute: int array} -> raw Adult frame (numerics uniform in bin)."""
+def decode(codes, categories, seed=0, schema=None):
+    """{attribute: int array} -> raw Adult frame (numerics uniform in bin,
+    or by the private schema's within-bin distribution)."""
     rng = np.random.default_rng(seed)
     df = pd.DataFrame()
     for c in NUMERIC:
-        e = np.asarray(EDGES[c])
+        e = edges_of(c, schema)
         k = np.asarray(codes[c])
-        lo, hi = e[k], e[k + 1]
+        table = schema[c].get('decode') if schema else None
+        if table:
+            from dp_schema import decode_column
+            df[c] = decode_column(k, table, e, rng).astype(np.int64)
+            continue
+        lo, hi = e[k].astype(np.int64), e[k + 1].astype(np.int64)
         df[c] = rng.integers(lo, np.maximum(hi, lo + 1))
     for c in CATEGORICAL:
         df[c] = np.asarray(categories[c], dtype=object)[np.asarray(codes[c])]
