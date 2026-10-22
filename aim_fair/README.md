@@ -26,6 +26,7 @@ The epsilon covers the whole release, bins included.
 | `run_final.sh` | final setting on 3 folds x 10 refits plus the plain-AIM baseline, scored |
 | `summarize.py` | AIM-vs-VAE table |
 | `final_chart.py` | final chart and table vs the FLIP reproduction and the paper (`RESULTS.md`) |
+| `task_auc.py` | task independence: train on synthetic, test on real, for 10 Adult targets (`RESULTS.md`) |
 | `test_aim_fair.py` | self-tests |
 
 ## Setup

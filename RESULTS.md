@@ -65,6 +65,48 @@ to real rows, not leakage**, so it rewards realism and penalizes noise:
   exists. With AIM's formal epsilon 3, it is a realism diagnostic, not the
   privacy measure.
 
+## Task independence: other targets than income
+
+The repair is task-agnostic: it removes sex from every column without
+knowing the downstream task. To check how well the release serves other
+tasks, a classifier is trained on synthetic data and tested on real people
+for several Adult targets. All other columns are features; for "married"
+the relationship column is dropped, since it encodes marriage directly. The
+metric is ROC AUC: 3 folds, and the first 3 refits per fold for the
+synthetic sources.
+
+| Target | Real data (ceiling) | Plain AIM (privacy only) | **AIM hybrid** | Fairness cost | Hybrid keeps |
+|---|---|---|---|---|---|
+| College degree (education >= 13) | 0.881 | 0.868 | **0.863** | -0.005 | 95% |
+| Income >50K | 0.926 | 0.904 | **0.891** | -0.013 | 92% |
+| Private sector | 0.761 | 0.741 | **0.732** | -0.008 | 89% |
+| Long hours (>= 45) | 0.770 | 0.752 | **0.739** | -0.013 | 89% |
+| Age >= 40 | 0.808 | 0.784 | **0.772** | -0.012 | 88% |
+| Race White | 0.784 | 0.744 | **0.733** | -0.011 | 82% |
+| Occupation (14 classes) | 0.776 | 0.760 | **0.722** | -0.038 | 81% |
+| Capital gain > 0 | 0.765 | 0.712 | **0.709** | -0.003 | 79% |
+| Married | 0.900 | 0.868 | **0.801** | -0.067 | 75% |
+| *Sex (removed by design)* | *0.885* | *0.873* | ***0.582*** | *-0.291* | *21%* |
+
+The fairness cost is the hybrid minus plain AIM. "Hybrid keeps" is the
+share of the real data's above-chance AUC retained, (AUC - 0.5) /
+(real - 0.5). Fold sd is at most 0.015 for the real targets (0.03 for sex).
+
+- **Largely task-independent.** For 7 of the 9 real targets the repair
+  costs at most 0.013 AUC, often less than privacy alone. Income, the task
+  the settings were judged on, is not specially favoured.
+- **Sex-linked tasks pay most, by design.**
+  - Married (-0.067): the repair equalizes marital status across sexes,
+    breaking its links to sex-skewed features.
+  - Occupation (-0.038): occupations are sex-segregated in real data, and
+    the release removes that link.
+- **Privacy costs most where data is sparse:** capital gain > 0 (-0.053
+  from DP) and race (-0.040), i.e. rare positives and small groups.
+- **Sex itself falls to 0.58,** close to chance (the residual matches tstr
+  0.43).
+
+Reproduce: `python aim_fair/task_auc.py` (writes `results/task_auc.csv`).
+
 ## Public vs private bins
 
 The AIM hybrid with the fixed public bins scores slightly better income

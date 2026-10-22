@@ -99,7 +99,7 @@ public-bin variant.
 
 | | |
 |---|---|
-| `RESULTS.md` | final result: AIM hybrid vs FLIP reproduction vs FLIP's reported numbers (chart and table) |
+| `RESULTS.md` | final result: AIM hybrid vs FLIP reproduction vs FLIP's reported numbers (chart and table), and task independence across 10 Adult targets |
 | `aim_fair/FINAL_COMPARISON.md` | head-to-head with our best VAE process, the winner and why |
 | `aim_fair/ARCHITECTURE.md` | architecture diagram of the AIM hybrid (privacy boundary, post-processing steps, code map) |
 | `aim_fair/WRITEUP.md` | why we moved away from FLIP; how the AIM hybrid works; A-NCB caveats; limitations |
@@ -122,6 +122,7 @@ bash scripts/run_best_vae_dp.sh
 
 python aim_fair/summarize.py          # -> adult_results/final_aim_vs_vae.csv
 python aim_fair/final_chart.py        # -> results/final_comparison.{png,csv}
+python aim_fair/task_auc.py           # -> results/task_auc.csv
 
 # FLIP-as-published heatmap in the paper's Fig. 3 layout (lambda x eps, fold 0)
 bash scripts/run_heatmap_fold0.sh && python paper_heatmap_compare.py
