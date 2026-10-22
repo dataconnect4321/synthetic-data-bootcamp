@@ -1,51 +1,36 @@
-"""Run FLIP (VAE + latent diffusion) on UCI Adult with `sex` as the protected
-attribute - the paper's Adult setup (arXiv:2508.21815, Table 2: 6 numeric +
-8 categorical columns) - and score it with the paper's metrics and the
-checks added in this reproduction.
+"""FLIP (VAE + latent diffusion) on UCI Adult with `sex` as the protected
+attribute (arXiv:2508.21815, Table 2: 6 numeric + 8 categorical columns),
+scored with the paper's metrics and this repository's checks. One run = one
+3-fold-CV fold: the generator trains on 2/3 of the rows, the held-out 1/3 is
+the unseen real reference.
 
-One run = one 3-fold-CV fold: the generator trains on 2/3 of the rows, the
-held-out 1/3 is the unseen real reference. Reuses the HMDA pipeline's
-training / diffusion / decoding code by pointing run_flip_demo's column
-configuration at Adult. See README Part 10.
-
-Default (--preset paper): FLIP as published.
+--preset paper (default): FLIP as published.
   Phase 1  ELBO (reconstruction + beta*KL, beta decayed TabSyn-style) + the
            batch-mean L_S (Eq. 3), balanced batches of 4096, 3000 epochs
-  Phase 2  L_quality (ELBO + L_S, the detokenizer-stage divergence term)
-           + SWD to the Phase-1 model at the latent and decoder stages
-           + lambda * -CKA^T (linear, row-centred, Eq. 7) at the latent,
-           detokenizer (per-feature mean) and decoder stages; stages
-           averaged; no lambda ramp
-  Stage 2  latent diffusion on reparameterized latents mu + sigma*eps
-  Decode   argmax for every categorical column, sex included
-  Choices the paper does not state: Phase-2 beta 1e-2 (--phase2-beta),
-  100 Phase-2 epochs, stages averaged (--stage-reduce).
+  Phase 2  L_quality + SWD to the Phase-1 model at the latent and decoder
+           stages + lambda * -CKA^T (linear, row-centred, Eq. 7) at the
+           latent, detokenizer and decoder stages (averaged)
+  Stage 2  latent diffusion on mu + sigma*eps; argmax decoding
+--preset final (best VAE process): the paper preset plus the RFF joint
+  decoded-output stage with the mean gap and the KL marginal guard.
 
---preset ours: this repository's additions (the earlier final setup) -
-  masked proxies, group-centred CKA^T + mean gap, binary W1, summed
-  numerics, SWD at the latent only, lambda ramp, the RFF joint
-  decoded-output stage, the KL marginal guard, summed stages, sampled sex.
---preset final (recommended): the paper preset plus the RFF joint
-  decoded-output stage with the mean gap and the KL marginal guard; income
-  stays in the fairness terms (task-agnostic).
-Any individual flag overrides the preset.
+DP (--dp-group-sigmas): the paper's Eq. 13 per-group noise multipliers on the VAE, with
+the batch-coupled terms trained through the same noisy step (nominal
+epsilon; multipliers from calibrate_dp.py). Diffusion is not private, as in
+the paper.
 
 Examples:
-    # bank Phase 1 for a fold (tier-1 metrics of the Phase-1 model)
+    # bank Phase 1 for a fold
     python run_adult_flip.py --fold 0 --phase2-epochs 0 --tier1 \\
         --save-phase1 adult_results/ckpt/raw_f0.pt --tag raw_f0_bank
-    # Phase 2 at lambda=4 from the bank, full pipeline (the paper)
-    python run_adult_flip.py --fold 0 --lam 4 \\
-        --phase1-checkpoint adult_results/ckpt/raw_f0.pt --tag pgrid_f0_lam4
-    # this repository's additions (masked bank: --save-phase1 with --preset ours)
-    python run_adult_flip.py --preset ours --fold 0 --lam 4 \\
-        --phase1-checkpoint adult_results/ckpt/fin_f0.pt --tag flip_f0_lam4
-    # comparison baseline: scrambling repair, no in-model fairness
-    python run_adult_flip.py ... --repair-tau 1.0 --lam 0 --tag rpb_f0_lam0
-    # re-decode a finished run's saved VAE + latents with the other sex
-    # decoding (scoring only; no training, no diffusion)
-    python run_adult_flip.py --from-run pgrid_f0_lam4 --s-decode sample \\
-        --tag pgrid_f0_lam4_sample
+    # best VAE process at lambda 4 from the bank (full pipeline)
+    python run_adult_flip.py --preset final --fold 0 --lam 4 \\
+        --phase1-checkpoint adult_results/ckpt/raw_f0.pt --tag final_f0_lam4
+    # re-decode a saved run with sampled sex (scoring only)
+    python run_adult_flip.py --from-run final_f0_lam4 --s-decode sample \\
+        --tag final_f0_lam4_sample
+    # score any synthetic CSV (e.g. aim_fair/ outputs) with the same metrics
+    python run_adult_flip.py --score-csv TABLE.csv --fold 0 --no-save-run
 """
 
 import os
@@ -79,12 +64,9 @@ from tabsyn.vae.paper_metrics import (fairness_scores, epsilon_identifiability,
                                       true_group_target_gap,
                                       downstream_sp_eo,
                                       alpha_precision_beta_recall,
-                                      fit_validity_rules, validity_report,
-                                      invalid_rows, fit_validity_rules_dp,
-                                      constrained_repair)
+                                      fit_validity_rules, validity_report)
 from tabsyn.vae.proxy_decouple import (detect_proxy_classes,
                                        describe_classes, mask_proxy_classes,
-                                       repair_toward_independence,
                                        impossible_combination_rate)
 
 ADULT_NAMES = ['age', 'workclass', 'fnlwgt', 'education', 'education-num',
@@ -102,7 +84,7 @@ SENSITIVE, TARGET = 'sex', 'income'
 DATA_DIR = os.path.join(HERE, 'Data')
 OUT_DIR = os.path.join(HERE, 'adult_results')
 
-# Method presets; every key is also a command-line flag that overrides it.
+# Method presets (their keys feed build_params).
 PRESETS = {
     # FLIP as published (Sec. 4.3); the beta value is not stated there
     'paper': dict(cka_center='row', mean_gap_weight=0.0, binary_w1=False,
@@ -110,16 +92,10 @@ PRESETS = {
                   lambda_ramp=0.0, decoded_joint=False, marginal_weight=0.0,
                   stage_reduce='mean', mask_proxies=False, s_decode='argmax',
                   phase2_beta='1e-2', target_in_fairness=True),
-    # this repository's additions (README Part 10, EXPERIMENTS_ADULT.md)
-    'ours': dict(cka_center='group', mean_gap_weight=1.0, binary_w1=True,
-                 num_stage='summed', div_stages='latent', lambda_ramp=0.25,
-                 decoded_joint=True, marginal_weight=1.0, stage_reduce='sum',
-                 mask_proxies=True, s_decode='sample', phase2_beta='1e-2',
-                 target_in_fairness=False),
-    # recommended: the paper backbone (task-agnostic, income included) plus
-    # a direct dependence penalty on the decoded output - the RFF joint stage
-    # with the mean gap (an MMD between the groups' decoded rows) - and the
-    # KL marginal guard against levelling down (README Part 10.5)
+    # best VAE process: the paper backbone (task-agnostic, income included)
+    # plus a direct dependence penalty on the decoded output - the RFF joint
+    # stage with the mean gap (an MMD between the groups' decoded rows) - and
+    # the KL marginal guard against levelling down
     'final': dict(cka_center='row', mean_gap_weight=1.0, binary_w1=False,
                   num_stage='pre', div_stages='latent+decoder',
                   lambda_ramp=0.0, decoded_joint=True, marginal_weight=1.0,
@@ -170,74 +146,61 @@ def configure_demo():
 
 
 def build_params(args):
+    p = PRESETS[args.preset]
     params = copy.deepcopy(demo.TRADEOFF_PARAMS)
     params.update({
         'LAMBDA_FAIR': args.lam,
-        'USE_DP': args.dp_noise is not None,
+        'USE_DP': args.dp_group_sigmas is not None,
         'SEED': args.seed,
         'PHASE1_EPOCHS': args.phase1_epochs,
         'PHASE2_EPOCHS': args.phase2_epochs,
         'SAMPLE_SIZE': None,
-        'WEIGHT_DECAY': args.weight_decay,
-        # stability safeguards from the DP pipeline (not in TabSyn or the
-        # paper); defaults keep them, the flags below turn them off
-        'MAX_OPTIMIZER_GRAD_NORM': args.grad_clip,
-        'ADAM_EPS': args.adam_eps,
+        'WEIGHT_DECAY': 0.0,
+        # stability safeguards from the DP pipeline (not in TabSyn or the paper)
+        'MAX_OPTIMIZER_GRAD_NORM': 5.0,
+        'ADAM_EPS': 1e-4,
         # the paper's training setup: full data, batch 4096 (the fairness
         # terms are batch statistics), small tokens, wide FFN, TabSyn's
         # plateau beta decay, batch-mean L_S (Eq. 3)
-        'BATCH_SIZE': args.batch_size, 'D_TOKEN': 4, 'FACTOR': 32,
+        'BATCH_SIZE': 4096, 'D_TOKEN': 4, 'FACTOR': 32,
         'BETA_SCHEDULE': 'plateau', 'BETA_MAX': 1e-2, 'BETA_MIN': 1e-5,
         'BETA_LAMBDA': 0.7, 'BETA_PATIENCE': 10,
-        'PHASE2_LR_SCALE': args.phase2_lr_scale,
-        'PHASE2_RECON_WEIGHT': args.phase2_recon_weight,
+        'PHASE2_LR_SCALE': 1.0,
+        'PHASE2_RECON_WEIGHT': 1.0,
+        'PHASE2_BETA': float(p['phase2_beta']),
         'LS_MODE': 'batch_mean',
-        # disentanglement (preset + flags)
-        'CKA_CENTER': args.cka_center,
-        'MEAN_SHIFT_WEIGHT': args.mean_gap_weight,
-        'BINARY_W1': args.binary_w1,
-        'NUM_STAGE': args.num_stage,
-        'DIV_STAGES': args.div_stages,
-        'LAMBDA_RAMP_FRAC': args.lambda_ramp,
-        'STAGE_REDUCE': args.stage_reduce,
-        'DECODED_JOINT': args.decoded_joint,
-        'MARGINAL_WEIGHT': args.marginal_weight,
-        'TARGET_IN_FAIRNESS': args.target_in_fairness,
-        'CKA_TOKENS': args.cka_tokens,
-        'CKA_KERNEL': args.cka_kernel,
-        'CKA_LATENT': args.cka_latent,
-        'CKA_EXCLUDE_S': args.cka_exclude_s,
-        'SWD_GROUP_CENTER': args.swd_group_center,
-        'MASK_S_TOKEN': args.mask_s_token,
-        'JOINT_MEASURE': args.joint_measure,
-        'JOINT_MEAN_WEIGHT': (args.joint_mean_gap if args.joint_mean_gap
-                              is not None else args.mean_gap_weight),
-        'JOINT_WEIGHTING': args.joint_weighting,
-        'DIV_WEIGHT': args.div_weight,
-        'SWD_PROJECTIONS': args.swd_projections,
-        'SWD_LATENT': args.swd_latent,
+        # disentanglement (from the preset)
+        'CKA_CENTER': p['cka_center'],
+        'MEAN_SHIFT_WEIGHT': p['mean_gap_weight'],
+        'BINARY_W1': p['binary_w1'],
+        'NUM_STAGE': p['num_stage'],
+        'DIV_STAGES': p['div_stages'],
+        'LAMBDA_RAMP_FRAC': p['lambda_ramp'],
+        'STAGE_REDUCE': p['stage_reduce'],
+        'DECODED_JOINT': p['decoded_joint'],
+        'MARGINAL_WEIGHT': p['marginal_weight'],
+        'TARGET_IN_FAIRNESS': p['target_in_fairness'],
+        'CKA_TOKENS': 'concat',
+        'CKA_KERNEL': 'linear',
+        'JOINT_MEAN_WEIGHT': p['mean_gap_weight'],
+        'DIV_WEIGHT': 1.0,
+        'SWD_PROJECTIONS': 50,
+        'SWD_LATENT': 'mu',
     })
-    if args.dp_noise is not None:
-        params['NOISE_MULTIPLIER'] = args.dp_noise
-        if args.dp_group_noise is not None:
-            params['GROUP_NOISE_MULTIPLIER'] = args.dp_group_noise
-        if args.dp_stats_noise is not None:
-            params['STATS_NOISE_MULTIPLIER'] = args.dp_stats_noise
-        params['COUPLED_DP'] = args.dp_coupled
-        if args.dp_group_sigmas:
-            params['GROUP_SIGMAS'] = [float(x) for x in
-                                      args.dp_group_sigmas.split(',')]
+    if args.dp_group_sigmas is not None:
+        # Eq. 13: per-group noise multipliers; the batch-coupled terms go
+        # through the same noisy step (the paper's nominal accounting)
+        params['NOISE_MULTIPLIER'] = 0.0   # train_flip sets sigma_global
+        params['COUPLED_DP'] = 'paper'
+        params['GROUP_SIGMAS'] = [float(x) for x in
+                                  args.dp_group_sigmas.split(',')]
     dparams = copy.deepcopy(full.DIFFUSION_PARAMS)
     dparams.update({
-        'USE_DP': args.dp_noise is not None and args.dp_diffusion,
+        'USE_DP': False,           # diffusion is not private (the paper)
         'EPOCHS': args.diff_epochs,
         'BATCH_SIZE': args.diff_batch,
         'N_GEN': None,
     })
-    if args.dp_noise is not None:
-        dparams['NOISE_MULTIPLIER'] = args.dp_noise
-    if args.no_recon_clamp:
-        params['LOGIT_CLAMP'] = params['NUM_RECON_CLAMP'] = float('inf')
     return params, dparams
 
 
@@ -293,43 +256,15 @@ def real_ref_cache(args, version='famd2_v1'):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap.add_argument('--preset', choices=sorted(PRESETS), default='paper',
+                    help="'paper': FLIP as published (default); 'final': the "
+                         'paper plus the joint decoded-output stage, mean gap '
+                         'and KL guard (best VAE process)')
     ap.add_argument('--lam', type=float, default=4.0, help='LAMBDA_FAIR')
-    ap.add_argument('--dp-noise', type=float, default=None,
-                    help='DP-SGD noise multiplier for the VAE; omit = no DP')
-    ap.add_argument('--dp-group-noise', type=float, default=None,
-                    help='noise multiplier of the group-level mechanism for '
-                         'the batch-coupled terms (L_S batch mean, SWD, '
-                         'CKA^T, joint stage); default: the pipeline value')
-    ap.add_argument('--dp-stats-noise', type=float, default=None,
-                    help='noise multiplier of the one DP release of numeric '
-                         'range-clip bounds at decoding')
     ap.add_argument('--dp-group-sigmas', default=None,
-                    help="paper Eq. 13: comma-separated noise multipliers per "
-                         "sex code (Female,Male) from calibrate_dp.py --eq13; "
-                         'sets the global multiplier and per-group clipping '
-                         '(IDP-SGD) and turns DP on')
-    ap.add_argument('--dp-coupled', choices=['group', 'paper'],
-                    default='group',
-                    help='DP for the batch-coupled terms: group = a separate '
-                         'group-level mechanism (a valid bound, much more '
-                         'noise); paper = through DP-SGD per-sample clipping '
-                         'with the rest of the loss (epsilon nominal for '
-                         'those terms)')
-    ap.add_argument('--dp-rules-noise', type=float, default=None,
-                    help='under DP, --reject-invalid learns its rules from '
-                         'DP-noised 2-way category counts with this noise '
-                         'multiplier (charged to epsilon); required for '
-                         'rejection sampling under DP')
-    ap.add_argument('--dp-clip-release', action='store_true',
-                    help='under DP, release numeric range-clip bounds with '
-                         'the Gaussian mechanism (charged to epsilon). Off by '
-                         'default, so epsilon covers the VAE only, as in the '
-                         'paper; decoding then applies only the >= 0 floor')
-    ap.add_argument('--dp-diffusion', action='store_true',
-                    help='also train the diffusion model with DP-SGD (same '
-                         'noise as the VAE). Off by default, as in the '
-                         'paper, which treats diffusion as post-processing '
-                         'of the private VAE')
+                    help='paper Eq. 13: comma-separated noise multipliers per '
+                         'sex code (Female,Male) from calibrate_dp.py; turns '
+                         'DP on (VAE only, nominal epsilon). Omit = no DP')
     ap.add_argument('--tag', default=None)
     ap.add_argument('--fold', type=int, default=0)
     ap.add_argument('--folds', type=int, default=3)
@@ -339,216 +274,43 @@ def main():
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--phase1-epochs', type=int, default=3000)
     ap.add_argument('--phase2-epochs', type=int, default=100)
-    ap.add_argument('--phase2-recon-weight', type=float, default=1.0,
-                    help='weight of the reconstruction loss (MSE + CE) in '
-                         "Phase 2's L_quality; below 1 lets lambda and the "
-                         'SWD anchor count for more (the paper does not '
-                         'weight it; 0 drops it)')
-    ap.add_argument('--phase2-lr-scale', type=float, default=1.0,
-                    help='Phase-2 learning rate as a multiple of the Phase-1 '
-                         'rate (1e-3); the paper does not state it')
-    ap.add_argument('--batch-size', type=int, default=4096,
-                    help='balanced batch size (the paper does not state it for '
-                         'Adult; TabSyn uses 4096). With --phase1-checkpoint '
-                         'it only affects Phase 2')
-    ap.add_argument('--grad-clip', type=float, default=5.0,
-                    help='global gradient-norm clip on every step without DP '
-                         '(a DP-pipeline safeguard; TabSyn and the paper '
-                         'clip nothing). 0 = off')
-    ap.add_argument('--adam-eps', type=float, default=1e-4,
-                    help='Adam epsilon (DP-pipeline default 1e-4; PyTorch and '
-                         'TabSyn use 1e-8)')
-    ap.add_argument('--no-recon-clamp', action='store_true',
-                    help='do not clamp logits (+/-15) and numeric outputs '
-                         '(+/-8) before the loss (a DP-pipeline safeguard)')
-    ap.add_argument('--weight-decay', type=float, default=0.0,
-                    help='Adam L2 weight decay; the HMDA default (1e-2) '
-                         'collapses the VAE to the mean on Adult')
-    # ---- method: a preset, each piece overridable ---------------------------
-    ap.add_argument('--preset', choices=sorted(PRESETS), default='paper',
-                    help="'paper': FLIP as published (default); 'final': "
-                         "the paper plus the joint stage, mean gap and KL "
-                         "guard (recommended); 'ours': the earlier additions "
-                         "(masked, group-centred). Flags below override it")
-    ap.add_argument('--cka-exclude-s', action='store_true',
-                    help='drop the protected attribute own token from the '
-                         'latent and decoder CKA stages (target the proxies)')
-    ap.add_argument('--swd-group-center', action='store_true',
-                    help='centre the frozen Phase-1 reference per sex group '
-                         'before the SWD anchor (it no longer pulls the '
-                         'groups apart)')
-    ap.add_argument('--mask-s-token', action='store_true',
-                    help='Phase 2 and generation: the decoder reads the batch '
-                         'mean of the sex token, not the row own token')
-    ap.add_argument('--joint-measure', choices=['ckat_gap', 'dep_rbf'],
-                    default='ckat_gap',
-                    help='joint decoded-output stage: RFF CKA^T + mean gap, '
-                         'or the loophole-free RBF CKA(Z, S)')
-    ap.add_argument('--cka-center', choices=['row', 'group', 'pooled_bias',
-                                             'dep_cka', 'dep_hsic',
-                                             'dep_lf_lin', 'dep_lf_rbf'],
-                    default=None,
-                    help="CKA^T centering: 'row' (dim=1, the paper's Eqs. "
-                         "5-7) or 'group' (dim=0; blind to group mean "
-                         'offsets, pair it with --mean-gap-weight)')
-    ap.add_argument('--mean-gap-weight', type=float, default=None,
-                    help='weight of the normalized group mean-gap term at '
-                         'every stage and in the joint stage (paper: 0)')
-    ap.add_argument('--binary-w1', action=argparse.BooleanOptionalAction,
-                    default=None,
-                    help='two-level columns at the detokenizer stage: W1 of '
-                         'the logit gap instead of CKA^T (paper: off)')
-    ap.add_argument('--num-stage', choices=['pre', 'summed'], default=None,
-                    help="numeric detokenizer stage: 'pre' per-feature "
-                         "pre-aggregation logits (paper) or 'summed'")
-    ap.add_argument('--div-stages', choices=['latent+decoder', 'latent'],
-                    default=None,
-                    help='SWD divergence anchor at the latent and decoder '
-                         '(paper) or at the latent only')
-    ap.add_argument('--lambda-ramp', type=float, default=None,
-                    help='fraction of Phase 2 over which lambda ramps up '
-                         '(paper: 0, full lambda from the first epoch)')
-    ap.add_argument('--decoded-joint', action=argparse.BooleanOptionalAction,
-                    default=None,
-                    help='joint decoded-output stage: CKA^T + mean gap on the '
-                         'whole decoded row, RFF-lifted, weighted by lambda')
-    ap.add_argument('--marginal-weight', type=float, default=None,
-                    help='weight of the KL marginal guard (stops the fairness '
-                         'terms from deleting categories; paper: 0)')
-    ap.add_argument('--stage-reduce', choices=['mean', 'sum'], default=None,
-                    help='combine the stages by mean or sum (full lambda per '
-                         'stage); the paper does not say')
-    ap.add_argument('--mask-proxies', action=argparse.BooleanOptionalAction,
-                    default=None,
-                    help='merge each auto-detected near-deterministic proxy '
-                         'class (P(S|category) >= 0.95 pointing to different '
-                         'groups, e.g. Husband/Wife) into one new category in '
-                         'both folds before training (needs a bank trained '
-                         'the same way)')
-    ap.add_argument('--div-weight', type=float, default=1.0,
-                    help='weight of the SWD divergence anchor (implicit 1 '
-                         'in Eq. 10)')
-    ap.add_argument('--swd-projections', type=int, default=50,
-                    help='random 1-D projections per SWD estimate (the '
-                         'paper does not say)')
-    ap.add_argument('--swd-latent', choices=['mu', 'z'], default='mu',
-                    help='latent-stage SWD on the encoder means or on '
-                         'samples z = mu + sigma*eps (Eq. 10 is written over '
-                         'q(z|x))')
-    ap.add_argument('--joint-mean-gap', type=float, default=None,
-                    help='mean-gap weight inside the joint decoded-output '
-                         'stage (default: --mean-gap-weight)')
-    ap.add_argument('--joint-weighting', choices=['dim', 'column'],
-                    default='dim',
-                    help='joint decoded-output stage: dim = unit variance per '
-                         'dimension (a column weighs as much as its number of '
-                         'categories); column = every column contributes '
-                         'equal total variance (the paper equal-per-feature '
-                         'weighting, kept joint)')
-    ap.add_argument('--cka-latent', choices=['mu', 'z'], default='mu',
-                    help='latent-stage CKA^T on the encoder means (mu) or on '
-                         'the sampled latent z = mu + sigma*eps the decoder '
-                         'sees (q(z|x), as Eq. 10 writes it)')
-    ap.add_argument('--cka-kernel', choices=['linear', 'rbf', 'rff_lift'],
-                    default='linear',
-                    help="CKA^T kernel: 'linear' (Eq. 7), 'rbf' (Eqs. 5-6 with "
-                         "an RBF kernel over the activations) or 'rff_lift' "
-                         '(rows mapped by random Fourier features, then '
-                         'linear CKA^T)')
-    ap.add_argument('--cka-tokens', choices=['concat', 'per_token'],
-                    default='concat',
-                    help='latent and decoder stages: one CKA^T on all tokens '
-                         'concatenated, or CKA^T per token averaged (the '
-                         'paper does not say)')
-    ap.add_argument('--target-in-fairness',
-                    action=argparse.BooleanOptionalAction, default=None,
-                    help='include the target (income) in the detokenizer-'
-                         'stage and joint-stage fairness terms (paper: yes - '
-                         'every non-protected column is a potential target); '
-                         "off keeps the income rates' link to sex out of reach "
-                         'of the fairness terms')
-    ap.add_argument('--s-decode', choices=['argmax', 'sample'], default=None,
-                    help='decode the generated sex by argmax (paper) or by '
-                         'sampling its probabilities. Under the batch-mean '
-                         'L_S every row sits near 0.5, so argmax follows a '
-                         'small tilt that can track or invert the true sex; '
-                         'sampling gives a random assignment')
-    ap.add_argument('--phase2-beta', default=None,
-                    help="KL weight of Phase 2's ELBO: a number (preset: "
-                         "1e-2), or 'carry' for the bank's final Phase 1 "
-                         "beta (read from BANK.json). The paper decays beta "
-                         'in Phase 1 and does not state its Phase-2 value')
-    ap.add_argument('--from-run', default=None,
-                    help='re-decode a saved run (TAG or path to '
-                         'adult_results/runs/TAG.pt) instead of training: '
-                         'its Phase-2 VAE and latents, decoded with this '
-                         '--s-decode and scored under this --tag. Data and '
-                         'training flags are taken from the saved run')
-    ap.add_argument('--score-collapsed', action='store_true',
-                    help='score a run that fails the collapse guard instead '
-                         'of stopping; it stays flagged collapsed, so the '
-                         'tables still skip it')
-    ap.add_argument('--no-save-run', action='store_true',
-                    help='do not save the Phase-2 VAE and decoded latents to '
-                         'adult_results/runs/TAG.pt (saved by default, for '
-                         '--from-run)')
     ap.add_argument('--diff-epochs', type=int, default=2000)
     ap.add_argument('--diff-batch', type=int, default=4096)
-    ap.add_argument('--tier1', action='store_true',
-                    help='skip diffusion: decode z = mu + sigma*eps from the '
-                         'real training rows (reconstruct-through-the-latent). '
-                         'Screens fairness against each row\'s TRUE sex; '
-                         'privacy metrics are meaningless here and skipped')
     ap.add_argument('--phase1-checkpoint', default=None,
                     help='load a banked Phase-1 VAE (from --save-phase1) and '
                          'skip Phase 1; Phase 2 still runs')
     ap.add_argument('--save-phase1', default=None,
                     help='save the VAE after training (with --phase2-epochs 0: '
                          'bank Phase 1)')
-    ap.add_argument('--reject-invalid', type=int, default=0, metavar='N',
-                    help='rejection sampling: redraw rows that break any '
-                         'validity rule learned from the real training fold, '
-                         'up to N rounds (tier-1: fresh eps from the same '
-                         "row's posterior, keeping its source person; full "
-                         'pipeline: fresh latents from the diffusion model). '
-                         'Rows still invalid after N rounds are kept and '
-                         'counted. 0 = off')
+    ap.add_argument('--tier1', action='store_true',
+                    help='skip diffusion: decode z = mu + sigma*eps from the '
+                         'real training rows; scores fairness against each '
+                         "row's TRUE sex (privacy metrics skipped)")
+    ap.add_argument('--s-decode', choices=['argmax', 'sample'], default=None,
+                    help='decode the generated sex by argmax (paper) or by '
+                         'sampling its probabilities')
+    ap.add_argument('--from-run', default=None,
+                    help='re-decode a saved run (TAG or path to '
+                         'adult_results/runs/TAG.pt) instead of training, with '
+                         'this --s-decode, scored under this --tag')
     ap.add_argument('--score-csv', default=None,
                     help='score an external synthetic CSV (raw values, the '
                          'same columns) on this fold with all metrics, '
                          'without training (e.g. aim_fair/ outputs)')
-    ap.add_argument('--latent-source', choices=['phase2', 'phase1'],
-                    default='phase2',
-                    help='diagnostic: latents for decoding (tier-1) and for '
-                         'diffusion training from the Phase-2 encoder (normal) '
-                         'or the Phase-1 bank encoder (a pipeline that saved '
-                         'its latents before Phase 2), decoded by Phase 2')
-    ap.add_argument('--cat-decode', choices=['argmax', 'sample'],
-                    default='argmax',
-                    help='decode EVERY categorical column by argmax '
-                         "(TabSyn) or by sampling from the decoder's softmax "
-                         '(overrides --s-decode for sex)')
-    ap.add_argument('--repair-invalid', action='store_true',
-                    help='constrained decoding: fix rows that break a '
-                         'categorical validity rule with the edits the '
-                         "decoder's own probabilities find most likely "
-                         '(keeps every row; post-processing). Uses the same '
-                         'rules as --reject-invalid (DP rules under DP)')
-    ap.add_argument('--repair-protect', choices=['sex', 'none'],
-                    default='sex',
-                    help='columns --repair-invalid may not edit: sex (so a '
-                         'repair cannot re-link a proxy to it) or none')
-    ap.add_argument('--repair-max-edits', type=int, default=3)
+    ap.add_argument('--mask-proxies', action='store_true',
+                    help='score against the real data with sex-specific '
+                         'category levels merged (P(S|level) >= 0.95, e.g. '
+                         'Husband/Wife): for tables released with merged levels')
     ap.add_argument('--mask-label', default='MASK',
                     help='name of the merged category (--mask-proxies)')
-    ap.add_argument('--repair-tau', type=float, default=0.0,
-                    help='COMPARISON BASELINE: scramble every non-target '
-                         "column's link to sex with strength tau in [0, 1] "
-                         "before training, keeping each column's overall "
-                         'distribution (Feldman et al. repair)')
+    ap.add_argument('--score-collapsed', action='store_true',
+                    help='score a run that fails the collapse guard instead '
+                         'of stopping; it stays flagged collapsed')
+    ap.add_argument('--no-save-run', action='store_true',
+                    help='do not save the Phase-2 VAE and decoded latents to '
+                         'adult_results/runs/TAG.pt (saved by default, for '
+                         '--from-run)')
     args = ap.parse_args()
-    if args.dp_group_sigmas and args.dp_noise is None:
-        args.dp_noise = 0.0   # placeholder: train_flip sets sigma_global
     # --from-run: everything except the decoding and the output tag comes
     # from the saved run, so the data preparation matches it exactly
     saved_run = None
@@ -558,15 +320,10 @@ def main():
         saved_run = torch.load(path, map_location='cpu', weights_only=True)
         for k, v in saved_run['args'].items():
             if k not in ('tag', 's_decode', 'from_run', 'no_save_run',
-                         'score_collapsed', 'reject_invalid',
-                         'repair_invalid', 'repair_protect',
-                         'repair_max_edits', 'dp_rules_noise',
-                         'cat_decode', 'latent_source'):
+                         'score_collapsed') and hasattr(args, k):
                 setattr(args, k, v)
-    # unset method flags come from the preset
-    for k, v in PRESETS[args.preset].items():
-        if getattr(args, k, None) is None:
-            setattr(args, k, v)
+    if args.s_decode is None:
+        args.s_decode = PRESETS[args.preset]['s_decode']
 
     tag = args.tag or f'lam{args.lam:g}_fold{args.fold}'
     t0 = time.time()
@@ -605,17 +362,6 @@ def main():
     categories = [len(enc[c]) for c in CATEGORICAL]
     X_num = torch.tensor(data['train_num'])
     X_cat = torch.tensor(data['train_cat'])
-    # Repair baseline: the generator trains on a scrambled copy;
-    # data['train_*'] stays unrepaired so quality is measured against the
-    # real population.
-    if args.repair_tau:
-        rep_n, rep_c = repair_toward_independence(
-            data['train_num'], data['train_cat'], s_idx, args.repair_tau,
-            exclude=(t_idx,), seed=args.split_seed)
-        X_num, X_cat = torch.tensor(rep_n), torch.tensor(rep_c)
-        changed = float((rep_c != data['train_cat']).any(axis=1).mean())
-        print(f'  scrambling repair tau={args.repair_tau:g}: {changed:.3f} '
-              f'of training rows got a new category')
     params.update(TARGET_IDX=t_idx)
     print(f'[{tag}] train={len(X_num)} test={len(data["test_num"])} '
           f'categories={categories} sex={list(enc[SENSITIVE])}')
@@ -634,23 +380,8 @@ def main():
                              factor=params.get('FACTOR', 8),
                              bias=True).to(device)
         vae.load_state_dict(saved_run['vae'])
-        if getattr(args, 'mask_s_token', False):
-            vae.VAE.s_token_mask = X_num.shape[1] + s_idx
         accountant = group_mech = None
     else:
-        if args.phase2_beta != 'carry':
-            params['PHASE2_BETA'] = float(args.phase2_beta)
-            print(f"  Phase 2 beta fixed at {params['PHASE2_BETA']:.2e}")
-        elif args.phase1_checkpoint:
-            # a single Phase-1 + Phase-2 run carries beta on its own
-            side = args.phase1_checkpoint + '.json'
-            if not os.path.exists(side):
-                raise SystemExit(f'--phase2-beta carry: {side} not found '
-                                 "(the bank's final Phase 1 beta)")
-            with open(side) as f:
-                params['PHASE2_BETA'] = json.load(f)['phase1_final_beta']
-            print(f"  Phase 2 beta carried from the bank: "
-                  f"{params['PHASE2_BETA']:.2e}")
         # train_flip skips Phase 1 only when the bank file exists
         bank_loaded = bool(args.phase1_checkpoint and
                            os.path.exists(args.phase1_checkpoint))
@@ -737,38 +468,18 @@ def main():
             raise SystemExit('--score-csv: categories not in the real data')
         syn_cat = syn_cat.astype(np.int64)
         stats_budgets, diff_acc = [], None
-        reject_info = repair_info = rules_rdp = None
     else:
         # ---- Stage 2: diffusion (or tier-1 decode) ------------------------------
         vae.eval()
         with torch.no_grad():
             enc_out = vae.forward_with_stages(X_num.to(device), X_cat.to(device))
-        if args.latent_source == 'phase1':
-            # stage-mismatch diagnostic: latents from the Phase-1 bank encoder
-            # (what diffusion would learn if its latents were saved after
-            # Phase 1), decoded by this run's Phase-2 decoder
-            if not (args.phase1_checkpoint and
-                    os.path.exists(args.phase1_checkpoint)):
-                raise SystemExit('--latent-source phase1 needs --phase1-checkpoint')
-            bank_vae = demo.Model_VAE(params['NUM_LAYERS'], X_num.shape[1],
-                                      categories, params['D_TOKEN'], n_head=1,
-                                      factor=params.get('FACTOR', 8),
-                                      bias=True).to(device)
-            bank_vae.load_state_dict(torch.load(args.phase1_checkpoint,
-                                                map_location=device))
-            bank_vae.eval()
-            with torch.no_grad():
-                enc_out = bank_vae.forward_with_stages(X_num.to(device),
-                                                       X_cat.to(device))
-            print('  latents from the Phase-1 bank encoder, decoded by Phase 2')
-        # under DP the range-clip bounds are released only with
-        # --dp-clip-release (otherwise epsilon covers the VAE only)
-        clip_release = args.dp_noise is None or args.dp_clip_release
-        decode_kw = dict(X_num=X_num if clip_release else None,
-                         params=params if clip_release else None,
+        # under DP the numeric range-clip bounds are not released (epsilon
+        # covers the VAE only, as in the paper); decoding keeps the >= 0 floor
+        no_dp = args.dp_group_sigmas is None
+        decode_kw = dict(X_num=X_num if no_dp else None,
+                         params=params if no_dp else None,
                          num_floor=(-data['means'] / data['stds']).values,
-                         sample_idx=s_idx if args.s_decode == 'sample' else None,
-                         sample_all=args.cat_decode == 'sample')
+                         sample_idx=s_idx if args.s_decode == 'sample' else None)
         if saved_run is not None:
             print(f'\n[Stage 2] SKIPPED (--from-run): saved latents, '
                   f'--s-decode {args.s_decode}')
@@ -802,95 +513,6 @@ def main():
             syn_num, syn_cat, stats_budgets = full.decode_latents(
                 vae, z_dec, device, **decode_kw)
 
-        # Rejection sampling (--reject-invalid N): every rule type, sex-linked
-        # implications included, scored on the released (rounded) table as the
-        # validity metric is.
-        reject_info = repair_info = None
-        rules_rdp = None
-        if args.reject_invalid or args.repair_invalid:
-            if (args.reject_invalid and saved_run is not None
-                    and not args.tier1):
-                raise SystemExit('--reject-invalid with --from-run needs a tier-1 '
-                                 'run (the diffusion model is not saved)')
-            def _raw(n):
-                return n * data['stds'].values + data['means'].values
-            schema_r = demo.infer_numeric_schema(_raw(data['train_num']), NUMERIC)
-            if args.dp_noise is not None:
-                # under DP the rules come from DP-noised counts, charged to eps
-                if args.dp_rules_noise is None:
-                    raise SystemExit('--reject-invalid / --repair-invalid under '
-                                     'DP need --dp-rules-noise')
-                rules_r, rules_rdp = fit_validity_rules_dp(
-                    _raw(data['train_num']), data['train_cat'], NUMERIC,
-                    CATEGORICAL, args.dp_rules_noise,
-                    [enc[c] for c in CATEGORICAL], seed=args.seed)
-                print(f"  DP validity rules: {len(rules_r['fd'])} fd, "
-                      f"{len(rules_r['pair'])} pair, "
-                      f"{len(rules_r['integer'])} integer")
-            else:
-                rules_r = fit_validity_rules(_raw(data['train_num']),
-                                             data['train_cat'], NUMERIC,
-                                             CATEGORICAL,
-                                             [enc[c] for c in CATEGORICAL])
-
-            def _invalid(n, c):
-                df = demo.decode_synthetic_data(n, c, data['means'], data['stds'],
-                                                enc, num_schema=schema_r,
-                                                schema_bounds=args.dp_noise is None)
-                codes = np.stack([df[k].astype(str).map(
-                    {str(v): i for i, v in enumerate(enc[k])}).values
-                    for k in CATEGORICAL], axis=1).astype(int)
-                return invalid_rows(rules_r, df[NUMERIC].values.astype(float),
-                                    codes)
-            z_dec = torch.as_tensor(z_dec).to(device)
-        if args.repair_invalid:
-            # constrained decoding with the decoder's per-column probabilities
-            with torch.no_grad():
-                _, rc = vae.Reconstructor(vae.VAE.decoder(z_dec[:, 1:]))
-                probs = [torch.softmax(c_, -1).cpu().numpy() for c_ in rc]
-            before = float(_invalid(syn_num, syn_cat).mean())
-            protect = (s_idx,) if args.repair_protect == 'sex' else ()
-            syn_cat, rinfo = constrained_repair(syn_cat, probs, rules_r, protect,
-                                                args.repair_max_edits)
-            after = float(_invalid(syn_num, syn_cat).mean())
-            repair_info = {'invalid_before': before, 'invalid_after': after,
-                           'rows_changed': rinfo['rows_changed'],
-                           'edits': {CATEGORICAL[j]: n_ for j, n_
-                                     in rinfo['edits'].items()},
-                           'protect': args.repair_protect}
-            print(f'  constrained repair: invalid rows {before:.3f} -> '
-                  f'{after:.3f}; {rinfo["rows_changed"]:.3f} of rows edited '
-                  f'{repair_info["edits"]}')
-        if args.reject_invalid:
-            bad = _invalid(syn_num, syn_cat)
-            start, rounds = float(bad.mean()), 0
-            for rounds in range(1, args.reject_invalid + 1):
-                idx = np.where(bad)[0]
-                if len(idx) == 0:
-                    rounds -= 1
-                    break
-                with torch.no_grad():
-                    if args.tier1:
-                        mu = enc_out['mu_z'][idx]
-                        sd = torch.exp(0.5 * enc_out['std_z'][idx])
-                        z_new = mu + sd * torch.randn_like(sd)
-                    else:
-                        z_new = full.sample_from_diffusion(
-                            diff_model, z_mean, len(idx), z_dec.shape[1:],
-                            dparams, device)
-                    n_new, c_new, _ = full.decode_latents(
-                        vae, z_new, device, **decode_kw,
-                        bounds=getattr(full.decode_latents, 'last_bounds', None))
-                ok = ~_invalid(n_new, c_new)
-                fix = idx[ok]
-                syn_num[fix], syn_cat[fix] = n_new[ok], c_new[ok]
-                z_dec[torch.as_tensor(fix, device=device)] =                 z_new[torch.as_tensor(np.where(ok)[0], device=device)]
-                bad[fix] = False
-            reject_info = {'invalid_before': start, 'invalid_after':
-                           float(bad.mean()), 'rounds': rounds}
-            print(f'  rejection sampling: invalid rows {start:.3f} -> '
-                  f'{bad.mean():.3f} after {rounds} round(s)')
-
         # Save the Phase-2 VAE and the decoded latents, so the run can be
         # re-decoded (--from-run, another --s-decode) without retraining or
         # re-running diffusion. Never fails the run.
@@ -913,7 +535,7 @@ def main():
     syn_df = demo.decode_synthetic_data(syn_num, syn_cat, data['means'],
                                         data['stds'], enc,
                                         num_schema=num_schema,
-                                        schema_bounds=args.dp_noise is None)
+                                        schema_bounds=args.dp_group_sigmas is None)
     os.makedirs(OUT_DIR, exist_ok=True)
     syn_df.to_csv(os.path.join(OUT_DIR, f'{tag}_synthetic.csv'), index=False)
 
@@ -1087,11 +709,6 @@ def main():
             'downstream_auc_no_sex': util_auc_no_sex,
             'outcome_replication': rel, 'match_valid': match_valid,
             'impossible_combination_rate': imposs,
-            'rejection_sampling': reject_info,
-            'constrained_repair': repair_info,
-            'dp_rules_eps': (compose_rdp_budgets([rules_rdp],
-                                                 params['DP_DELTA'])[0]
-                             if rules_rdp is not None else None),
             'impossible_combination_rate_real': imposs_real,
             'syn_income_rate': syn_income_rate,
             'real_income_rate': real_income_rate},
@@ -1104,8 +721,6 @@ def main():
         if diff_acc is not None and diff_acc.steps > 0:
             budgets.append(diff_acc.get_rdp_curve())
         budgets.extend(stats_budgets)
-        if rules_rdp is not None:
-            budgets.append(rules_rdp)
         if bank_rdp is not None:
             budgets.append(bank_rdp)
         eps_total, _ = compose_rdp_budgets(budgets, params['DP_DELTA'])

@@ -10,7 +10,12 @@ faithful reproduction of FLIP vs FLIP's reported numbers, at epsilon 3.
                     --score-collapsed --no-save-run --tag flipfaithful_e3_f0_lam4
   FLIP paper  values read off the paper's Fig. 3 (Adult, lambda 4, eps 3)
 
-Writes results/final_comparison.csv and results/final_comparison.png.
+Also writes the AIM-vs-best-VAE table (RESULTS.md): AIM hybrid and plain AIM
+(run_final.sh) vs the best VAE process (scripts/run_paper_grid.sh with
+PRESET=final, scripts/run_best_vae_dp.sh), mean and sd across folds, with
+AIM refits averaged within a fold first. Missing runs are skipped.
+
+Writes results/final_comparison.{csv,png} and results/final_aim_vs_vae.csv.
 
     python aim_fair/final_chart.py
 """
@@ -64,6 +69,57 @@ def load(tag):
         return json.load(fh)
 
 
+VAE_TABLE = [   # name, tag pattern, refits
+    ('AIM hybrid, eps 3 (private bins)', 'aimfinal_e3_f{f}_r{r}', 10),
+    ('AIM plain, eps 3 (private bins)', 'aimfinalplain_e3_f{f}_r{r}', 10),
+    ('AIM hybrid, eps 3 (public bins)', 'aimpublic_e3_f{f}_r{r}', 10),
+    ('VAE final lambda 4, no DP', 'final_f{f}_lam4', 1),
+    ('VAE final lambda 4, eps 3 (nominal)', 'best_vae_e3_f{f}_lam4', 1),
+]
+EXTRA = [   # metrics of the AIM-vs-VAE table beyond METRICS
+    ('tstr_folded', lambda d: d['paper_metrics']['tstr_sex_ber_folded']),
+    ('income_rate', lambda d: d['paper_metrics']['syn_income_rate']),
+    ('num_w1', lambda d: d['fidelity']['num_w1_mean']),
+]
+
+
+def aim_vs_vae(patterns=VAE_TABLE):
+    """results/final_aim_vs_vae.csv from whatever runs exist."""
+    getters = [(k, g) for k, _, _, g in METRICS] + EXTRA
+    rows = []
+    for name, pattern, refits in patterns:
+        per_fold = []
+        for f in range(3):
+            v = []
+            for r in range(refits):
+                path = os.path.join(ROOT, 'adult_results',
+                                    pattern.format(f=f, r=r) + '.json')
+                if os.path.exists(path):
+                    d = load(pattern.format(f=f, r=r))
+                    v.append([g(d) for _, g in getters])
+            if v:
+                per_fold.append(np.mean(v, axis=0))
+        if not per_fold:
+            continue
+        per_fold = np.array(per_fold)
+        sd = (per_fold.std(0, ddof=1) if len(per_fold) > 1
+              else np.zeros(per_fold.shape[1]))
+        row = {'method': name, 'folds': len(per_fold)}
+        for (k, _), m, e in zip(getters, per_fold.mean(0), sd):
+            row[k], row[k + '_sd'] = round(float(m), 4), round(float(e), 4)
+        rows.append(row)
+        print(f'{name:38s} folds={len(per_fold)} parity={row["income_parity"]:.3f} '
+              f'EO={row["eo_gap"]:.3f} AUC={row["auc"]:.3f} '
+              f'validity={row["validity"]:.3f}')
+    if rows:
+        os.makedirs(os.path.join(ROOT, 'results'), exist_ok=True)
+        with open(os.path.join(ROOT, 'results', 'final_aim_vs_vae.csv'), 'w',
+                  newline='') as fh:
+            w = csv.DictWriter(fh, list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--aim-pattern', default='aimfinal_e3_f{f}_r{r}')
@@ -71,6 +127,14 @@ def main():
     ap.add_argument('--flip-tag', default='flipfaithful_e3_f0_lam4')
     a = ap.parse_args()
 
+    aim_vs_vae()
+    try:
+        load(a.flip_tag)
+        load(a.aim_pattern.format(f=0, r=0))
+    except OSError:
+        print('final chart skipped: run run_final.sh and the FLIP '
+              'reproduction scoring first (see the module docstring)')
+        return
     folds = []
     for f in range(3):
         runs = [load(a.aim_pattern.format(f=f, r=r)) for r in range(a.refits)]

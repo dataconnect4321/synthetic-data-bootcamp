@@ -1,7 +1,7 @@
 # Fair, private synthetic Adult data: from FLIP to AIM with marginal repair
 
 *Status: final setting fixed; 3-fold results below (`aim_fair/run_final.sh`).
-Head-to-head with our best VAE method: `FINAL_COMPARISON.md`.*
+All results, including the head-to-head with our best VAE method: `RESULTS.md`.*
 
 ## Why we moved away from FLIP
 

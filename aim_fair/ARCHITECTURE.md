@@ -42,7 +42,7 @@ flowchart TD
     DECODE["Decode bins to values<br/>(private within-bin shares)<br/><i>adult_domain.decode</i>"]
     OUT[("Synthetic table<br/><i>aim_e3_fF_rR_synthetic.csv</i>")]
     SCORE["Score with the VAE's metrics<br/><i>run_adult_flip.py --score-csv --mask-proxies</i>"]
-    CMP["AIM vs VAE table<br/><i>summarize.py -> FINAL_COMPARISON.md</i>"]
+    CMP["AIM vs VAE table<br/><i>final_chart.py -> RESULTS.md</i>"]
 
     REAL --> DP
     SCHEMA --> DP

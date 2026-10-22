@@ -1,7 +1,7 @@
 #!/bin/bash
 # Best VAE process (FLIP + output-level joint stage, --preset final, lambda 4)
 # under DP: paper-style Eq. 13 per-group noise on the VAE (nominal epsilon 3;
-# sigmas from `python calibrate_dp.py --eq13 --coupled paper --eps 3 --fold 0`,
+# sigmas from `python calibrate_dp.py --eps 3 --fold 0`,
 # which reserves 10% of epsilon for an optional DP rule release). Banks a DP Phase 1
 # per fold, then runs the full pipeline (diffusion 500 epochs) at lambda 0
 # and 4. The no-DP version is:
@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 export PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8
 PY=${PY:-python}
 FOLDS=${FOLDS:-"0"}
-DP="--dp-coupled paper --dp-group-sigmas 44.6096,21.3794"
+DP="--dp-group-sigmas 44.6096,21.3794"
 L=adult_results/logs; C=adult_results/ckpt; mkdir -p $L $C
 
 for f in $FOLDS; do

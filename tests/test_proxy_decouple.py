@@ -82,10 +82,6 @@ def test_mask_removes_deterministic_proxy_without_impossible_rows():
     assert impossible_combination_rate(out, cat, s_idx=0)['any'] == 0.0
 
 
-# --------------------------------------------------------------------------
-# Scrambling repair (--repair-tau)
-# --------------------------------------------------------------------------
-
 def _skewed(n=3000, seed=0):
     rng = np.random.default_rng(seed)
     s = rng.integers(0, 2, n)
@@ -96,36 +92,3 @@ def _skewed(n=3000, seed=0):
     return num, np.stack([s, occ, other], axis=1)
 
 
-def test_repair_tau_zero_is_identity():
-    from tabsyn.vae.proxy_decouple import repair_toward_independence
-    num, cat = _skewed()
-    n2, c2 = repair_toward_independence(num, cat, 0, tau=0.0)
-    assert (c2 == cat).all() and np.allclose(n2, num)
-
-
-def test_repair_full_removes_dependence_and_keeps_shares():
-    from tabsyn.vae.proxy_decouple import repair_toward_independence
-    num, cat = _skewed()
-    n2, c2 = repair_toward_independence(num, cat, 0, tau=1.0)
-    s = cat[:, 0]
-    # pooled shares preserved exactly, S untouched
-    assert (np.bincount(c2[:, 1], minlength=3)
-            == np.bincount(cat[:, 1], minlength=3)).all()
-    assert (c2[:, 0] == s).all()
-    # per-group shares now equal (up to rounding)
-    p1 = np.bincount(c2[s == 1, 1], minlength=3) / (s == 1).sum()
-    p0 = np.bincount(c2[s == 0, 1], minlength=3) / (s == 0).sum()
-    assert np.abs(p1 - p0).max() < 0.01
-    # numeric group means equalized
-    assert abs(n2[s == 1, 0].mean() - n2[s == 0, 0].mean()) < 0.05
-
-
-def test_repair_partial_tau_is_in_between():
-    from tabsyn.vae.proxy_decouple import repair_toward_independence
-    num, cat = _skewed()
-    s = cat[:, 0]
-    def gap(c):
-        return abs((c[s == 1, 1] == 0).mean() - (c[s == 0, 1] == 0).mean())
-    g0 = gap(cat)
-    g5 = gap(repair_toward_independence(num, cat, 0, tau=0.5)[1])
-    assert 0.4 * g0 < g5 < 0.6 * g0

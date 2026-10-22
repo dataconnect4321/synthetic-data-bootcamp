@@ -2,7 +2,7 @@
 # Runs for the paper's Fig. 3 layout on Adult (paper_heatmap_compare.py):
 # FLIP as published, fold 0, full pipeline, lambda 0/2/4/8/12 x epsilon
 # inf/3/2/1. DP: Eq. 13 per-group noise, paper-style coupling, VAE only
-# (nominal epsilon; sigmas from calibrate_dp.py --eq13 --coupled paper).
+# (nominal epsilon; sigmas from calibrate_dp.py).
 # Every cell is decoded twice from the same model: argmax sex (TabSyn) and
 # sampled sex (--s-decode sample). Tier-1 runs give the true-sex BER panel.
 # One run at a time; re-running skips finished runs.
@@ -14,9 +14,9 @@ PY=${PY:-python}
 L=adult_results/logs; C=adult_results/ckpt; mkdir -p $L $C
 dp() {
   case "$1" in
-    3) echo "--dp-coupled paper --dp-group-sigmas 44.6096,21.3794";;
-    2) echo "--dp-coupled paper --dp-group-sigmas 65.6506,31.4526";;
-    1) echo "--dp-coupled paper --dp-group-sigmas 128.7097,61.6466";;
+    3) echo "--dp-group-sigmas 44.6096,21.3794";;
+    2) echo "--dp-group-sigmas 65.6506,31.4526";;
+    1) echo "--dp-group-sigmas 128.7097,61.6466";;
   esac
 }
 run() {   # tag, flags...

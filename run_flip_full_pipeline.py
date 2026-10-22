@@ -1,30 +1,14 @@
-"""Run the FULL FLIP pipeline (VAE + latent diffusion) on a sample of
-bmo_nationwide.csv and evaluate fidelity / privacy / fairness.
+"""Stage 2 of FLIP: TabSyn's latent diffusion model, trained on the VAE's
+latents, sampled, and decoded back to records (used by run_adult_flip.py).
 
-This is the complete two-stage TabSyn pipeline with FLIP fairness/privacy
-training, unlike run_flip_demo.py which uses a Gaussian stand-in for the
-latent prior:
-
-  Stage 1 (FLIP VAE):   train the TabSyn VAE with the FLIP objectives
-                        (two-phase: quality, then disentanglement),
-                        balanced group sampling, and optional DP-SGD.
-  Stage 2 (diffusion):  train TabSyn's MLPDiffusion denoiser (EDM
-                        parameterization) on the VAE's latents, then
-                        SAMPLE new latents from the diffusion prior -
-                        this is TabSyn's real generation mechanism.
-  Decode + evaluate:    decode sampled latents to records, score
-                        fidelity/privacy/fairness, and emit the HTML
-                        report + synthetic CSV (same outputs as the
-                        demo).
-
-Reuses the data loading, FLIP training, metrics, and HTML report from
-run_flip_demo.py so both pipelines stay directly comparable.
+  train_diffusion        TabSyn's MLPDiffusion denoiser (EDM) on the latents
+  sample_from_diffusion  new latents from the diffusion prior
+  decode_latents         latents -> numeric and categorical columns
 """
 
 import os
 import sys
-import copy
-import argparse
+
 import numpy as np
 import torch
 
@@ -32,19 +16,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, 'tabsyn-main', 'tabsyn-main'))
 
-# Reuse everything from the demo script
-from run_flip_demo import (
-    TRADEOFF_PARAMS, SENSITIVE_COL, TARGET_COL, RACE_GROUPS,
-    NUMERIC_COLS, CATEGORICAL_COLS, DATA_PATH,
-    load_sample, train_flip, fidelity_metrics, privacy_metrics,
-    fairness_metrics, decode_synthetic_data, generate_html_report,
-    clip_nonnegative, print_paper_metrics, infer_numeric_schema,
-)
-
-from tabsyn.model import MLPDiffusion, Model
-from tabsyn.diffusion_utils import sample as edm_sample
-from tabsyn.vae.flip_fairness import (dp_release_mean_std, RDPAccountant,
-                                      compose_rdp_budgets)
+from run_flip_demo import clip_nonnegative  # noqa: E402
+from tabsyn.model import MLPDiffusion, Model  # noqa: E402
+from tabsyn.diffusion_utils import sample as edm_sample  # noqa: E402
+from tabsyn.vae.flip_fairness import (dp_release_mean_std,  # noqa: E402
+                                      RDPAccountant)
 
 # ==========================================================================
 # DIFFUSION PARAMETERS - Stage 2 knobs
@@ -109,21 +85,7 @@ DIFFUSION_PARAMS = {
     'EARLY_STOP_PATIENCE': None,
 }
 
-SYNTHETIC_DATA_PATH = os.path.join(HERE, 'Data',
-                                   'flip_full_synthetic_bmo_nationwide.csv')
-REPORT_PATH = os.path.join(HERE, 'flip_full_report.html')
 
-# Full-dataset mode: train on ALL rows of the three usable race groups
-# (~24.7k rows instead of the 12k SAMPLE_SIZE default) and write to
-# distinct output paths so the sample-size comparison is preserved.
-SYNTHETIC_DATA_PATH_ALL = os.path.join(
-    HERE, 'Data', 'flip_full_synthetic_bmo_nationwide_all.csv')
-REPORT_PATH_ALL = os.path.join(HERE, 'flip_full_report_all.html')
-
-
-# ==========================================================================
-# Stage 2: latent diffusion (TabSyn's real generation mechanism)
-# ==========================================================================
 def train_diffusion(mu, std=None, params=None, device=None):
     """Train TabSyn's MLPDiffusion denoiser (EDM preconditioning) on the
     VAE latents.
@@ -356,172 +318,3 @@ def decode_latents(vae_model, latents, device, X_num=None, params=None,
 # ==========================================================================
 # Main
 # ==========================================================================
-def main():
-    parser = argparse.ArgumentParser(
-        description='Full FLIP pipeline (VAE + latent diffusion) on HMDA data')
-    parser.add_argument('--all', action='store_true',
-                        help='Train on the ENTIRE filtered dataset (all rows '
-                             'of the three usable race groups, ~24.7k rows) '
-                             'instead of the SAMPLE_SIZE subsample. Outputs '
-                             'go to *_all.csv / *_all.html.')
-    args = parser.parse_args()
-
-    params = copy.deepcopy(TRADEOFF_PARAMS)
-    dparams = copy.deepcopy(DIFFUSION_PARAMS)
-    if args.all:
-        # Use every row of the filtered groups
-        params['SAMPLE_SIZE'] = None
-        syn_path = SYNTHETIC_DATA_PATH_ALL
-        report_path = REPORT_PATH_ALL
-    else:
-        syn_path = SYNTHETIC_DATA_PATH
-        report_path = REPORT_PATH
-
-    device = torch.device(params['DEVICE'])
-    if device.type == 'cuda':
-        print(f'Using GPU: {torch.cuda.get_device_name(0)}')
-    else:
-        print(f'Using {device.type.upper()}')
-    print('=' * 70)
-    print('FULL FLIP pipeline (VAE + latent diffusion) on bmo_nationwide.csv'
-          + (' [ENTIRE DATASET]' if args.all else ''))
-    print('=' * 70)
-    print('\nStage-1 (VAE) tradeoff parameters:')
-    for k, v in params.items():
-        print(f'  {k:<24} = {v}')
-    print('\nStage-2 (diffusion) parameters:')
-    for k, v in dparams.items():
-        print(f'  {k:<24} = {v}')
-
-    # ---- Data -----------------------------------------------------------
-    X_num, X_cat, categories, s_idx, t_idx, encoders, df, num_means, num_stds \
-        = load_sample(params)
-    print(f'\nSample: {len(X_num)} rows, {X_num.shape[1]} numeric, '
-          f'{X_cat.shape[1]} categorical (categories={categories})')
-    print(f'Protected attribute: {SENSITIVE_COL} '
-          f'{dict(zip(range(len(encoders[SENSITIVE_COL])), encoders[SENSITIVE_COL]))}')
-
-    # ---- Stage 1: FLIP VAE ----------------------------------------------
-    print('\n[Stage 1] Training FLIP VAE...')
-    vae_model, accountant, group_mech = train_flip(X_num, X_cat, categories,
-                                                   s_idx, params, device)
-
-    # ---- Stage 2: latent diffusion --------------------------------------
-    print('\n[Stage 2] Encoding training data and training latent diffusion...')
-    vae_model.eval()
-    with torch.no_grad():
-        enc = vae_model.forward_with_stages(X_num.to(device),
-                                            X_cat.to(device))
-    mu_z = enc['mu_z']                       # (n, tokens, d)
-    latent_shape = mu_z.shape[1:]
-    mu_flat = mu_z.reshape(mu_z.shape[0], -1)             # (n, tokens*d)
-    # forward_with_stages' 'std_z' is the encoder's LOG-VARIANCE
-    std_flat = torch.exp(0.5 * enc['std_z']).reshape(mu_flat.shape)
-    print(f'  latents: {tuple(mu_flat.shape)}')
-
-    diffusion_model, z_mean, diff_accountant = train_diffusion(
-        mu_flat, std_flat, dparams, device)
-
-    # ---- Sample + decode -------------------------------------------------
-    n_gen = dparams['N_GEN'] or len(X_num)
-    print(f'\nSampling {n_gen} latents from the diffusion prior '
-          f'({dparams["SAMPLE_STEPS"]} NFE)...')
-    sampled = sample_from_diffusion(diffusion_model, z_mean, n_gen,
-                                    latent_shape, dparams, device)
-    syn_num, syn_cat, stats_budgets = decode_latents(vae_model, sampled,
-                                                      device, X_num=X_num,
-                                                      params=params,
-                                                      num_means=num_means,
-                                                      num_stds=num_stds)
-
-    # ---- Export ----------------------------------------------------------
-    # clip/round numerics to the real columns' format; real min/max is not
-    # released under DP (the decoder's DP range clip applies instead)
-    num_schema = infer_numeric_schema(
-        X_num.numpy() * num_stds.values + num_means.values,
-        list(num_means.index))
-    synthetic_df = decode_synthetic_data(
-        syn_num, syn_cat, num_means, num_stds, encoders,
-        num_schema=num_schema, schema_bounds=not params.get('USE_DP'))
-    os.makedirs(os.path.dirname(syn_path), exist_ok=True)
-    synthetic_df.to_csv(syn_path, index=False)
-    print(f'Synthetic data ({len(synthetic_df)} rows) saved to {syn_path}')
-
-    # ---- Evaluate ---------------------------------------------------------
-    fid = fidelity_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat,
-                           encoders)
-    priv = privacy_metrics(X_num.numpy(), syn_num, X_cat.numpy(), syn_cat)
-    fair = fairness_metrics(X_cat.numpy(), syn_cat, t_idx, s_idx, encoders,
-                           real_num=X_num.numpy(), syn_num=syn_num)
-
-    eps = None
-    eps_group = None
-    eps_diffusion = None
-    eps_total = None
-    if accountant is not None:
-        eps, alpha = accountant.get_privacy_spent()
-    if group_mech is not None and group_mech.steps > 0:
-        eps_group, _ = group_mech.get_privacy_spent(params['DP_DELTA'])
-    if diff_accountant is not None and diff_accountant.steps > 0:
-        eps_diffusion, _ = diff_accountant.get_privacy_spent()
-    # Compose ALL budgets into the true end-to-end guarantee: VAE
-    # DP-SGD + fairness-gradient mechanism + statistics releases +
-    # diffusion DP-SGD. Valid RDP composition sums the divergence at
-    # each alpha and converts once - adding per-mechanism epsilons
-    # (the old 'eps + eps_diffusion' line) is NOT a valid rule.
-    if accountant is not None:
-        budgets = [accountant.get_rdp_curve()]
-        if group_mech is not None and group_mech.steps > 0:
-            budgets.append(group_mech.get_rdp_curve())
-        if diff_accountant is not None and diff_accountant.steps > 0:
-            budgets.append(diff_accountant.get_rdp_curve())
-        budgets.extend(stats_budgets)  # each release is its own budget
-        eps_total, _ = compose_rdp_budgets(budgets, params['DP_DELTA'])
-
-    print('\n' + '=' * 70)
-    print('RESULTS (full pipeline: FLIP VAE + latent diffusion)')
-    print('=' * 70)
-    print(f'\n--- FIDELITY (lower w1/TV/corr-delta = better) ---')
-    print(f'  Numeric Wasserstein-1 (normalized): {fid["num_w1_mean"]:.4f}')
-    print(f'  Categorical TV distance:            {fid["cat_tv_mean"]:.4f}')
-    print(f'  Correlation-matrix delta:            {fid["corr_delta"]:.4f}')
-    print(f'\n--- PRIVACY ---')
-    print(f'  eps-identifiability (lower = more private): '
-          f'{priv["eps_identifiability"]:.4f}')
-    if eps is not None:
-        print(f'  DP guarantee (record-level, per-sample losses): '
-              f'(epsilon={eps:.2f}, delta={params["DP_DELTA"]})')
-        if eps_group is not None:
-            print(f'  DP guarantee (fairness-gradient mechanism):     '
-                  f'(epsilon={eps_group:.2f}, delta={params["DP_DELTA"]})')
-        if eps_diffusion is not None:
-            print(f'  DP guarantee (Stage 2 latent diffusion):        '
-                  f'(epsilon={eps_diffusion:.2f}, '
-                  f'delta={dparams["DP_DELTA"]})')
-        if eps_total is not None:
-            print(f'  TOTAL end-to-end epsilon (composed):           '
-                  f'(epsilon={eps_total:.2f}, delta={params["DP_DELTA"]})')
-    else:
-        print(f'  DP guarantee: disabled (USE_DP=False)')
-    print(f'\n--- FAIRNESS (origination rate by group) ---')
-    print(f'  Real:      {fair["real_rates"]}')
-    print(f'  Synthetic: {fair["syn_rates"]}')
-    print(f'  DP difference  real={fair["real_dp_diff"]:.4f} -> '
-          f'syn={fair["syn_dp_diff"]:.4f}  '
-          f'(gain {fair["fairness_gain"]:+.4f})')
-    print(f'  DP ratio       real={fair["real_dp_ratio"]:.4f} -> '
-          f'syn={fair["syn_dp_ratio"]:.4f}')
-    print_paper_metrics(fair)
-
-    # ---- HTML report ------------------------------------------------------
-    # Merge both parameter dicts so the report documents the full run.
-    report_params = copy.deepcopy(params)
-    report_params.update({f'diffusion.{k}': v for k, v in dparams.items()})
-    generate_html_report(report_params, fid, priv, fair, eps, encoders,
-                         synthetic_df, report_path=report_path,
-                         eps_group=eps_group)
-    print(f'\nHTML report saved to {report_path}')
-
-
-if __name__ == '__main__':
-    main()

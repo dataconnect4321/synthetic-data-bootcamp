@@ -1155,25 +1155,6 @@ def test_decoded_joint_loss_has_gradient():
     assert st['recon_x_num'].grad.abs().sum() > 0
 
 
-def test_decoded_joint_column_weighting_equalizes_columns():
-    from tabsyn.vae.flip_fairness import decoded_joint_rep, decoded_joint_loss
-    g = torch.Generator().manual_seed(0)
-    n = 512
-    st = {'recon_x_num': torch.randn(n, 2, generator=g),
-          'recon_x_cat': [torch.randn(n, 2, generator=g),     # protected
-                          torch.randn(n, 3, generator=g),
-                          torch.randn(n, 20, generator=g)]}
-    dim = decoded_joint_rep(st, s_idx=0)
-    col = decoded_joint_rep(st, s_idx=0, weighting='column')
-    assert torch.allclose(dim.var(0), torch.ones(25), atol=1e-3)
-    # per-column total variance: 1 each (2 numerics, then widths 3 and 20)
-    blocks = [slice(0, 1), slice(1, 2), slice(2, 5), slice(5, 25)]
-    for b in blocks:
-        assert abs(col[:, b].var(0).sum().item() - 1.0) < 1e-2
-    grp = (torch.arange(n) % 2).long()
-    assert torch.isfinite(decoded_joint_loss(st, grp, 0, weighting='column'))
-
-
 def test_marginal_guard_zero_on_identical_batch():
     from tabsyn.vae.flip_fairness import marginal_matching_penalty
     n = 1000
@@ -1206,7 +1187,6 @@ def test_marginal_guard_penalizes_vanishing_category():
     logits = torch.log(torch.tensor([[0.87, 0.13]])).repeat(n, 1)
     st = {'recon_x_num': X_num.clone(), 'recon_x_cat': [logits]}
     assert marginal_matching_penalty(st, X_num, X_cat).item() > 0.5
-
 
 
 # --------------------------------------------------------------------------
@@ -1276,34 +1256,6 @@ if __name__ == '__main__':
     sys.exit(1 if failures else 0)
 
 
-def test_latent_stage_on_sampled_z_reaches_sigma():
-    """latent='z' scores the decoder's sampled latent, so the latent stage
-    gets a gradient into the log-variance head; latent='mu' does not."""
-    torch.manual_seed(0)
-    x_num = torch.randn(40, 3)
-    x_cat = torch.stack([torch.arange(40) % 2, torch.randint(0, 4, (40,))], 1)
-    grads = {}
-    for latent in ('mu', 'z'):
-        torch.manual_seed(1)
-        model = _tiny_vae()
-        stages = model.forward_with_stages(x_num, x_cat)
-        assert stages['z'].shape == stages['mu_z'].shape
-        # latent stage only: detach the decoder-side stages
-        st = {'mu_z': stages['mu_z'], 'z': stages['z'],
-              'h': stages['h'].detach(),
-              'recon_x_num': stages['recon_x_num'].detach(),
-              'recon_x_cat': [c.detach() for c in stages['recon_x_cat']],
-              'recon_num_pre': stages['recon_num_pre'].detach()}
-        loss = multi_stage_disentanglement_loss(
-            st, x_cat[:, 0], s_idx=0, mean_weight=0.0, binary_w1=False,
-            center='row', num_stage='pre', latent=latent)
-        loss.backward()
-        grads[latent] = sum(p.grad.abs().sum().item()
-                            for p in model.VAE.encoder_logvar.parameters()
-                            if p.grad is not None)
-    assert grads['mu'] == 0 and grads['z'] > 0
-
-
 def test_eq13_sigma_global_and_groupwise_accountant():
     from tabsyn.vae.flip_fairness import (eq13_sigma_global,
                                           GroupwiseRDPAccountant,
@@ -1324,97 +1276,3 @@ def test_eq13_sigma_global_and_groupwise_accountant():
     assert acc.steps == 51 and acc.get_privacy_spent()[0] > 0
 
 
-def test_pooled_bias_centering_sees_mean_gap_sign():
-    """Row centering is blind to opposite group mean shifts; pooled centering
-    with a bias activation is not, and its loss rises with the gap."""
-    from tabsyn.vae.flip_fairness import disentanglement_loss
-    g = torch.Generator().manual_seed(0)
-    n, p = 400, 6
-    base = torch.randn(n, p, generator=g)
-    grp = (torch.arange(n) % 2).long()
-    delta = torch.tensor([1.5, -1.0, 0.5, 0.0, 0.8, -0.3])
-    shifted = base + torch.where(grp[:, None] == 1, delta, -delta)
-    same = disentanglement_loss(base, grp, center='pooled_bias')
-    diff = disentanglement_loss(shifted, grp, center='pooled_bias')
-    assert diff > same + 0.05              # loss = -CKA^T: higher = less similar
-    shifted.requires_grad_(True)
-    disentanglement_loss(shifted, grp, center='pooled_bias').backward()
-    assert torch.isfinite(shifted.grad).all() and shifted.grad.abs().sum() > 0
-
-
-def test_exclude_s_token_drops_one_token():
-    from tabsyn.vae.flip_fairness import multi_stage_disentanglement_loss
-    torch.manual_seed(0)
-    model = _tiny_vae()
-    x_num = torch.randn(40, 3)
-    x_cat = torch.stack([torch.arange(40) % 2, torch.randint(0, 4, (40,))], 1)
-    st = model.forward_with_stages(x_num, x_cat)
-    for ex in (False, True):
-        loss = multi_stage_disentanglement_loss(
-            st, x_cat[:, 0], s_idx=0, mean_weight=0.0, binary_w1=False,
-            center='pooled_bias', num_stage='pre', exclude_s_token=ex)
-        assert torch.isfinite(loss)
-
-
-def test_sample_space_dependence_matches_gram_form_and_sees_groups():
-    """Un-transposed CKA/HSIC on (Z, S): equal to the explicit n x n Gram
-    computation (Eqs. 5-6), ~0 when Z is independent of S, larger with a
-    group shift, and differentiable."""
-    from tabsyn.vae.flip_fairness import sample_space_dependence
-    g = torch.Generator().manual_seed(0)
-    n, p = 300, 5
-    grp = (torch.arange(n) % 2).long()
-    Z = torch.randn(n, p, generator=g)
-    Zs = Z + 1.5 * grp[:, None].float()
-    # explicit Gram form
-    H = torch.eye(n) - 1.0 / n
-    S = torch.nn.functional.one_hot(grp, 2).float()
-    K, L = Zs @ Zs.t(), S @ S.t()
-    hsic = lambda A, B: torch.trace(A @ H @ B @ H) / (n - 1) ** 2
-    cka = hsic(K, L) / torch.sqrt(hsic(K, K) * hsic(L, L))
-    assert torch.allclose(sample_space_dependence(Zs, grp), cka, atol=1e-5)
-    assert torch.allclose(sample_space_dependence(Zs, grp, normalize=False),
-                          hsic(K, L), atol=1e-5)
-    assert sample_space_dependence(Z, grp) < 0.02
-    assert sample_space_dependence(Zs, grp) > 0.2
-    Zs.requires_grad_(True)
-    sample_space_dependence(Zs, grp).backward()
-    assert torch.isfinite(Zs.grad).all()
-
-
-def test_loophole_free_cka_is_scale_free_and_sees_dependence():
-    from tabsyn.vae.flip_fairness import loophole_free_cka
-    g = torch.Generator().manual_seed(0)
-    n, p = 400, 4
-    grp = (torch.arange(n) % 2).long()
-    Z = torch.randn(n, p, generator=g)
-    mean_shift = Z + 1.0 * grp[:, None].float()
-    # same means, different spread: invisible to linear, seen by RBF
-    spread = Z * torch.where(grp[:, None] == 1, 3.0, 1.0)
-    for k in ('linear', 'rbf'):
-        base = loophole_free_cka(Z, grp, k)
-        assert base < 0.05, (k, base)
-        shifted = loophole_free_cka(mean_shift, grp, k)
-        assert shifted > base + 0.1, k
-        # rescaling the whole representation changes nothing
-        assert torch.allclose(loophole_free_cka(10 * mean_shift, grp, k),
-                              shifted, atol=1e-5)
-    assert loophole_free_cka(spread, grp, 'linear') < 0.05
-    assert loophole_free_cka(spread, grp, 'rbf') > 0.05
-    x = mean_shift.clone().requires_grad_(True)
-    loophole_free_cka(x, grp, 'rbf').backward()
-    assert torch.isfinite(x.grad).all() and x.grad.abs().sum() > 0
-
-
-def test_s_token_mask_makes_decoder_blind_to_that_token():
-    torch.manual_seed(0)
-    model = _tiny_vae()
-    model.eval()
-    zt = torch.randn(16, 5, 4)          # 3 numerics + 2 categoricals
-    k = 3                               # first categorical's token
-    model.VAE.s_token_mask = k
-    other = zt.clone()
-    other[:, k] = other[torch.randperm(16), k]   # permute that token
-    with torch.no_grad():
-        assert torch.allclose(model.VAE.decode_tokens(zt),
-                              model.VAE.decode_tokens(other), atol=1e-5)

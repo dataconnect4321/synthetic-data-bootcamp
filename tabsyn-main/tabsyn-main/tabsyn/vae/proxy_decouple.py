@@ -14,18 +14,16 @@ the same group has nothing to decouple).
 
 Uses:
   * mask_proxy_classes() merges each class into one new category (e.g.
-    MASK) in every fold before training (--mask-proxies): the user-side
-    preprocessing the paper's Sec. 7.2 leaves to the user.
-  * repair_toward_independence() scrambles every column's link to S with
-    strength tau (--repair-tau): the comparison baseline, not the method.
+    MASK); run_adult_flip.py --mask-proxies scores tables released with
+    merged levels against the real data merged the same way.
   * impossible_combination_rate() reports (S, category) pairs absent from
     the real data, e.g. 'male wife'.
 
 PRIVACY NOTE: detection is computed on the real training fold from a
 handful of category-level counts, not covered by the DP-SGD accounting -
 report it as an uncounted release (or add Laplace/Gaussian noise to the
-counts before use). The repair baseline is data-dependent (quantiles and a
-classifier fit on real records) and would need its own accounting under DP.
+counts before use). The AIM hybrid (aim_fair/) detects the classes from its
+noisy measurements instead.
 """
 
 import numpy as np
@@ -158,92 +156,3 @@ def impossible_combination_rate(syn_cat, real_cat, s_idx, rare=0.01,
         by_col[j] = float(bad.mean())
         any_bad |= bad
     return {'any': float(any_bad.mean()), 'by_col': by_col}
-
-
-# --------------------------------------------------------------------------
-# Scrambling repair (Feldman et al. 2015, adapted to categories)
-# --------------------------------------------------------------------------
-
-def _target_counts(n, shares):
-    """Integer counts summing to n, proportional to shares (largest
-    remainders)."""
-    raw = n * shares
-    out = np.floor(raw).astype(int)
-    out[np.argsort(-(raw - out))[:n - out.sum()]] += 1
-    return out
-
-
-def repair_toward_independence(num, cat, s_idx, tau, exclude=(), seed=0):
-    """Scramble each column's link to the protected attribute S with
-    strength tau, keeping every column's overall distribution.
-
-    Categorical column j: each group g's category shares become
-        (1 - tau) * P_g(c) + tau * P(c)
-    (P = pooled shares), so the pooled share of every category is preserved
-    exactly - nothing can vanish. Rows leave over-represented categories in
-    order of plausibility for their new category: a classifier fit on the
-    other columns (S excluded) scores log P(dest) - log P(src) and the best
-    moves go first. Numeric column: quantile repair - a value keeps its rank
-    within its group and moves tau of the way to the pooled distribution's
-    value at that rank.
-
-    tau=0: unchanged. tau=1: every column is marginally independent of S
-    (per-column, as in Feldman et al.; joint dependence can remain).
-    Returns repaired (num, cat) copies.
-    """
-    from sklearn.ensemble import HistGradientBoostingClassifier
-    num, cat = np.asarray(num, dtype=np.float64).copy(), np.asarray(cat).copy()
-    s = cat[:, s_idx]
-    groups = np.unique(s)
-    if tau <= 0:
-        return num.astype(np.float32), cat
-    # numeric: quantile repair toward the pooled distribution
-    for j in range(num.shape[1]):
-        pooled = np.sort(num[:, j])
-        for g in groups:
-            m = s == g
-            ranks = np.argsort(np.argsort(num[m, j])) / max(m.sum() - 1, 1)
-            target = np.quantile(pooled, ranks)
-            num[m, j] = (1 - tau) * num[m, j] + tau * target
-    # categorical: minimal-change reassignment toward pooled shares
-    cols = [j for j in range(cat.shape[1]) if j != s_idx and j not in exclude]
-    for j in cols:
-        k = int(cat[:, j].max()) + 1
-        pooled = np.bincount(cat[:, j], minlength=k) / len(cat)
-        others = [c for c in range(cat.shape[1]) if c not in (j, s_idx)]
-        X = np.concatenate([num, cat[:, others]], axis=1)
-        is_cat = [False] * num.shape[1] + [True] * len(others)
-        clf = HistGradientBoostingClassifier(categorical_features=is_cat,
-                                             max_iter=60, early_stopping=False,
-                                             random_state=seed)
-        clf.fit(X, cat[:, j])
-        P = np.full((len(cat), k), 1e-6)
-        P[:, clf.classes_] = np.clip(clf.predict_proba(X), 1e-6, None)
-        logP = np.log(P)
-        for g in groups:
-            idx = np.where(s == g)[0]
-            cur = np.bincount(cat[idx, j], minlength=k)
-            own = cur / len(idx)
-            want = _target_counts(len(idx), (1 - tau) * own + tau * pooled)
-            surplus = cur - want                 # >0: must give rows away
-            if not (surplus > 0).any():
-                continue
-            src_rows = idx[surplus[cat[idx, j]] > 0]
-            dests = np.where(surplus < 0)[0]
-            # all candidate moves, best (most plausible) first
-            score = (logP[src_rows][:, dests]
-                     - logP[src_rows, cat[src_rows, j]][:, None])
-            order = np.argsort(-score, axis=None)
-            moved = np.zeros(len(src_rows), dtype=bool)
-            for flat in order:
-                r, d = divmod(int(flat), len(dests))
-                src, dst = cat[src_rows[r], j], dests[d]
-                if moved[r] or surplus[src] <= 0 or surplus[dst] >= 0:
-                    continue
-                cat[src_rows[r], j] = dst
-                surplus[src] -= 1
-                surplus[dst] += 1
-                moved[r] = True
-                if not (surplus > 0).any():
-                    break
-    return num.astype(np.float32), cat

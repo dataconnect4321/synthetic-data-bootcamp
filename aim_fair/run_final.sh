@@ -46,4 +46,4 @@ for f in $FOLDS; do
   done
 done
 wait
-$PY aim_fair/summarize.py
+$PY aim_fair/final_chart.py
