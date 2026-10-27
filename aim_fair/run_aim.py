@@ -40,6 +40,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument('--dataset', default='adult',
+                    help="'adult', or acs_al / acs_ut / dutch (datasets.py; "
+                         "folds from export_folds.py --dataset)")
     ap.add_argument('--fold', type=int, default=0)
     ap.add_argument('--epsilon', type=float, default=3.0)
     ap.add_argument('--delta', type=float, default=1e-5)
@@ -65,16 +68,20 @@ def main():
     ap.add_argument('--seed', type=int, default=0, help='AIM measuring seed')
     ap.add_argument('--tag', default=None)
     a = ap.parse_args()
-    tag = a.tag or f'aim_e{a.epsilon:g}_f{a.fold}'
+    sex_col, _ = AD.use(a.dataset)
+    pre = '' if a.dataset == 'adult' else a.dataset + '_'
+    tag = a.tag or f'{pre}aim_e{a.epsilon:g}_f{a.fold}'
     out_dir = os.path.join(HERE, 'out')
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
 
-    train = pd.read_csv(os.path.join(HERE, 'data', f'fold{a.fold}_train.csv'))
+    train = pd.read_csv(os.path.join(HERE, 'data',
+                                     f'{pre}fold{a.fold}_train.csv'))
     # public schema: the category labels (sorted, as in run_adult_flip.py)
     categories = {c: sorted(train[c].astype(str).unique())
                   for c in AD.CATEGORICAL}
-    mech = FairAIM(a.epsilon, a.delta, prng=np.random.RandomState(a.seed),
+    mech = FairAIM(a.epsilon, a.delta, sex_col=sex_col,
+                   prng=np.random.RandomState(a.seed),
                    max_model_size=a.max_model_size, max_iters=a.max_iters,
                    rounds=a.rounds)
     rho_total, schema = mech.rho, None
@@ -88,7 +95,7 @@ def main():
                                                stddev=sd)
                              for cl, y, sd in saved['measurements']]
         mech.potentials = None
-    elif not a.public_bins:
+    elif not a.public_bins and AD.NUMERIC:   # no numerics: no bins to learn
         schema = DS.build(train, AD.NUMERIC, rho_total, AD.EDGES,
                           np.random.default_rng(10_000 + a.seed))
         mech.rho = rho_total * (1 - DS.SCHEMA_RHO_SHARE)
@@ -112,7 +119,7 @@ def main():
                  float(m.stddev)) for m in mech.measurements],
                 'schema': schema, 'rho_total': rho_total}, f)
 
-    repair_cols = [c for c in domain.attributes if c != 'sex']
+    repair_cols = [c for c in domain.attributes if c != sex_col]
     info = {}
     for r in a.refits:
         mech.prng = np.random.RandomState(1000 + r)

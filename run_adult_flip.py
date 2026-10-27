@@ -115,6 +115,20 @@ def read_adult():
     return df
 
 
+def use_dataset(name):
+    """Point this module at another dataset of the FLIP paper (datasets.py):
+    its columns, protected attribute, target and loader. 'adult' leaves
+    everything as above."""
+    global NUMERIC, CATEGORICAL, SENSITIVE, TARGET, read_adult
+    if name == 'adult':
+        return
+    import datasets as D
+    cfg = D.CONFIG[name]
+    NUMERIC, CATEGORICAL = cfg['numeric'], cfg['categorical']
+    SENSITIVE, TARGET = cfg['sensitive'], cfg['target']
+    read_adult = lambda: D.load(name)  # noqa: E731
+
+
 def prepare(df, fold, n_folds, seed):
     """Fold split + encoding. Numeric stats come from the training fold only;
     category codes are shared across folds."""
@@ -225,7 +239,8 @@ def real_ref_cache(args, version='famd2_v1'):
     first run on a fold computes and stores them and later runs load the
     same numbers. Returns get(name, fn): the cached value, or fn() computed
     and stored. Writes are atomic and merge with concurrent writers."""
-    key = (f'real_ref_f{args.fold}of{args.folds}_ss{args.split_seed}_'
+    ds = '' if args.dataset == 'adult' else args.dataset + '_'
+    key = (f'real_ref_{ds}f{args.fold}of{args.folds}_ss{args.split_seed}_'
            f'{"mask" if args.mask_proxies else "raw"}_{version}')
     cache_dir = os.path.join(OUT_DIR, 'cache')
     path = os.path.join(cache_dir, key + '.json')
@@ -260,6 +275,10 @@ def main():
                     help="'paper': FLIP as published (default); 'final': the "
                          'paper plus the joint decoded-output stage, mean gap '
                          'and KL guard (best VAE process)')
+    ap.add_argument('--dataset', default='adult',
+                    choices=['adult', 'acs_al', 'acs_ut', 'dutch'],
+                    help='UCI Adult, or another FLIP-paper dataset '
+                         '(datasets.py; sex protected in all)')
     ap.add_argument('--lam', type=float, default=4.0, help='LAMBDA_FAIR')
     ap.add_argument('--dp-group-sigmas', default=None,
                     help='paper Eq. 13: comma-separated noise multipliers per '
@@ -311,6 +330,7 @@ def main():
                          'adult_results/runs/TAG.pt (saved by default, for '
                          '--from-run)')
     args = ap.parse_args()
+    use_dataset(args.dataset)
     # --from-run: everything except the decoding and the output tag comes
     # from the saved run, so the data preparation matches it exactly
     saved_run = None

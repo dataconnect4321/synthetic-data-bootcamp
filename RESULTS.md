@@ -107,6 +107,48 @@ share of the real data's above-chance AUC retained, (AUC - 0.5) /
 
 Reproduce: `python aim_fair/task_auc.py` (writes `results/task_auc.csv`).
 
+## The FLIP paper's other datasets
+
+The AIM hybrid with Adult's final settings, unchanged (epsilon 3, tau 1,
+masking, rules, private bins), on the other datasets of FLIP's Table 2,
+sex protected in all (`datasets.py`). Target: income > $50K for ACS-I,
+high-level occupation for Dutch. 3 folds x 3 refits; ± is the sd across
+folds. The real-data column trains on the real training fold.
+
+| | ACS-I Alabama | ACS-I Utah | Dutch census |
+|---|---|---|---|
+| Parity: real / plain AIM / **hybrid** | 0.155 / 0.135 / **0.096 ± 0.010** | 0.268 / 0.244 / **0.175 ± 0.008** | 0.084 / 0.078 / **0.071 ± 0.005** |
+| EO gap: real / plain / **hybrid** | 0.062 / 0.069 / **0.039 ± 0.012** | 0.127 / 0.122 / **0.062 ± 0.008** | 0.027 / 0.025 / 0.034 ± 0.004 |
+| Folded tstr, plain → hybrid (0.5 best) | 0.247 → **0.452** | 0.259 → **0.447** | 0.384 → **0.488** |
+| Target AUC: real / plain / hybrid | 0.878 / 0.864 / 0.847 | 0.905 / 0.894 / 0.875 | 0.829 / 0.815 / 0.797 |
+| Validity, plain → hybrid (real ≈ 0.99) | 0.955 → 0.935 | 0.959 → 0.937 | 0.977 → 0.926 |
+| Impossible rows (hybrid) | 0% | 0% | 0% |
+| Alpha-precision / beta-recall (hybrid) | 0.986 / 0.390 | 0.984 / 0.373 | 0.989 / 0.943 |
+| Epsilon-identifiability, plain → hybrid | 0.435 → 0.373 | 0.421 → 0.365 | 0.376 → 0.340 |
+
+- **ACS-I:** compared with plain AIM from the same private measurements,
+  parity falls by about 30% and the EO gap by about 45–50%. The release
+  stops teaching real people's sex. The cost is about 0.02 AUC and 2 points
+  of validity.
+- **Dutch:** sex leakage is removed, but the real outcome gap is small.
+  Parity improves slightly. The EO gap (0.034) stays within plain AIM's
+  fold spread (0.025 ± 0.012). Validity drops 5 points: the 12 categorical
+  columns are tightly linked, so equalizing all of them across sexes
+  disturbs more combinations.
+- **Masking never fired** on these datasets (no sex-pure level pairs like
+  Husband/Wife), so the gains come from the repair alone.
+- **Data caveats:**
+  - The paper states neither the ACS year nor its preprocessing. 2018 gives
+    22,268 / 16,337 rows against the paper's 20,788 / 16,221, with 9
+    categorical columns against its 8.
+  - Occupation and birthplace codes are grouped by their published code
+    ranges.
+  - Dutch is deduplicated, which reproduces the paper's 18,440 rows
+    (18,438).
+
+Reproduce: `bash aim_fair/run_datasets.sh` (writes
+`results/datasets_summary.csv`).
+
 ## AIM hybrid vs the best VAE process (FLIP + joint stage)
 
 The best VAE process is FLIP plus this repository's joint decoded-output stage

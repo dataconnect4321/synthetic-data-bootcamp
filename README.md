@@ -165,6 +165,26 @@ python aim_fair/final_chart.py
 python aim_fair/task_auc.py
 ```
 
+### The FLIP paper's other datasets
+
+`datasets.py` adds the other datasets of FLIP's Table 2, all with sex
+protected: ACS-I Alabama and Utah (the folktables ACSIncome task on the
+2018 1-year ACS PUMS) and the Dutch census. `--dataset` selects one in
+`export_folds.py`, `run_aim.py` and `run_adult_flip.py`; Adult stays the
+default. The AIM hybrid runs with Adult's final settings, unchanged.
+
+Data files (not committed):
+
+- `Data/acs/psam_p01.csv` and `Data/acs/psam_p49.csv`, from `csv_pal.zip`
+  and `csv_put.zip` at
+  www2.census.gov/programs-surveys/acs/data/pums/2018/1-Year/;
+- `Data/dutch/dutch.csv`, from the `tailequy/fairness_dataset` repository.
+
+```bash
+# 3 datasets x 3 folds: measure, 3 hybrid + 3 plain refits, score; about 1.5 h
+bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
+```
+
 ## Layout
 
 | Path | Contents |
@@ -176,6 +196,7 @@ python aim_fair/task_auc.py
 | `aim_fair/final_chart.py`, `task_auc.py` | results tables and chart; task independence |
 | `aim_fair/check_schema.py` | how well public vs private bins reproduce the real numeric values |
 | `aim_fair/export_folds.py` | the same 3-fold splits as `run_adult_flip.py` |
+| `datasets.py`, `aim_fair/run_datasets.sh`, `aim_fair/datasets_summary.py` | ACS-I Alabama / Utah and Dutch census: loaders, the 3-dataset run, its summary table |
 | `aim_fair/vendor/` | AIM reference code (Apache 2.0, see `vendor/NOTICE`) |
 | `run_adult_flip.py` | VAE driver: presets `paper` / `final`, Eq. 13 DP, `--score-csv` |
 | `run_flip_demo.py`, `run_flip_full_pipeline.py` | VAE training (FLIP phases) and latent diffusion |

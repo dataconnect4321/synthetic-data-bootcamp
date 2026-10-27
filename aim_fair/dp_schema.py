@@ -35,8 +35,9 @@ BH_Q, MAX_BINS, MIN_PIECE_SHARE, SWITCH_SHARE = 0.05, 20, 0.01, 0.01
 
 RANGE = {'age': (17, 90), 'fnlwgt': (10000, 1599999), 'education-num': (1, 16),
          'capital-gain': (0, 99999), 'capital-loss': (0, 4399),
-         'hours-per-week': (1, 99)}
-INTEGER_FINE = ('age', 'education-num', 'hours-per-week')
+         'hours-per-week': (1, 99),
+         'AGEP': (17, 99), 'WKHP': (1, 99)}     # ACS-I (datasets.py)
+INTEGER_FINE = ('age', 'education-num', 'hours-per-week', 'AGEP', 'WKHP')
 INTEGER_EXTRA = ('capital-gain', 'capital-loss')
 
 

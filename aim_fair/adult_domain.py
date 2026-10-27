@@ -29,7 +29,27 @@ EDGES = {
     'capital-gain': [0, 1, 3000, 5000, 7500, 10000, 15000, 25000, 100000],
     'capital-loss': [0, 1, 1500, 1800, 2000, 2300, 4400],
     'hours-per-week': [1, 20, 30, 35, 40, 41, 45, 50, 55, 60, 100],
+    # ACS-I (datasets.py): the same public cuts as Adult's age and hours
+    'AGEP': [17, 22, 27, 32, 37, 42, 47, 52, 57, 62, 67, 72, 77, 100],
+    'WKHP': [1, 20, 30, 35, 40, 41, 45, 50, 55, 60, 100],
 }
+
+
+def use(dataset):
+    """Switch NUMERIC / CATEGORICAL to another FLIP-paper dataset
+    (datasets.py at the repository root); 'adult' keeps the lists above.
+    Returns (sensitive column, target column)."""
+    global NUMERIC, CATEGORICAL
+    if dataset == 'adult':
+        return 'sex', 'income'
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    import datasets as D
+    cfg = D.CONFIG[dataset]
+    NUMERIC, CATEGORICAL = list(cfg['numeric']), list(cfg['categorical'])
+    return cfg['sensitive'], cfg['target']
 
 
 def edges_of(c, schema=None):
