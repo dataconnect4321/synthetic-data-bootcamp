@@ -352,3 +352,22 @@ def test_scorecard_matches_grid_and_scorer(tmp_path, monkeypatch):
         checked += 1
     if not checked:
         pytest.skip('scorer jsons not in adult_results/')
+
+
+def test_flip_baseline_matches_final_comparison(tmp_path, monkeypatch):
+    """The scorecard's FLIP baseline equals results/final_comparison.csv's
+    flip_faithful_repro (FLIP as published, lambda 4, nominal eps 3, fold 0)
+    for every scorecard metric."""
+    comp = os.path.join(ROOT, 'results', 'final_comparison.csv')
+    grid = os.path.join(ROOT, 'results', 'utility_tau_grid.csv')
+    if not (os.path.exists(comp) and os.path.exists(grid)):
+        pytest.skip('results/final_comparison.csv or utility_tau_grid.csv missing')
+    monkeypatch.setattr(L, 'OUT', str(tmp_path / 'page.html'))
+    monkeypatch.setattr(L, 'ALL_COLUMNS', False)
+    L.main()
+    B = page_data(tmp_path / 'page.html')['adult']['scorecard']['baseline']
+    want = pd.read_csv(comp).set_index('metric')['flip_faithful_repro']
+    assert set(B['values']) == {'ber', 'ancb', 'auc', 'income_parity', 'eo_gap',
+                                'validity', 'impossible'}
+    for label, key in L.FLIP_METRICS.items():
+        assert B['values'][key] == want[label]

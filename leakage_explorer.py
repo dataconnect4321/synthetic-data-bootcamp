@@ -59,6 +59,13 @@ OUT = os.path.join(HERE, 'results', 'leakage_explorer.html')
 # the scorecard: actual releases along tau (scripts/run_tau_grid.sh,
 # aim_fair/tau_grid_summary.py), Adult only
 SCORECARD = {'adult': (os.path.join(HERE, 'results', 'utility_tau_grid.csv'), 3)}
+# the FLIP baseline: results/final_comparison.csv metric label -> key
+FLIP_METRICS = {'Income parity': 'income_parity',
+                'Equalized-odds gap': 'eo_gap',
+                'BER, synthetic sex label': 'ber',
+                "A-NCB (paper's version)*": 'ancb',
+                'Income AUC on real people': 'auc',
+                'Validity': 'validity', 'Impossible rows': 'impossible'}
 
 
 def schema(name):
@@ -196,14 +203,28 @@ def all_columns_leakage(frames, numeric, categorical, sens):
     return rows
 
 
+def flip_baseline():
+    """FLIP as published (lambda 4, nominal eps 3, fold 0), scored like the
+    AIM tables: results/final_comparison.csv (aim_fair/final_chart.py), or
+    None if missing."""
+    path = os.path.join(HERE, 'results', 'final_comparison.csv')
+    if not os.path.exists(path):
+        return None
+    col = pd.read_csv(path).set_index('metric')['flip_faithful_repro']
+    return {'label': 'FLIP (VAE)', 'note': 'λ 4, nominal ε 3',
+            'values': {k: float(col[m]) for m, k in FLIP_METRICS.items()}}
+
+
 def scorecard(name):
-    """{eps, rows} from the dataset's tau-grid csv, or None if missing."""
+    """{eps, rows, baseline} from the dataset's tau-grid csv, or None if
+    missing."""
     if name not in SCORECARD or not os.path.exists(SCORECARD[name][0]):
         return None
     path, eps = SCORECARD[name]
     df = pd.read_csv(path)
     df['tau'] = df['tau'].astype(object).where(df['tau'].notna(), None)
-    return {'eps': eps, 'rows': df.to_dict('records')}
+    return {'eps': eps, 'rows': df.to_dict('records'),
+            'baseline': flip_baseline() if name == 'adult' else None}
 
 
 def build(name):
