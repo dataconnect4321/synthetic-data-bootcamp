@@ -371,3 +371,5 @@ def test_flip_baseline_matches_final_comparison(tmp_path, monkeypatch):
                                 'validity', 'impossible'}
     for label, key in L.FLIP_METRICS.items():
         assert B['values'][key] == want[label]
+    # FLIP's paper reports neither: these two are our scorer's measurement
+    assert sorted(B['not_reported']) == ['impossible', 'validity']

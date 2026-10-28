@@ -158,7 +158,9 @@ th:first-child, td:first-child { text-align: left; }
         of the same measurements).</p>
       <p><b>FLIP baseline</b> (square, right of the τ axis): FLIP as published (VAE, λ 4), fold 0, scored the same
         way (<code>results/final_comparison.csv</code>). Its ε 3 is nominal and covers the VAE only (batch-level
-        fairness terms and the diffusion step are outside it); AIM's ε covers the whole release.</p>
+        fairness terms and the diffusion step are outside it); AIM's ε covers the whole release. FLIP does not
+        report validity or impossible rows (marked *): those two are our scorer's measurement of the reproduced
+        FLIP output.</p>
       <p><b>BER</b>: balanced error of a classifier predicting the table's own sex column from its other columns (0.5 = no link).
         <b>A-NCB</b>: the FLIP paper's cluster-balance score with its own-sex adversary (higher = groups mix in
         the clusters). It jumps once the sex label stops being predictable, so it mostly repeats BER; RESULTS.md
@@ -423,7 +425,10 @@ function drawScorecard() {
   // tiles: values at the current τ
   $('tiles').innerHTML = METRICS.map(([k, t, better, f]) =>
     `<div class="tile"><div class="t">${t}</div><div class="v">${f(at[k])}</div>` +
-    `<div class="r">${better} · real ${real ? f(real[k]) : '–'}${B ? ` · FLIP ${f(B.values[k])}` : ''}</div></div>`).join('');
+    `<div class="r">${better} · real ${real ? f(real[k]) : '–'}${B ? ` · FLIP ${f(B.values[k])}` +
+      (B.not_reported.includes(k) ? '*' : '') : ''}</div></div>`).join('') +
+    (B && B.not_reported.length ? '<p class="note" style="grid-column:1/-1;margin:0">* not reported by FLIP; ' +
+      'measured here on our reproduction of FLIP.</p>' : '');
   // small multiples
   const box = $('multiples'); box.innerHTML = '';
   for (const [k, t, better, f] of METRICS) {
@@ -448,12 +453,13 @@ function drawScorecard() {
     if (B) {   // the FLIP slot: a separator, its tick and a hollow square
       const fx = xR + slot / 2 + 6, fv = B.values[k];
       el('line', { x1: xR + 10, x2: xR + 10, y1: top, y2: top + plotH, stroke: 'var(--grid)' }, svg);
-      el('text', { x: fx, y: top + plotH + 16, 'text-anchor': 'middle' }, svg, 'FLIP');
+      el('text', { x: fx, y: top + plotH + 16, 'text-anchor': 'middle' }, svg, B.not_reported.includes(k) ? 'FLIP*' : 'FLIP');
       el('rect', { x: fx - 4.5, y: sy(fv) - 4.5, width: 9, height: 9, fill: 'var(--panel)', stroke: 'var(--ink)',
         'stroke-width': 1.5 }, svg);
       const hit = el('circle', { cx: fx, cy: sy(fv), r: 12, fill: 'transparent' }, svg);
       hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}</div>` +
-        `${B.label} (${B.note}) ${f(fv)}<br>AIM hybrid at τ ${at.tau}: ${f(at[k])}` + (real ? `<br>real data ${f(real[k])}` : '')));
+        `${B.label} (${B.note}) ${f(fv)}<br>AIM hybrid at τ ${at.tau}: ${f(at[k])}` + (real ? `<br>real data ${f(real[k])}` : '') +
+        (B.not_reported.includes(k) ? '<br><i>Not reported by FLIP: measured here on our reproduction.</i>' : '')));
       hit.addEventListener('mouseleave', hideTip);
     }
     if (real) {
@@ -477,9 +483,10 @@ function drawScorecard() {
     }
   }
   const rows = [...pts.map(p => [`AIM hybrid, τ ${p.tau}`, p]), ...(plain ? [['Plain AIM', plain]] : []),
-    ...(B ? [[`${B.label}, ${B.note}`, B.values]] : []), ...(real ? [['Real data', real]] : [])];
+    ...(B ? [[`${B.label}, ${B.note} (* = measured here)`, B.values]] : []), ...(real ? [['Real data', real]] : [])];
   $('sctbl').innerHTML = '<table><tr><th></th>' + METRICS.map(m => `<th>${m[1]}</th>`).join('') + '</tr>' +
-    rows.map(([n, r]) => `<tr><td>${n}</td>` + METRICS.map(([k, , , f]) => `<td>${f(r[k])}</td>`).join('') + '</tr>').join('') +
+    rows.map(([n, r]) => `<tr><td>${n}</td>` + METRICS.map(([k, , , f]) =>
+      `<td>${f(r[k])}${B && r === B.values && B.not_reported.includes(k) ? '*' : ''}</td>`).join('') + '</tr>').join('') +
     '</table>';
 }
 

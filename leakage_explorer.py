@@ -210,9 +210,14 @@ def flip_baseline():
     path = os.path.join(HERE, 'results', 'final_comparison.csv')
     if not os.path.exists(path):
         return None
-    col = pd.read_csv(path).set_index('metric')['flip_faithful_repro']
+    df = pd.read_csv(path).set_index('metric')
+    col = df['flip_faithful_repro']
+    # metrics the FLIP paper does not report (validity, impossible rows):
+    # only our scorer's measurement of the reproduction exists
     return {'label': 'FLIP (VAE)', 'note': 'λ 4, nominal ε 3',
-            'values': {k: float(col[m]) for m, k in FLIP_METRICS.items()}}
+            'values': {k: float(col[m]) for m, k in FLIP_METRICS.items()},
+            'not_reported': [k for m, k in FLIP_METRICS.items()
+                             if pd.isna(df.loc[m, 'flip_paper_reported'])]}
 
 
 def scorecard(name):
