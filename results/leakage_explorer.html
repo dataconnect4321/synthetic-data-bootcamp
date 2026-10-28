@@ -72,11 +72,11 @@ svg .badge { fill: var(--ink); font-size: 10px; font-weight: 600; letter-spacing
   vertical-align: 3px; margin-right: 5px; }
 .dash { display: inline-block; width: 12px; height: 12px; border: 1.5px dashed var(--ink);
   border-radius: 2px; vertical-align: -1px; margin-right: 5px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
-.tile { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--panel); }
-.tile .t { font-size: 12px; color: var(--ink-2); }
-.tile .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.3; }
-.tile .r { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.strip { display: grid; grid-template-columns: minmax(150px, 210px) 1fr; gap: 2px 16px; align-items: center; }
+.strip .lab { font-size: 13px; line-height: 1.3; padding: 6px 0; }
+.strip .lab .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+.strip .lab .b { color: var(--ink-3); font-size: 12px; }
+@media (max-width: 560px) { .strip { grid-template-columns: 1fr; } .strip .lab { padding-bottom: 0; } }
 .multiples { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px 20px; margin-top: 8px; }
 .multiples h3 { margin: 0; font-size: 13px; }
 .multiples h3 span { font-weight: 400; color: var(--ink-3); }
@@ -138,11 +138,15 @@ th:first-child, td:first-child { text-align: left; }
       <h2>Scorecard</h2>
       <p class="note" id="sc-sub"></p>
       <div id="sc-body">
-        <div class="tiles" id="tiles"></div>
-        <div class="legend" style="margin-top:12px"><span><span class="tick"></span>AIM hybrid at each τ</span>
-          <span><span class="tick" style="border-top:1.5px dotted var(--ink-3)"></span>real data</span>
+        <div class="legend"><span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--ink)"/></svg>AIM hybrid at τ <span id="sc-tau"></span></span>
           <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="4.5" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5"/></svg>plain AIM (no fairness steps)</span>
+          <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="4.5" fill="var(--panel)" stroke="var(--ink-3)" stroke-width="1.5" stroke-dasharray="2 1.5"/></svg>real data</span>
           <span id="sc-flipleg"><svg width="14" height="14" style="display:inline;vertical-align:-2px"><rect x="2.5" y="2.5" width="9" height="9" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5"/></svg><span id="sc-fliplab"></span></span></div>
+        <div class="strip" id="strip"></div>
+        <h3 style="margin-top:20px">Along τ</h3>
+        <div class="legend"><span><span class="tick"></span>AIM hybrid at each τ</span>
+          <span><span class="tick" style="border-top:1.5px dotted var(--ink-3)"></span>real data</span>
+          <span>○ plain AIM · □ FLIP paper (right slot; ↑↓ = off this scale)</span></div>
         <div class="multiples" id="multiples"></div>
         <details><summary>Show as table</summary><div id="sctbl"></div></details>
       </div>
@@ -156,11 +160,11 @@ th:first-child, td:first-child { text-align: left; }
         (<code>scripts/run_tau_grid.sh</code>). One refit per τ: differences of about 0.01–0.02 are refit noise,
         which is also why τ = 1 here differs slightly from the release in Before vs after (a different refit
         of the same measurements).</p>
-      <p><b>FLIP baseline</b> (square, right of the τ axis): FLIP as published (VAE, λ 4), fold 0, scored the same
-        way (<code>results/final_comparison.csv</code>). Its ε 3 is nominal and covers the VAE only (batch-level
-        fairness terms and the diffusion step are outside it); AIM's ε covers the whole release. FLIP does not
-        report validity or impossible rows (marked *): those two are our scorer's measurement of the reproduced
-        FLIP output.</p>
+      <p><b>FLIP</b> (square): the values the FLIP paper reports for Adult at λ 4, ε 3 (its Fig. 3), computed by its
+        own evaluation code, so not the same way as the AIM points (e.g. its income AUC is 0.66; our scorer gives
+        0.90 on our reproduction of FLIP). FLIP does not report validity or impossible rows (n/r). Hover a FLIP
+        mark for our reproduction (fold 0, scored like AIM; <code>results/final_comparison.csv</code>). FLIP's ε is
+        nominal and covers the VAE only; AIM's ε covers the whole release.</p>
       <p><b>BER</b>: balanced error of a classifier predicting the table's own sex column from its other columns (0.5 = no link).
         <b>A-NCB</b>: the FLIP paper's cluster-balance score with its own-sex adversary (higher = groups mix in
         the clusters). It jumps once the sex label stops being predictable, so it mostly repeats BER; RESULTS.md
@@ -239,7 +243,7 @@ th:first-child, td:first-child { text-align: left; }
 </main>
 <div id="tip"></div>
 <script>
-const DATA = {"datasets": {"adult": {"label": "UCI Adult", "sensitive": "sex", "target": "income", "groups": ["Male", "Female"], "n": 30148, "columns": [{"name": "age", "ordinal": true, "labels": ["17\u201321", "22\u201326", "27\u201331", "32\u201336", "37\u201341", "42\u201346", "47\u201351", "52\u201356", "57\u201361", "62\u201366", "67\u201371", "72\u201376", "77\u201390"], "proxy": [], "real": [[1383, 2275, 2688, 2912, 2826, 2533, 2081, 1456, 1135, 582, 269, 137, 109], [1250, 1495, 1296, 1202, 1141, 1009, 811, 588, 438, 278, 128, 82, 44]], "checkpoints": {"plain": [[1380, 2265, 2674, 2904, 2847, 2518, 2071, 1428, 1173, 583, 261, 129, 123], [1245, 1535, 1304, 1178, 1140, 994, 814, 607, 418, 282, 132, 87, 56]], "hybrid": [[1775, 2550, 2698, 2762, 2688, 2349, 1968, 1391, 1062, 589, 262, 130, 122], [868, 1218, 1303, 1346, 1277, 1189, 923, 655, 507, 265, 121, 89, 41]]}}, {"name": "fnlwgt", "ordinal": true, "labels": ["10k\u201349k", "50k\u201374k", "75k\u201399k", "100k\u2013124k", "125k\u2013149k", "150k\u2013174k", "175k\u2013199k", "200k\u2013224k", "225k\u2013249k", "250k\u2013299k", "300k\u2013349k", "350k\u2013399k", "400k\u2013499k", "500k\u20131599k"], "proxy": [], "real": [[1419, 967, 1144, 2154, 1751, 2165, 2791, 1908, 1391, 1780, 1351, 724, 605, 236], [685, 444, 652, 1028, 914, 1145, 1404, 942, 569, 790, 544, 324, 232, 89]], "checkpoints": {"plain": [[1389, 975, 1146, 2111, 1793, 2189, 2821, 1882, 1375, 1755, 1362, 732, 591, 235], [683, 415, 651, 1055, 893, 1212, 1367, 940, 601, 785, 534, 318, 240, 98]], "hybrid": [[1409, 966, 1175, 2138, 1808, 2280, 2825, 1917, 1333, 1750, 1260, 694, 568, 223], [682, 422, 637, 1046, 865, 1048, 1362, 929, 640, 809, 642, 347, 272, 101]]}}, {"name": "education-num", "ordinal": true, "labels": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"], "proxy": [], "real": [[42, 103, 232, 420, 331, 556, 720, 252, 6699, 4125, 848, 644, 3520, 1153, 433, 308], [14, 41, 75, 122, 135, 269, 374, 125, 3055, 2456, 441, 394, 1586, 525, 79, 71]], "checkpoints": {"plain": [[40, 103, 220, 401, 376, 546, 701, 243, 6701, 4131, 830, 640, 3529, 1155, 435, 305], [7, 56, 88, 113, 127, 236, 395, 108, 3076, 2407, 479, 408, 1568, 519, 121, 84]], "hybrid": [[37, 91, 208, 374, 308, 562, 738, 227, 6560, 4454, 859, 706, 3472, 1124, 357, 269], [9, 61, 87, 162, 157, 264, 356, 116, 3196, 2130, 427, 337, 1641, 556, 169, 134]]}}, {"name": "capital-gain", "ordinal": true, "labels": ["0", "1\u20132999", "3000\u20134999", "5000\u20137499", "7500\u20139999", "10000\u201314999", "15000\u201324999", "25000\u201399999"], "proxy": [], "real": [[18417, 260, 429, 418, 275, 82, 332, 173], [9228, 156, 127, 79, 55, 45, 45, 27]], "checkpoints": {"plain": [[18423, 348, 239, 512, 283, 79, 295, 177], [9201, 128, 102, 143, 61, 54, 51, 52]], "hybrid": [[18685, 331, 231, 423, 226, 89, 203, 158], [8977, 156, 107, 209, 109, 34, 130, 80]]}}, {"name": "capital-loss", "ordinal": true, "labels": ["0", "1\u20131499", "1500\u20131799", "1800\u20131999", "2000\u20132299", "2300\u20134399"], "proxy": [], "real": [[19303, 77, 233, 562, 107, 104], [9424, 57, 123, 88, 31, 39]], "checkpoints": {"plain": [[19336, 259, 54, 450, 32, 225], [9381, 145, 24, 145, 12, 85]], "hybrid": [[19411, 274, 48, 370, 30, 213], [9325, 132, 29, 195, 16, 105]]}}, {"name": "hours-per-week", "ordinal": true, "labels": ["1\u201319", "20\u201329", "30\u201334", "35\u201339", "40", "41\u201344", "45\u201349", "50\u201354", "55\u201359", "60\u201399"], "proxy": [], "real": [[596, 949, 661, 991, 9672, 437, 1899, 2388, 688, 2105], [715, 1127, 662, 1050, 4551, 157, 505, 505, 127, 363]], "checkpoints": {"plain": [[596, 974, 695, 1011, 9660, 414, 1896, 2386, 642, 2082], [744, 1087, 615, 1028, 4555, 174, 529, 511, 182, 367]], "hybrid": [[894, 1367, 900, 1365, 9534, 421, 1629, 1988, 558, 1690], [430, 690, 428, 668, 4696, 189, 767, 927, 252, 755]]}}, {"name": "income", "ordinal": false, "labels": ["\u226450K", ">50K"], "proxy": [], "real": [[14031, 6355], [8648, 1114]], "checkpoints": {"plain": [[14133, 6223], [8562, 1230]], "hybrid": [[15282, 5064], [7383, 2419]]}}, {"name": "workclass", "ordinal": false, "labels": ["Private", "Self-emp-not-inc", "Local-gov", "State-gov", "Self-emp-inc", "Federal-gov", "Without-pay"], "proxy": [], "real": [[14533, 2153, 1258, 808, 985, 640, 9], [7618, 394, 819, 515, 136, 278, 2]], "checkpoints": {"plain": [[14552, 2126, 1247, 828, 968, 625, 10], [7597, 414, 813, 502, 167, 287, 12]], "hybrid": [[14956, 1687, 1397, 892, 771, 630, 13], [7199, 847, 686, 424, 364, 276, 6]]}}, {"name": "marital-status", "ordinal": false, "labels": ["Married-civ-spouse", "Never-married", "Divorced", "Separated", "Widowed", "Married-spouse-absent", "Married-AF-spouse"], "proxy": [], "real": [[12619, 5382, 1661, 352, 163, 198, 11], [1461, 4348, 2487, 539, 717, 195, 15]], "checkpoints": {"plain": [[12651, 5366, 1637, 337, 171, 182, 12], [1422, 4354, 2539, 546, 716, 190, 25]], "hybrid": [[9334, 6568, 3025, 612, 514, 262, 31], [4543, 3152, 1443, 272, 247, 130, 15]]}}, {"name": "occupation", "ordinal": false, "labels": ["Prof-specialty", "Exec-managerial", "Craft-repair", "Sales", "Adm-clerical", "Other-service", "Machine-op-inspct", "Transport-moving", "Handlers-cleaners", "Farming-fishing", "Other"], "proxy": [], "real": [[2558, 2886, 3804, 2335, 1209, 1405, 1426, 1446, 1180, 942, 1195], [1492, 1140, 215, 1300, 2422, 1765, 529, 78, 174, 57, 590]], "checkpoints": {"plain": [[2591, 2881, 3763, 2356, 1231, 1403, 1443, 1400, 1153, 902, 1233], [1442, 1134, 244, 1277, 2396, 1760, 530, 136, 216, 96, 561]], "hybrid": [[2702, 2701, 2697, 2447, 2443, 2133, 1331, 1053, 938, 702, 1199], [1326, 1321, 1303, 1191, 1183, 1027, 647, 475, 430, 287, 612]]}}, {"name": "relationship", "ordinal": false, "labels": ["Husband", "Not-in-family", "Own-child", "Unmarried", "Wife", "Other-relative", "MASK"], "proxy": [{"level": "Husband", "group": "Male", "purity": 1.0, "support": 0.4148}, {"level": "Wife", "group": "Female", "purity": 0.9993, "support": 0.0457}], "real": [[12504, 4170, 2453, 777, 1, 481, 0], [0, 3571, 1972, 2416, 1377, 426, 0]], "checkpoints": {"plain": [[12426, 4153, 2438, 774, 101, 464, 0], [103, 3574, 1985, 2414, 1276, 440, 0]], "hybrid": [[0, 5226, 3001, 2031, 0, 706, 9382], [0, 2507, 1426, 982, 0, 351, 4536]]}, "real_masked": [[0, 4170, 2453, 777, 0, 481, 12505], [0, 3571, 1972, 2416, 0, 426, 1377]]}, {"name": "race", "ordinal": false, "labels": ["White", "Black", "Asian-Pac-Islander", "Amer-Indian-Eskimo", "Other"], "proxy": [], "real": [[18032, 1441, 583, 172, 158], [7899, 1371, 292, 109, 91]], "checkpoints": {"plain": [[17949, 1527, 542, 177, 161], [7955, 1281, 329, 128, 99]], "hybrid": [[17485, 1896, 586, 208, 171], [8419, 910, 288, 94, 91]]}}, {"name": "native-country", "ordinal": false, "labels": ["United-States", "Mexico", "Philippines", "Germany", "Puerto-Rico", "Canada", "India", "El-Salvador", "Cuba", "England", "Other"], "proxy": [], "real": [[18596, 489, 108, 80, 67, 74, 84, 60, 53, 47, 728], [8937, 123, 78, 59, 45, 36, 12, 30, 35, 28, 379]], "checkpoints": {"plain": [[18588, 423, 114, 104, 57, 76, 47, 53, 47, 45, 802], [8887, 192, 66, 41, 25, 26, 35, 38, 22, 21, 439]], "hybrid": [[18559, 407, 121, 105, 62, 77, 54, 56, 53, 46, 806], [8921, 208, 61, 49, 28, 28, 35, 39, 19, 20, 394]]}}], "checkpoints": {"plain": {"eps": 3, "tau": 0, "file": "lk_plain_e3_f0_r0_synthetic.csv"}, "hybrid": {"eps": 3, "tau": 1, "file": "lk_e3_f0_r0_synthetic.csv"}}, "before_after": {"file": "lk_e3_f0_r0_synthetic.csv", "eps": 3, "tau": 1, "merged": {"relationship": ["Husband", "Wife"]}, "all_columns": [{"label": "Real data", "ber": 0.1389, "tstr": 0.1349}, {"label": "Real data, proxy levels merged", "ber": 0.1944, "tstr": 0.192}, {"label": "AIM hybrid release", "ber": 0.5086, "tstr": 0.4018}, {"label": "Plain AIM release (reference)", "ber": 0.1639, "tstr": 0.1387}]}, "scorecard": {"eps": 3, "rows": [{"source": "AIM hybrid", "tau": 0.0, "ber": 0.2219, "ancb": 0.0499, "auc": 0.9066, "income_parity": 0.2061, "eo_gap": 0.1694, "validity": 0.9266, "impossible": 0.0}, {"source": "AIM hybrid", "tau": 0.25, "ber": 0.2829, "ancb": 0.0478, "auc": 0.906, "income_parity": 0.1869, "eo_gap": 0.1605, "validity": 0.9178, "impossible": 0.0}, {"source": "AIM hybrid", "tau": 0.5, "ber": 0.3477, "ancb": 0.0689, "auc": 0.9045, "income_parity": 0.1821, "eo_gap": 0.1686, "validity": 0.909, "impossible": 0.0}, {"source": "AIM hybrid", "tau": 0.75, "ber": 0.4235, "ancb": 0.1, "auc": 0.9016, "income_parity": 0.1614, "eo_gap": 0.1772, "validity": 0.903, "impossible": 0.0}, {"source": "AIM hybrid", "tau": 1.0, "ber": 0.5043, "ancb": 0.9402, "auc": 0.8895, "income_parity": 0.1579, "eo_gap": 0.1422, "validity": 0.8967, "impossible": 0.0}, {"source": "Plain AIM", "tau": null, "ber": 0.1639, "ancb": 0.1199, "auc": 0.907, "income_parity": 0.1787, "eo_gap": 0.1684, "validity": 0.9053, "impossible": 0.0068}, {"source": "Real data", "tau": null, "ber": 0.139, "ancb": 0.1911, "auc": 0.9273, "income_parity": 0.1804, "eo_gap": 0.0526, "validity": 0.9822, "impossible": 0.0}], "baseline": {"label": "FLIP (VAE)", "note": "\u03bb 4, nominal \u03b5 3", "values": {"income_parity": 0.2352, "eo_gap": 0.0957, "ber": 0.1615, "ancb": 0.2707, "auc": 0.902, "validity": 0.5589, "impossible": 0.4251}, "not_reported": ["validity", "impossible"]}}}}};
+const DATA = {"datasets": {"adult": {"label": "UCI Adult", "sensitive": "sex", "target": "income", "groups": ["Male", "Female"], "n": 30148, "columns": [{"name": "age", "ordinal": true, "labels": ["17\u201321", "22\u201326", "27\u201331", "32\u201336", "37\u201341", "42\u201346", "47\u201351", "52\u201356", "57\u201361", "62\u201366", "67\u201371", "72\u201376", "77\u201390"], "proxy": [], "real": [[1383, 2275, 2688, 2912, 2826, 2533, 2081, 1456, 1135, 582, 269, 137, 109], [1250, 1495, 1296, 1202, 1141, 1009, 811, 588, 438, 278, 128, 82, 44]], "checkpoints": {"plain": [[1380, 2265, 2674, 2904, 2847, 2518, 2071, 1428, 1173, 583, 261, 129, 123], [1245, 1535, 1304, 1178, 1140, 994, 814, 607, 418, 282, 132, 87, 56]], "hybrid": [[1775, 2550, 2698, 2762, 2688, 2349, 1968, 1391, 1062, 589, 262, 130, 122], [868, 1218, 1303, 1346, 1277, 1189, 923, 655, 507, 265, 121, 89, 41]]}}, {"name": "fnlwgt", "ordinal": true, "labels": ["10k\u201349k", "50k\u201374k", "75k\u201399k", "100k\u2013124k", "125k\u2013149k", "150k\u2013174k", "175k\u2013199k", "200k\u2013224k", "225k\u2013249k", "250k\u2013299k", "300k\u2013349k", "350k\u2013399k", "400k\u2013499k", "500k\u20131599k"], "proxy": [], "real": [[1419, 967, 1144, 2154, 1751, 2165, 2791, 1908, 1391, 1780, 1351, 724, 605, 236], [685, 444, 652, 1028, 914, 1145, 1404, 942, 569, 790, 544, 324, 232, 89]], "checkpoints": {"plain": [[1389, 975, 1146, 2111, 1793, 2189, 2821, 1882, 1375, 1755, 1362, 732, 591, 235], [683, 415, 651, 1055, 893, 1212, 1367, 940, 601, 785, 534, 318, 240, 98]], "hybrid": [[1409, 966, 1175, 2138, 1808, 2280, 2825, 1917, 1333, 1750, 1260, 694, 568, 223], [682, 422, 637, 1046, 865, 1048, 1362, 929, 640, 809, 642, 347, 272, 101]]}}, {"name": "education-num", "ordinal": true, "labels": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"], "proxy": [], "real": [[42, 103, 232, 420, 331, 556, 720, 252, 6699, 4125, 848, 644, 3520, 1153, 433, 308], [14, 41, 75, 122, 135, 269, 374, 125, 3055, 2456, 441, 394, 1586, 525, 79, 71]], "checkpoints": {"plain": [[40, 103, 220, 401, 376, 546, 701, 243, 6701, 4131, 830, 640, 3529, 1155, 435, 305], [7, 56, 88, 113, 127, 236, 395, 108, 3076, 2407, 479, 408, 1568, 519, 121, 84]], "hybrid": [[37, 91, 208, 374, 308, 562, 738, 227, 6560, 4454, 859, 706, 3472, 1124, 357, 269], [9, 61, 87, 162, 157, 264, 356, 116, 3196, 2130, 427, 337, 1641, 556, 169, 134]]}}, {"name": "capital-gain", "ordinal": true, "labels": ["0", "1\u20132999", "3000\u20134999", "5000\u20137499", "7500\u20139999", "10000\u201314999", "15000\u201324999", "25000\u201399999"], "proxy": [], "real": [[18417, 260, 429, 418, 275, 82, 332, 173], [9228, 156, 127, 79, 55, 45, 45, 27]], "checkpoints": {"plain": [[18423, 348, 239, 512, 283, 79, 295, 177], [9201, 128, 102, 143, 61, 54, 51, 52]], "hybrid": [[18685, 331, 231, 423, 226, 89, 203, 158], [8977, 156, 107, 209, 109, 34, 130, 80]]}}, {"name": "capital-loss", "ordinal": true, "labels": ["0", "1\u20131499", "1500\u20131799", "1800\u20131999", "2000\u20132299", "2300\u20134399"], "proxy": [], "real": [[19303, 77, 233, 562, 107, 104], [9424, 57, 123, 88, 31, 39]], "checkpoints": {"plain": [[19336, 259, 54, 450, 32, 225], [9381, 145, 24, 145, 12, 85]], "hybrid": [[19411, 274, 48, 370, 30, 213], [9325, 132, 29, 195, 16, 105]]}}, {"name": "hours-per-week", "ordinal": true, "labels": ["1\u201319", "20\u201329", "30\u201334", "35\u201339", "40", "41\u201344", "45\u201349", "50\u201354", "55\u201359", "60\u201399"], "proxy": [], "real": [[596, 949, 661, 991, 9672, 437, 1899, 2388, 688, 2105], [715, 1127, 662, 1050, 4551, 157, 505, 505, 127, 363]], "checkpoints": {"plain": [[596, 974, 695, 1011, 9660, 414, 1896, 2386, 642, 2082], [744, 1087, 615, 1028, 4555, 174, 529, 511, 182, 367]], "hybrid": [[894, 1367, 900, 1365, 9534, 421, 1629, 1988, 558, 1690], [430, 690, 428, 668, 4696, 189, 767, 927, 252, 755]]}}, {"name": "income", "ordinal": false, "labels": ["\u226450K", ">50K"], "proxy": [], "real": [[14031, 6355], [8648, 1114]], "checkpoints": {"plain": [[14133, 6223], [8562, 1230]], "hybrid": [[15282, 5064], [7383, 2419]]}}, {"name": "workclass", "ordinal": false, "labels": ["Private", "Self-emp-not-inc", "Local-gov", "State-gov", "Self-emp-inc", "Federal-gov", "Without-pay"], "proxy": [], "real": [[14533, 2153, 1258, 808, 985, 640, 9], [7618, 394, 819, 515, 136, 278, 2]], "checkpoints": {"plain": [[14552, 2126, 1247, 828, 968, 625, 10], [7597, 414, 813, 502, 167, 287, 12]], "hybrid": [[14956, 1687, 1397, 892, 771, 630, 13], [7199, 847, 686, 424, 364, 276, 6]]}}, {"name": "marital-status", "ordinal": false, "labels": ["Married-civ-spouse", "Never-married", "Divorced", "Separated", "Widowed", "Married-spouse-absent", "Married-AF-spouse"], "proxy": [], "real": [[12619, 5382, 1661, 352, 163, 198, 11], [1461, 4348, 2487, 539, 717, 195, 15]], "checkpoints": {"plain": [[12651, 5366, 1637, 337, 171, 182, 12], [1422, 4354, 2539, 546, 716, 190, 25]], "hybrid": [[9334, 6568, 3025, 612, 514, 262, 31], [4543, 3152, 1443, 272, 247, 130, 15]]}}, {"name": "occupation", "ordinal": false, "labels": ["Prof-specialty", "Exec-managerial", "Craft-repair", "Sales", "Adm-clerical", "Other-service", "Machine-op-inspct", "Transport-moving", "Handlers-cleaners", "Farming-fishing", "Other"], "proxy": [], "real": [[2558, 2886, 3804, 2335, 1209, 1405, 1426, 1446, 1180, 942, 1195], [1492, 1140, 215, 1300, 2422, 1765, 529, 78, 174, 57, 590]], "checkpoints": {"plain": [[2591, 2881, 3763, 2356, 1231, 1403, 1443, 1400, 1153, 902, 1233], [1442, 1134, 244, 1277, 2396, 1760, 530, 136, 216, 96, 561]], "hybrid": [[2702, 2701, 2697, 2447, 2443, 2133, 1331, 1053, 938, 702, 1199], [1326, 1321, 1303, 1191, 1183, 1027, 647, 475, 430, 287, 612]]}}, {"name": "relationship", "ordinal": false, "labels": ["Husband", "Not-in-family", "Own-child", "Unmarried", "Wife", "Other-relative", "MASK"], "proxy": [{"level": "Husband", "group": "Male", "purity": 1.0, "support": 0.4148}, {"level": "Wife", "group": "Female", "purity": 0.9993, "support": 0.0457}], "real": [[12504, 4170, 2453, 777, 1, 481, 0], [0, 3571, 1972, 2416, 1377, 426, 0]], "checkpoints": {"plain": [[12426, 4153, 2438, 774, 101, 464, 0], [103, 3574, 1985, 2414, 1276, 440, 0]], "hybrid": [[0, 5226, 3001, 2031, 0, 706, 9382], [0, 2507, 1426, 982, 0, 351, 4536]]}, "real_masked": [[0, 4170, 2453, 777, 0, 481, 12505], [0, 3571, 1972, 2416, 0, 426, 1377]]}, {"name": "race", "ordinal": false, "labels": ["White", "Black", "Asian-Pac-Islander", "Amer-Indian-Eskimo", "Other"], "proxy": [], "real": [[18032, 1441, 583, 172, 158], [7899, 1371, 292, 109, 91]], "checkpoints": {"plain": [[17949, 1527, 542, 177, 161], [7955, 1281, 329, 128, 99]], "hybrid": [[17485, 1896, 586, 208, 171], [8419, 910, 288, 94, 91]]}}, {"name": "native-country", "ordinal": false, "labels": ["United-States", "Mexico", "Philippines", "Germany", "Puerto-Rico", "Canada", "India", "El-Salvador", "Cuba", "England", "Other"], "proxy": [], "real": [[18596, 489, 108, 80, 67, 74, 84, 60, 53, 47, 728], [8937, 123, 78, 59, 45, 36, 12, 30, 35, 28, 379]], "checkpoints": {"plain": [[18588, 423, 114, 104, 57, 76, 47, 53, 47, 45, 802], [8887, 192, 66, 41, 25, 26, 35, 38, 22, 21, 439]], "hybrid": [[18559, 407, 121, 105, 62, 77, 54, 56, 53, 46, 806], [8921, 208, 61, 49, 28, 28, 35, 39, 19, 20, 394]]}}], "checkpoints": {"plain": {"eps": 3, "tau": 0, "file": "lk_plain_e3_f0_r0_synthetic.csv"}, "hybrid": {"eps": 3, "tau": 1, "file": "lk_e3_f0_r0_synthetic.csv"}}, "before_after": {"file": "lk_e3_f0_r0_synthetic.csv", "eps": 3, "tau": 1, "merged": {"relationship": ["Husband", "Wife"]}, "all_columns": [{"label": "Real data", "ber": 0.1389, "tstr": 0.1349}, {"label": "Real data, proxy levels merged", "ber": 0.1944, "tstr": 0.192}, {"label": "AIM hybrid release", "ber": 0.5086, "tstr": 0.4018}, {"label": "Plain AIM release (reference)", "ber": 0.1639, "tstr": 0.1387}]}, "scorecard": {"eps": 3, "rows": [{"source": "AIM hybrid", "tau": 0.0, "ber": 0.2219, "ancb": 0.0499, "auc": 0.9066, "income_parity": 0.2061, "eo_gap": 0.1694, "validity": 0.9266, "impossible": 0.0}, {"source": "AIM hybrid", "tau": 0.25, "ber": 0.2829, "ancb": 0.0478, "auc": 0.906, "income_parity": 0.1869, "eo_gap": 0.1605, "validity": 0.9178, "impossible": 0.0}, {"source": "AIM hybrid", "tau": 0.5, "ber": 0.3477, "ancb": 0.0689, "auc": 0.9045, "income_parity": 0.1821, "eo_gap": 0.1686, "validity": 0.909, "impossible": 0.0}, {"source": "AIM hybrid", "tau": 0.75, "ber": 0.4235, "ancb": 0.1, "auc": 0.9016, "income_parity": 0.1614, "eo_gap": 0.1772, "validity": 0.903, "impossible": 0.0}, {"source": "AIM hybrid", "tau": 1.0, "ber": 0.5043, "ancb": 0.9402, "auc": 0.8895, "income_parity": 0.1579, "eo_gap": 0.1422, "validity": 0.8967, "impossible": 0.0}, {"source": "Plain AIM", "tau": null, "ber": 0.1639, "ancb": 0.1199, "auc": 0.907, "income_parity": 0.1787, "eo_gap": 0.1684, "validity": 0.9053, "impossible": 0.0068}, {"source": "Real data", "tau": null, "ber": 0.139, "ancb": 0.1911, "auc": 0.9273, "income_parity": 0.1804, "eo_gap": 0.0526, "validity": 0.9822, "impossible": 0.0}], "baseline": {"label": "FLIP paper", "note": "\u03bb 4, nominal \u03b5 3, Fig. 3", "values": {"income_parity": 0.12, "eo_gap": 0.26, "ber": 0.49, "ancb": 0.91, "auc": 0.66, "validity": null, "impossible": null}, "repro": {"income_parity": 0.2352, "eo_gap": 0.0957, "ber": 0.1615, "ancb": 0.2707, "auc": 0.902, "validity": 0.5589, "impossible": 0.4251}}}}}};
 const DELTA = 1e-5, EPS_MIN = 0.1, EPS_MAX = 20;
 const $ = id => document.getElementById(id);
 const NS = 'http://www.w3.org/2000/svg';
@@ -406,6 +410,67 @@ function nearestPoint(pts) {
   return pts.reduce((a, b) => Math.abs(b.tau - S.tau) < Math.abs(a.tau - S.tau) ? b : a);
 }
 
+// tooltip line for FLIP: the paper's value and our reproduction
+function flipTip(B, k, f) {
+  const v = B.values[k];
+  return `${B.label}: ${v == null ? 'not reported' : f(v)}` +
+    `<br><span style="color:var(--ink-2)">our reproduction (fold 0, scored like AIM): ${f(B.repro[k])}</span>`;
+}
+
+// one dot strip per metric: every method on that metric's scale, better end on the right
+function drawStrip(pts, at, real, plain, B) {
+  const box = $('strip'); box.innerHTML = '';
+  for (const [k, t, better, f] of METRICS) {
+    const lab = document.createElement('div');
+    lab.className = 'lab';
+    lab.innerHTML = `${t}<br><span class="v">${f(at[k])}</span> <span class="b">at τ ${at.tau} · ${better}</span>`;
+    box.appendChild(lab);
+    const cell = document.createElement('div'); box.appendChild(cell);
+    const svg = el('svg', {}, cell);
+    const W = svg.clientWidth || 600, nr = B && B.values[k] == null, mR = nr ? 80 : 12, x0 = 12, cy = 16, H = 40;
+    const flipV = B && !nr ? [B.values[k]] : [];
+    const vals = [...pts.map(p => p[k]), ...(real ? [real[k]] : []), ...(plain ? [plain[k]] : []), ...flipV,
+      ...(k === 'ber' ? [0.5] : [])];
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    const pad = Math.max((hi - lo) * 0.06, 1e-4); lo -= pad; hi += pad;
+    if (['income_parity', 'eo_gap', 'impossible'].includes(k)) lo = Math.max(lo, 0);
+    const lowerBetter = better === 'lower';
+    const sx = v => { const u = (v - lo) / (hi - lo); return x0 + (W - x0 - mR) * (lowerBetter ? 1 - u : u); };
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+    el('line', { x1: x0, x2: W - mR, y1: cy, y2: cy, stroke: 'var(--grid)', 'stroke-width': 2, 'stroke-linecap': 'round' }, svg);
+    const [left, right] = lowerBetter ? [hi, lo] : [lo, hi];
+    el('text', { x: x0, y: H - 2, style: 'fill:var(--ink-3);font-size:11px' }, svg, f(left));
+    el('text', { x: W - mR, y: H - 2, 'text-anchor': 'end', style: 'fill:var(--ink-3);font-size:11px' }, svg, `${f(right)} better →`);
+    if (k === 'ber') el('line', { x1: sx(0.5), x2: sx(0.5), y1: cy - 7, y2: cy + 7, stroke: 'var(--ink-3)' }, svg);
+    // markers, drawn so the hybrid stays on top; close ones are nudged apart vertically
+    const marks = [
+      real && { name: 'real data', v: real[k], shape: 'real' },
+      plain && { name: 'plain AIM', v: plain[k], shape: 'plain' },
+      B && !nr && { name: B.label, v: B.values[k], shape: 'flip' },
+      { name: `AIM hybrid, τ ${at.tau}`, v: at[k], shape: 'hyb' },
+    ].filter(Boolean).map(m => ({ ...m, x: sx(m.v) }));
+    const byX = [...marks].sort((a, b) => a.x - b.x);
+    byX.forEach((m, i) => { m.dy = i && Math.abs(m.x - byX[i - 1].x) < 10 ? (byX[i - 1].dy > 0 ? -5 : 5) : 0; });
+    for (const m of marks) {
+      const y = cy + m.dy;
+      if (m.shape === 'hyb') el('circle', { cx: m.x, cy: y, r: 6, fill: 'var(--ink)', stroke: 'var(--panel)', 'stroke-width': 2 }, svg);
+      if (m.shape === 'plain') el('circle', { cx: m.x, cy: y, r: 5, fill: 'var(--panel)', stroke: 'var(--ink)', 'stroke-width': 1.5 }, svg);
+      if (m.shape === 'real') el('circle', { cx: m.x, cy: y, r: 5, fill: 'var(--panel)', stroke: 'var(--ink-3)', 'stroke-width': 1.5, 'stroke-dasharray': '2 1.5' }, svg);
+      if (m.shape === 'flip') el('rect', { x: m.x - 4.5, y: y - 4.5, width: 9, height: 9, fill: 'var(--panel)', stroke: 'var(--ink)', 'stroke-width': 1.5 }, svg);
+      const hit = el('circle', { cx: m.x, cy: y, r: 11, fill: 'transparent' }, svg);
+      hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}</div>` +
+        (m.shape === 'flip' ? flipTip(B, k, f) : `${m.name}: ${f(m.v)}`)));
+      hit.addEventListener('mouseleave', hideTip);
+    }
+    if (nr) {   // the paper does not report this metric
+      const tx = el('text', { x: W - 4, y: cy + 4, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg, 'FLIP n/r');
+      const hit = el('rect', { x: W - mR + 4, y: 0, width: mR - 4, height: H, fill: 'transparent' }, svg);
+      hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}</div>` + flipTip(B, k, f)));
+      hit.addEventListener('mouseleave', hideTip);
+    }
+  }
+}
+
 function drawScorecard() {
   const SC = cur().scorecard;
   $('sc-body').style.display = SC ? '' : 'none';
@@ -419,17 +484,12 @@ function drawScorecard() {
   const real = SC.rows.find(r => r.source === 'Real data'), plain = SC.rows.find(r => r.source === 'Plain AIM');
   const B = SC.baseline, at = nearestPoint(pts);
   $('sc-flipleg').style.display = B ? '' : 'none';
-  if (B) $('sc-fliplab').textContent = `${B.label}, ${B.note}`;
-  $('sc-sub').textContent = `Actual releases at ε = ${SC.eps} (fold 0, refit 0) as τ varies; the ε slider does not ` +
-    `apply here. Showing τ = ${at.tau}, the grid point nearest the slider.`;
-  // tiles: values at the current τ
-  $('tiles').innerHTML = METRICS.map(([k, t, better, f]) =>
-    `<div class="tile"><div class="t">${t}</div><div class="v">${f(at[k])}</div>` +
-    `<div class="r">${better} · real ${real ? f(real[k]) : '–'}${B ? ` · FLIP ${f(B.values[k])}` +
-      (B.not_reported.includes(k) ? '*' : '') : ''}</div></div>`).join('') +
-    (B && B.not_reported.length ? '<p class="note" style="grid-column:1/-1;margin:0">* not reported by FLIP; ' +
-      'measured here on our reproduction of FLIP.</p>' : '');
-  // small multiples
+  if (B) $('sc-fliplab').textContent = `${B.label} (${B.note})`;
+  $('sc-tau').textContent = at.tau;
+  $('sc-sub').textContent = `Actual releases at ε = ${SC.eps} (fold 0, refit 0); τ snaps to the computed grid ` +
+    `(now ${at.tau}). The ε slider does not apply here.`;
+  drawStrip(pts, at, real, plain, B);
+  // small multiples along τ
   const box = $('multiples'); box.innerHTML = '';
   for (const [k, t, better, f] of METRICS) {
     const cell = document.createElement('div');
@@ -438,8 +498,8 @@ function drawScorecard() {
     const svg = el('svg', {}, cell);
     const W = svg.clientWidth || 300, mL = 46, mR = 34, top = 8, plotH = 110, H = top + plotH + 24;
     const slot = B ? 44 : 0, xR = W - mR - slot;   // τ axis ends at xR; FLIP sits in the slot
-    const vals = [...pts.map(p => p[k]), ...(real ? [real[k]] : []), ...(plain ? [plain[k]] : []),
-      ...(B ? [B.values[k]] : [])];
+    // the scale fits the AIM points and the real data; FLIP is pinned to the edge when off it
+    const vals = [...pts.map(p => p[k]), ...(real ? [real[k]] : []), ...(plain ? [plain[k]] : [])];
     const { lo, hi, step } = rangeAxis(vals);
     const sx = v => mL + (xR - mL) * v, sy = v => top + plotH * (1 - (v - lo) / (hi - lo));
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
@@ -450,20 +510,29 @@ function drawScorecard() {
     for (const x of [0, 0.25, 0.5, 0.75, 1])
       el('text', { x: sx(x), y: top + plotH + 16, 'text-anchor': 'middle' }, svg, String(x));
     el('text', { x: mL - 6, y: top + plotH + 16, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg, 'τ');
-    if (B) {   // the FLIP slot: a separator, its tick and a hollow square
+    if (B) {   // the FLIP slot: a separator, its tick and the paper's value
       const fx = xR + slot / 2 + 6, fv = B.values[k];
       el('line', { x1: xR + 10, x2: xR + 10, y1: top, y2: top + plotH, stroke: 'var(--grid)' }, svg);
-      el('text', { x: fx, y: top + plotH + 16, 'text-anchor': 'middle' }, svg, B.not_reported.includes(k) ? 'FLIP*' : 'FLIP');
-      el('rect', { x: fx - 4.5, y: sy(fv) - 4.5, width: 9, height: 9, fill: 'var(--panel)', stroke: 'var(--ink)',
-        'stroke-width': 1.5 }, svg);
-      const hit = el('circle', { cx: fx, cy: sy(fv), r: 12, fill: 'transparent' }, svg);
-      hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}</div>` +
-        `${B.label} (${B.note}) ${f(fv)}<br>AIM hybrid at τ ${at.tau}: ${f(at[k])}` + (real ? `<br>real data ${f(real[k])}` : '') +
-        (B.not_reported.includes(k) ? '<br><i>Not reported by FLIP: measured here on our reproduction.</i>' : '')));
+      el('text', { x: fx, y: top + plotH + 16, 'text-anchor': 'middle' }, svg, 'FLIP');
+      let hy = top + plotH / 2;
+      if (fv == null) {
+        el('text', { x: fx, y: hy + 4, 'text-anchor': 'middle', style: 'fill:var(--ink-3)' }, svg, 'n/r');
+      } else if (fv < lo || fv > hi) {   // off this scale: arrow at the edge, value beside it
+        const up = fv > hi; hy = up ? top + 6 : top + plotH - 6;
+        el('text', { x: fx, y: hy + 4, 'text-anchor': 'middle' }, svg, up ? '↑' : '↓');
+        el('text', { x: fx, y: up ? hy + 18 : hy - 10, 'text-anchor': 'middle', style: 'font-size:11px' }, svg, f(fv));
+      } else {
+        hy = sy(fv);
+        el('rect', { x: fx - 4.5, y: hy - 4.5, width: 9, height: 9, fill: 'var(--panel)', stroke: 'var(--ink)',
+          'stroke-width': 1.5 }, svg);
+      }
+      const hit = el('circle', { cx: fx, cy: hy, r: 14, fill: 'transparent' }, svg);
+      hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}</div>` + flipTip(B, k, f) +
+        `<br>AIM hybrid at τ ${at.tau}: ${f(at[k])}` + (real ? `<br>real data ${f(real[k])}` : '')));
       hit.addEventListener('mouseleave', hideTip);
     }
     if (real) {
-      el('line', { x1: mL, x2: W - mR, y1: sy(real[k]), y2: sy(real[k]), stroke: 'var(--ink-3)', 'stroke-width': 1.5,
+      el('line', { x1: mL, x2: xR, y1: sy(real[k]), y2: sy(real[k]), stroke: 'var(--ink-3)', 'stroke-width': 1.5,
         'stroke-dasharray': '1 3', 'stroke-linecap': 'round' }, svg);
       el('text', { x: W - mR + 4, y: sy(real[k]) + 4, style: 'fill:var(--ink-3)' }, svg, 'real');
     }
@@ -483,11 +552,11 @@ function drawScorecard() {
     }
   }
   const rows = [...pts.map(p => [`AIM hybrid, τ ${p.tau}`, p]), ...(plain ? [['Plain AIM', plain]] : []),
-    ...(B ? [[`${B.label}, ${B.note} (* = measured here)`, B.values]] : []), ...(real ? [['Real data', real]] : [])];
+    ...(B ? [[`${B.label} (${B.note})`, B.values], ['FLIP, our reproduction', B.repro]] : []),
+    ...(real ? [['Real data', real]] : [])];
   $('sctbl').innerHTML = '<table><tr><th></th>' + METRICS.map(m => `<th>${m[1]}</th>`).join('') + '</tr>' +
     rows.map(([n, r]) => `<tr><td>${n}</td>` + METRICS.map(([k, , , f]) =>
-      `<td>${f(r[k])}${B && r === B.values && B.not_reported.includes(k) ? '*' : ''}</td>`).join('') + '</tr>').join('') +
-    '</table>';
+      `<td>${r[k] == null ? 'n/r' : f(r[k])}</td>`).join('') + '</tr>').join('') + '</table>';
 }
 
 // --- leakage ranking ----------------------------------------------------------

@@ -204,20 +204,22 @@ def all_columns_leakage(frames, numeric, categorical, sens):
 
 
 def flip_baseline():
-    """FLIP as published (lambda 4, nominal eps 3, fold 0), scored like the
-    AIM tables: results/final_comparison.csv (aim_fair/final_chart.py), or
-    None if missing."""
+    """FLIP at lambda 4, eps 3 from results/final_comparison.csv
+    (aim_fair/final_chart.py), or None if missing:
+      values  the FLIP paper's reported numbers (its Fig. 3, its own
+              evaluation code); None where it reports nothing (validity,
+              impossible rows);
+      repro   FLIP as published, reproduced here (fold 0) and scored like
+              the AIM tables."""
     path = os.path.join(HERE, 'results', 'final_comparison.csv')
     if not os.path.exists(path):
         return None
     df = pd.read_csv(path).set_index('metric')
-    col = df['flip_faithful_repro']
-    # metrics the FLIP paper does not report (validity, impossible rows):
-    # only our scorer's measurement of the reproduction exists
-    return {'label': 'FLIP (VAE)', 'note': 'λ 4, nominal ε 3',
-            'values': {k: float(col[m]) for m, k in FLIP_METRICS.items()},
-            'not_reported': [k for m, k in FLIP_METRICS.items()
-                             if pd.isna(df.loc[m, 'flip_paper_reported'])]}
+    paper, repro = df['flip_paper_reported'], df['flip_faithful_repro']
+    return {'label': 'FLIP paper', 'note': 'λ 4, nominal ε 3, Fig. 3',
+            'values': {k: None if pd.isna(paper[m]) else float(paper[m])
+                       for m, k in FLIP_METRICS.items()},
+            'repro': {k: float(repro[m]) for m, k in FLIP_METRICS.items()}}
 
 
 def scorecard(name):

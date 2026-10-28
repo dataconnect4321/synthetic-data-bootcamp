@@ -355,8 +355,9 @@ def test_scorecard_matches_grid_and_scorer(tmp_path, monkeypatch):
 
 
 def test_flip_baseline_matches_final_comparison(tmp_path, monkeypatch):
-    """The scorecard's FLIP baseline equals results/final_comparison.csv's
-    flip_faithful_repro (FLIP as published, lambda 4, nominal eps 3, fold 0)
+    """The scorecard's FLIP baseline: the paper's reported values from
+    results/final_comparison.csv (None where the paper reports nothing:
+    validity, impossible rows), and our reproduction (flip_faithful_repro)
     for every scorecard metric."""
     comp = os.path.join(ROOT, 'results', 'final_comparison.csv')
     grid = os.path.join(ROOT, 'results', 'utility_tau_grid.csv')
@@ -366,10 +367,14 @@ def test_flip_baseline_matches_final_comparison(tmp_path, monkeypatch):
     monkeypatch.setattr(L, 'ALL_COLUMNS', False)
     L.main()
     B = page_data(tmp_path / 'page.html')['adult']['scorecard']['baseline']
-    want = pd.read_csv(comp).set_index('metric')['flip_faithful_repro']
-    assert set(B['values']) == {'ber', 'ancb', 'auc', 'income_parity', 'eo_gap',
-                                'validity', 'impossible'}
+    df = pd.read_csv(comp).set_index('metric')
+    keys = {'ber', 'ancb', 'auc', 'income_parity', 'eo_gap', 'validity',
+            'impossible'}
+    assert set(B['values']) == set(B['repro']) == keys
     for label, key in L.FLIP_METRICS.items():
-        assert B['values'][key] == want[label]
-    # FLIP's paper reports neither: these two are our scorer's measurement
-    assert sorted(B['not_reported']) == ['impossible', 'validity']
+        paper = df.loc[label, 'flip_paper_reported']
+        assert B['values'][key] == (None if pd.isna(paper) else paper)
+        assert B['repro'][key] == df.loc[label, 'flip_faithful_repro']
+    assert [k for k, v in B['values'].items() if v is None] == ['validity',
+                                                              'impossible']
+    assert B['values']['ancb'] == 0.91 and B['values']['auc'] == 0.66
