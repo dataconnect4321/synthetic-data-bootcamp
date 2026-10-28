@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leakage Explorer</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --panel: #ffffff; --border: #e4e3df;
+  --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8984; --grid: #ecebe7;
+  --g0: #2a78d6; --g1: #eb6834; --bar: #6e6d68; --bar-real: #e2e1dc; --sel: #f1f0ec;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface: #1a1a19; --panel: #222221; --border: #3a3a37;
+    --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8f8e86; --grid: #2f2f2c;
+    --g0: #3987e5; --g1: #d95926; --bar: #b3b2aa; --bar-real: #3a3a37; --sel: #2c2c2a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #1a1a19; --panel: #222221; --border: #3a3a37;
+  --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8f8e86; --grid: #2f2f2c;
+  --g0: #3987e5; --g1: #d95926; --bar: #b3b2aa; --bar-real: #3a3a37; --sel: #2c2c2a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 0 0 2px; }
+p { margin: 0 0 8px; }
+.sub, .note { color: var(--ink-2); }
+.note { font-size: 13px; }
+.panel { background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px; margin-top: 16px; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: end;
+  position: sticky; top: 0; z-index: 2; }
+.ctl { display: flex; flex-direction: column; min-width: 200px; flex: 1; }
+.ctl label { font-size: 13px; color: var(--ink-2); }
+.ctl b { color: var(--ink); font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; accent-color: var(--ink-2); }
+button { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button:hover { background: var(--sel); }
+select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; margin: 2px 0; }
+select:disabled { color: var(--ink-2); opacity: 1; }
+.seg { display: inline-flex; margin: 8px 0 6px; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 6px 6px 0; }
+.seg button[aria-pressed="true"] { background: var(--sel); font-weight: 600; }
+.badge { font-size: 10px; font-weight: 600; letter-spacing: .04em; color: var(--ink);
+  border: 1px solid var(--ink-3); border-radius: 4px; padding: 0 4px; }
+h3 { font-size: 14px; margin: 16px 0 2px; }
+.pair { display: flex; gap: 16px; flex-wrap: wrap; }
+.pair > div { flex: 1 1 300px; min-width: 0; }
+.pair .readout { margin: 6px 0 0; }
+#ba-tbl tr.hi td { font-weight: 600; }
+svg .badge { fill: var(--ink); font-size: 10px; font-weight: 600; letter-spacing: .04em; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.readout { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2);
+  margin: 6px 0 4px; }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+  vertical-align: -1px; margin-right: 5px; }
+.tick { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--ink);
+  vertical-align: 3px; margin-right: 5px; }
+.dash { display: inline-block; width: 12px; height: 12px; border: 1.5px dashed var(--ink);
+  border-radius: 2px; vertical-align: -1px; margin-right: 5px; }
+svg { display: block; width: 100%; overflow: visible; }
+svg text { fill: var(--ink-2); font-size: 12px; }
+.row { cursor: pointer; }
+.row:hover .bg { fill: var(--sel); }
+#tip { position: fixed; pointer-events: none; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; max-width: 280px; z-index: 5;
+  font-variant-numeric: tabular-nums; }
+#tip .h { font-weight: 600; margin-bottom: 2px; }
+details { margin-top: 10px; font-size: 13px; }
+table { border-collapse: collapse; margin-top: 6px; font-variant-numeric: tabular-nums; }
+th, td { padding: 2px 10px 2px 0; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+#err { display: none; color: #e34948; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Which columns leak <span class="sens"></span>?</h1>
+  <p class="sub"><span id="dslabel"></span>, fold 0 training rows. Move ε (privacy) and τ (repair) to see how
+    each column's <span id="gvs"></span> histogram changes in a simulated AIM-hybrid release.</p>
+  <p id="err">No data embedded: build this page with <code>python leakage_explorer.py</code>.</p>
+
+  <div class="panel controls">
+    <div class="ctl" style="min-width:160px;flex:0 1 200px">
+      <label for="ds">Dataset</label>
+      <select id="ds"></select>
+      <span class="readout" id="dsnote"></span>
+    </div>
+    <div class="ctl">
+      <label for="eps">Privacy budget ε = <b id="epsv"></b> <span id="epsh"></span></label>
+      <input id="eps" type="range" min="0" max="1000" step="1">
+    </div>
+    <div class="ctl">
+      <label for="tau">Repair amount τ = <b id="tauv"></b> <span id="tauh"></span></label>
+      <input id="tau" type="range" min="0" max="1" step="0.05">
+    </div>
+    <div class="ctl" style="min-width:0;flex:0 1 auto">
+      <label>Noise per cell</label>
+      <div class="seg" role="group" aria-label="Noise scale" style="margin:2px 0">
+        <button id="n-split" aria-pressed="true" title="ρ split evenly over the [group × column] tables">Equal split</button>
+        <button id="n-aim" aria-pressed="false" title="The σ real AIM starts with at this ε (FairAIM.run)">AIM's starting σ</button>
+      </div>
+    </div>
+    <div class="chips">
+      <button id="reseed" title="Draw new Gaussian noise">Resample noise</button>
+      <span id="cpchips" class="chips"></span>
+    </div>
+    <div class="readout" id="noise" style="flex-basis:100%"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Leakage by column</h2>
+    <div class="seg" role="group" aria-label="Leakage measure">
+      <button id="m-tv" aria-pressed="true">Distance (TV) · balanced error</button>
+      <button id="m-nmi" aria-pressed="false">Mutual information</button>
+    </div>
+    <p class="note" id="mnote-tv">How far apart the two <span class="sens"></span> groups' distributions of each column are:
+      the total-variation distance (TV), where 0 means identical. A classifier that sees only
+      this column guesses <span class="sens"></span> with balanced error (1 − TV)/2 at best (second axis row),
+      so a balanced error of 0.5 means no leak.
+      Click a row to show its histogram below.</p>
+    <p class="note" id="mnote-nmi" style="display:none">The share of the uncertainty about
+      <span class="sens"></span> that knowing this column removes: I(<span class="sens"></span>; column) / H(<span class="sens"></span>),
+      from 0 (no information) to 1 (the column determines <span class="sens"></span>). Unlike TV it weighs each
+      level by how many rows it holds, so one large, skewed level counts for more than a small one.
+      Click a row to show its histogram below.</p>
+    <div class="legend"><span><span class="sw" style="background:var(--bar)"></span>simulated release</span>
+      <span><span class="sw" style="background:var(--bar-real)"></span>real data</span>
+      <span><span class="badge">PROXY</span> has levels with ≥ 95% one group (≥ 1% of rows), pointing to
+        both groups: the levels the AIM hybrid merges (masks)</span></div>
+    <svg id="rank"></svg>
+  </div>
+
+  <div class="panel">
+    <h2>What the noise costs, across ε</h2>
+    <p class="note">Averages over all columns and over 20 noise draws, at the current τ.
+      <b>Leakage</b>: the TV between the two groups in the simulated release.
+      <b>Distortion</b>: the TV between the release's overall distribution of a column and the real one,
+      which is what the noise costs (the repair moves the groups toward each other without changing it).
+      The vertical line marks the current ε.</p>
+    <div class="legend"><span><span class="tick"></span>leakage, release</span>
+      <span><span class="tick" style="border-top-style:dashed"></span>distortion, release</span>
+      <span><span class="tick" style="border-top:1.5px dotted var(--ink-3)"></span>leakage, real data</span></div>
+    <svg id="sweep"></svg>
+    <details><summary>Show as table</summary><div id="sweeptbl"></div></details>
+  </div>
+
+  <div class="panel">
+    <h2 id="htitle"></h2>
+    <p class="readout" id="hread"></p>
+    <div class="legend"><span><span class="sw" style="background:var(--g0)"></span><span class="g0"></span>, release</span>
+      <span><span class="sw" style="background:var(--g1)"></span><span class="g1"></span>, release</span>
+      <span><span class="tick"></span>real data</span>
+      <span id="cpleg" style="display:none"><span class="dash"></span>real AIM release</span></div>
+    <svg id="hist"></svg>
+    <details><summary>Show as table</summary><div id="tbl"></div></details>
+  </div>
+
+  <div class="panel" id="ba">
+    <h2>Before vs after: real data vs the AIM hybrid release</h2>
+    <p class="note" id="ba-sub"></p>
+    <div id="ba-body">
+      <h3>Leakage through all columns at once</h3>
+      <p class="note">Repairing columns one by one can leave <span class="sens"></span> readable from
+        combinations of columns, so this asks a classifier (the scorer's gradient-boosted trees,
+        <code>paper_metrics.py</code>) to recover it from every other column. For both measures 0.5 means no leak.
+        <b>Balanced error</b>: predicting the table's own <span class="sens"></span> column (3-fold, mean of 10 seeds).
+        <b>Folded tstr</b>: trained on the table, tested on real held-out people (fold 0 test rows), folded
+        as 0.5 − |BER − 0.5| so that a flipped label also counts as a leak.</p>
+      <div id="ba-tbl"></div>
+      <h3>Per column</h3>
+      <p class="note">TV between the two groups, real data → release. Where the hybrid merged proxy levels,
+        the middle mark is the real data with the same levels merged, which separates what the masking does
+        from what the repair does. Click a row to show its histograms below and above.</p>
+      <div class="legend"><span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2"/></svg>real data</span>
+        <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2" stroke-dasharray="2.5 2"/></svg>real data, proxy levels merged</span>
+        <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--ink)"/></svg>AIM hybrid release</span></div>
+      <svg id="ba-rank"></svg>
+      <h3 id="ba-htitle"></h3>
+      <div class="legend"><span><span class="sw" style="background:var(--g0)"></span><span class="g0"></span></span>
+        <span><span class="sw" style="background:var(--g1)"></span><span class="g1"></span></span></div>
+      <div class="pair">
+        <div><p class="readout">Real data</p><svg id="ba-real"></svg></div>
+        <div><p class="readout">AIM hybrid release</p><svg id="ba-hyb"></svg></div>
+      </div>
+      <details><summary>Show as table</summary><div id="ba-htbl"></div></details>
+    </div>
+    <p class="note" id="ba-none" style="display:none"></p>
+  </div>
+
+  <p class="note" style="margin-top:16px">How this is simulated: each [<span class="sens"></span> × column] count table
+    gets Gaussian noise with an equal share of the zCDP budget ρ (δ = 1e-5). Then each group's
+    distribution is moved τ of the way to the pooled distribution using the transport plans of
+    <code>aim_fair/fair_aim.py</code> (monotone for binned numerics, minimal-move for categories).
+    This works on marginals only. It does not fit Private-PGM, mask proxies or apply consistency
+    rules. With <b>Equal split</b> it spends the budget on <span id="ntab"></span> tables, where real AIM spends it on
+    many more, so real noise is larger; <b>AIM's starting σ</b> uses the noise real AIM starts with at the same ε
+    instead (AIM then halves σ on some tables and combines several noisy tables in its model fit, so neither
+    setting is exact). Repairing each column separately does not remove leakage through
+    combinations of columns: the real AIM hybrid's release still teaches the protected attribute
+    slightly (folded tstr 0.43–0.49 across the four datasets, not 0.5; see RESULTS.md and
+    <code>results/datasets_summary.csv</code>).</p>
+</main>
+<div id="tip"></div>
+<script>
+const DATA = /*DATA*/null;
+const DELTA = 1e-5, EPS_MIN = 0.1, EPS_MAX = 20;
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+
+// --- privacy accounting: port of aim_fair/vendor/cdp2adp.py ---------------
+function cdpDelta(rho, eps) {
+  if (rho === 0) return 0;
+  let amin = 1.01, amax = (eps + 1) / (2 * rho) + 2, alpha = amin;
+  for (let i = 0; i < 200; i++) {
+    alpha = (amin + amax) / 2;
+    const d = (2 * alpha - 1) * rho - eps + Math.log1p(-1 / alpha);
+    if (d < 0) amin = alpha; else amax = alpha;
+  }
+  const delta = Math.exp((alpha - 1) * (alpha * rho - eps) + alpha * Math.log1p(-1 / alpha)) / (alpha - 1);
+  return Math.min(delta, 1);
+}
+function cdpRho(eps, delta) {
+  let lo = 0, hi = eps + 1;
+  for (let i = 0; i < 200; i++) {
+    const rho = (lo + hi) / 2;
+    if (cdpDelta(rho, eps) <= delta) lo = rho; else hi = rho;
+  }
+  return lo;
+}
+
+// --- repair: port of coupling / repair_plans in aim_fair/fair_aim.py -------
+function norm(v) { const c = v.map(x => Math.max(x, 0)); const s = c.reduce((a, b) => a + b, 0) || 1; return c.map(x => x / s); }
+function coupling(p, q, ordinal) {
+  p = norm(p); q = norm(q);
+  const k = p.length, mass = p.map(() => new Array(k).fill(0));
+  if (ordinal) {   // monotone (north-west corner) coupling = 1-D optimal transport
+    let cp = 0;
+    for (let i = 0; i < k; i++) {
+      cp += p[i]; let cq = 0;
+      for (let j = 0; j < k; j++) {
+        cq += q[j];
+        mass[i][j] = Math.max(0, Math.min(cp, cq) - Math.max(cp - p[i], cq - q[j]));
+      }
+    }
+  } else {         // 0-1 cost: keep min(p, q), move the surplus to the deficits
+    const keep = p.map((x, i) => Math.min(x, q[i]));
+    const r = p.map((x, i) => x - keep[i]), d = q.map((x, i) => x - keep[i]);
+    const ds = d.reduce((a, b) => a + b, 0);
+    for (let i = 0; i < k; i++) {
+      mass[i][i] = keep[i];
+      if (ds > 1e-12) for (let j = 0; j < k; j++) mass[i][j] += r[i] * d[j] / ds;
+    }
+  }
+  return mass.map((row, i) => p[i] > 1e-12 ? row.map(m => m / p[i]) : row.map((_, j) => +(i === j)));
+}
+// returns {cond: [2][k] released P(x | group), pooled: [k] released P(x),
+//          w: [2] released P(group)}
+function release(noisy, ordinal, tau) {
+  const pj = noisy.map(r => r.map(x => Math.max(x, 0)));
+  const tot = pj.flat().reduce((a, b) => a + b, 0) || 1;
+  const target = pj[0].map((_, j) => (pj[0][j] + pj[1][j]) / tot);
+  const w = pj.map(r => r.reduce((a, b) => a + b, 0) / tot);
+  const cond = pj.map(r => norm(r)).map(c => {
+    const T = coupling(c, target, ordinal);
+    return c.map((_, j) => c.reduce((s, ci, i) => s + ci * ((1 - tau) * (i === j) + tau * T[i][j]), 0));
+  });
+  return { cond, pooled: target.map((_, j) => w[0] * cond[0][j] + w[1] * cond[1][j]), w };
+}
+const tv = (a, b) => 0.5 * a.reduce((s, x, i) => s + Math.abs(x - b[i]), 0);
+// normalized mutual information I(S; X) / H(S) of a [2][k] joint (counts or
+// probabilities): the share of the group's uncertainty the column removes
+function nmi(joint) {
+  const p = joint.map(r => r.map(x => Math.max(x, 0)));
+  const tot = p.flat().reduce((a, b) => a + b, 0) || 1;
+  const ps = p.map(r => r.reduce((a, b) => a + b, 0) / tot);
+  const px = p[0].map((_, j) => (p[0][j] + p[1][j]) / tot);
+  let I = 0, H = 0;
+  ps.forEach((s, g) => {
+    if (s > 0) H -= s * Math.log(s);
+    p[g].forEach((x, j) => { const q = x / tot; if (q > 0) I += q * Math.log(q / (s * px[j])); });
+  });
+  return H > 0 ? Math.max(I, 0) / H : 0;
+}
+
+// --- seeded noise -----------------------------------------------------------
+function rng(seed) {
+  return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function normals(seed) {
+  const u = rng(seed);
+  const z = () => Math.sqrt(-2 * Math.log(1 - u())) * Math.cos(2 * Math.PI * u());
+  return cur().columns.map(c => c.real.map(r => r.map(z)));
+}
+
+// --- state ------------------------------------------------------------------
+const S = { ds: null, eps: 3, tau: 0, seed: 1, sel: null, z: null, metric: 'tv', noise: 'split' };
+const cur = () => DATA.datasets[S.ds];
+const epsFromSlider = v => Math.exp(Math.log(EPS_MIN) + v / 1000 * (Math.log(EPS_MAX) - Math.log(EPS_MIN)));
+const sliderFromEps = e => Math.round(1000 * (Math.log(e) - Math.log(EPS_MIN)) / (Math.log(EPS_MAX) - Math.log(EPS_MIN)));
+const fmtEps = e => e < 1 ? e.toFixed(2) : e < 10 ? e.toFixed(1) : e.toFixed(0);
+const pct = x => (100 * x).toFixed(1) + '%';
+function activeCheckpoint() {
+  for (const [k, cp] of Object.entries(cur().checkpoints))
+    if (Math.abs(S.eps - cp.eps) < 0.05 && Math.abs(S.tau - cp.tau) < 1e-9) return k;
+  return null;
+}
+
+// AIM's own starting noise per cell at this ε (FairAIM.run): 16·d rounds,
+// 90% of its ρ on measurements; it halves σ whenever a measurement adds little
+function aimSigma(rho) {
+  const D = cur(), rounds = 16 * D.n_attributes;
+  return Math.sqrt(rounds / (2 * 0.9 * rho * D.aim_rho_share));
+}
+
+function compute(eps = S.eps, z = S.z) {
+  const D = cur(), rho = cdpRho(eps, DELTA), K = D.columns.length;
+  const sigma = S.noise === 'aim' ? aimSigma(rho) : Math.sqrt(K / (2 * rho));
+  const cols = D.columns.map((c, ci) => {
+    const realCond = c.real.map(r => norm(r));
+    const noisy = c.real.map((r, s) => r.map((x, j) => x + sigma * z[ci][s][j]));
+    const rel = release(noisy, c.ordinal, S.tau);
+    const realPooled = norm(c.real[0].map((x, j) => x + c.real[1][j]));
+    // most group-skewed real level with >= 1% of rows
+    let skew = null;
+    c.labels.forEach((l, j) => {
+      const n = c.real[0][j] + c.real[1][j];
+      if (n < 0.01 * D.n) return;
+      const pm = c.real[0][j] / n, m = Math.max(pm, 1 - pm);
+      if (!skew || m > skew.m) skew = { l, m, who: D.groups[pm >= 0.5 ? 0 : 1] };
+    });
+    return { ...c, realCond, rel, tvReal: tv(realCond[0], realCond[1]),
+      tvRel: tv(rel.cond[0], rel.cond[1]), distortion: tv(rel.pooled, realPooled), skew,
+      nmiReal: nmi(c.real), nmiRel: nmi(rel.cond.map((r, s) => r.map(x => rel.w[s] * x))) };
+  });
+  return { rho, sigma, cols };
+}
+
+// mean leakage and distortion over all columns, across ε, at the current τ:
+// the average over SWEEP_DRAWS fixed noise draws (separate from the page's seed)
+const SWEEP_DRAWS = 20, SWEEP_N = 61;
+const sweepEps = Array.from({ length: SWEEP_N }, (_, i) => epsFromSlider(1000 * i / (SWEEP_N - 1)));
+let sweepCache = { key: null };
+function sweep() {
+  const key = `${S.ds}|${S.tau}|${S.noise}`;
+  if (sweepCache.key === key) return sweepCache;
+  const zs = Array.from({ length: SWEEP_DRAWS }, (_, i) => normals(1000 + i));
+  const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+  const rows = sweepEps.map(eps => {
+    let leak = 0, dist = 0;
+    for (const z of zs) {
+      const R = compute(eps, z);
+      leak += mean(R.cols.map(c => c.tvRel)); dist += mean(R.cols.map(c => c.distortion));
+    }
+    return { eps, leak: leak / zs.length, dist: dist / zs.length };
+  });
+  const real = mean(compute(S.eps, zs[0]).cols.map(c => c.tvReal));
+  sweepCache = { key, rows, real };
+  return sweepCache;
+}
+
+// --- drawing helpers --------------------------------------------------------
+function el(tag, attrs, parent, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text != null) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+// bar with 4px rounded data-end, square at the baseline
+function vbar(x, y0, w, h) {
+  const r = Math.min(4, w / 2, h);
+  return `M${x},${y0}V${y0 - h + r}Q${x},${y0 - h} ${x + r},${y0 - h}H${x + w - r}Q${x + w},${y0 - h} ${x + w},${y0 - h + r}V${y0}Z`;
+}
+function hbar(x0, y, w, h) {
+  const r = Math.min(4, h / 2, w);
+  return `M${x0},${y}H${x0 + w - r}Q${x0 + w},${y} ${x0 + w},${y + r}V${y + h - r}Q${x0 + w},${y + h} ${x0 + w - r},${y + h}H${x0}Z`;
+}
+const tip = $('tip');
+function showTip(ev, html) {
+  tip.innerHTML = html; tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+
+// --- leakage ranking ----------------------------------------------------------
+// axis maximum and tick step: 3-5 ticks, covering every value
+function niceAxis(m) {
+  const step = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25].find(s => m / s <= 5) || 0.25;
+  return { max: Math.max(step, Math.ceil(m / step - 1e-9) * step), step };
+}
+const proxyText = c => c.proxy.map(p => `${p.level} → ${p.group} (${pct(p.purity)}, ${pct(p.support)} of rows)`).join('; ');
+
+function drawRank(R) {
+  const svg = $('rank'); svg.innerHTML = '';
+  const isTV = S.metric === 'tv';
+  const real = c => isTV ? c.tvReal : c.nmiReal, rel = c => isTV ? c.tvRel : c.nmiRel;
+  const W = svg.clientWidth || 900, rowH = 28, valW = 92;
+  // room for the longest name and its badge (~6.5 px per character at 12px)
+  const labW = Math.min(W * 0.42, Math.max(...R.cols.map(c => c.name.length * 6.5 + (c.proxy.length ? 48 : 0))) + 14);
+  const order = [...R.cols].sort((a, b) => real(b) - real(a));   // fixed: by real leakage
+  const { max, step } = niceAxis(Math.max(...R.cols.flatMap(c => [real(c), rel(c)])));
+  const x0 = labW, plotW = W - labW - valW, sx = v => x0 + plotW * v / max;
+  const axH = isTV ? 34 : 20, H = order.length * rowH + axH;
+  const dec = step < 0.1 ? 2 : 1;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  for (let i = 0; i * step <= max + 1e-9; i++) {
+    const t = i * step;
+    el('line', { x1: sx(t), x2: sx(t), y1: 0, y2: order.length * rowH + 2, stroke: 'var(--grid)' }, svg);
+    el('text', { x: sx(t), y: order.length * rowH + 16, 'text-anchor': 'middle' }, svg, t.toFixed(dec));
+    if (isTV) el('text', { x: sx(t), y: order.length * rowH + 30, 'text-anchor': 'middle',
+      style: 'fill:var(--ink-3)' }, svg, ((1 - t) / 2).toFixed(dec + 1));
+  }
+  el('text', { x: x0 - 8, y: order.length * rowH + 16, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg,
+    isTV ? 'TV' : 'I / H');
+  if (isTV) el('text', { x: x0 - 8, y: order.length * rowH + 30, 'text-anchor': 'end', style: 'fill:var(--ink-3)' },
+    svg, 'balanced error');
+  order.forEach((c, i) => {
+    const y = i * rowH, g = el('g', { class: 'row' }, svg);
+    el('rect', { class: 'bg', x: 0, y, width: W, height: rowH, rx: 6,
+      fill: c.name === S.sel ? 'var(--sel)' : 'transparent' }, g);
+    const t = el('text', { x: labW - 10, y: y + rowH / 2 + 4, 'text-anchor': 'end',
+      style: c.name === S.sel ? 'fill:var(--ink);font-weight:600' : '' }, g);
+    if (c.proxy.length) el('tspan', { class: 'badge' }, t, 'PROXY');
+    el('tspan', c.proxy.length ? { dx: 6 } : {}, t, c.name);
+    if (real(c) > 0.0005) el('path', { d: hbar(x0, y + 5, sx(real(c)) - x0, rowH - 10), fill: 'var(--bar-real)' }, g);
+    if (rel(c) > 0.0005) el('path', { d: hbar(x0, y + 10, sx(rel(c)) - x0, rowH - 20), fill: 'var(--bar)' }, g);
+    el('text', { x: W - 4, y: y + rowH / 2 + 4, 'text-anchor': 'end' }, g,
+      `${real(c).toFixed(2)} → ${rel(c).toFixed(2)}`);
+    g.addEventListener('click', () => { S.sel = c.name; render(); });
+    g.addEventListener('mousemove', ev => showTip(ev,
+      `<div class="h">${c.name}</div>TV real ${c.tvReal.toFixed(3)} → release ${c.tvRel.toFixed(3)}<br>` +
+      `Balanced error from this column alone: ${((1 - c.tvReal) / 2).toFixed(3)} → ${((1 - c.tvRel) / 2).toFixed(3)}<br>` +
+      `Mutual information I/H: ${c.nmiReal.toFixed(3)} → ${c.nmiRel.toFixed(3)}` +
+      (c.skew ? `<br>Most skewed level: <b>${c.skew.l}</b>, ${pct(c.skew.m)} ${c.skew.who}` : '') +
+      (c.proxy.length ? `<br><b>Proxy levels:</b> ${proxyText(c)}` : '')));
+    g.addEventListener('mouseleave', hideTip);
+  });
+}
+
+// --- leakage and distortion across ε -------------------------------------------
+let sweepTimer = null;
+function drawSweep() {
+  // ~0.3 s of work: while τ is being dragged, keep the last curve and
+  // recompute once the slider rests
+  const stale = sweepCache.key !== null && sweepCache.key !== `${S.ds}|${S.tau}|${S.noise}` &&
+    sweepCache.key.split('|')[0] === S.ds;
+  if (stale) {
+    clearTimeout(sweepTimer);
+    sweepTimer = setTimeout(() => { sweep(); drawSweep(); }, 150);
+  }
+  const { rows, real } = stale ? sweepCache : sweep();
+  $('sweep').style.opacity = stale ? 0.4 : 1;
+  const svg = $('sweep'); svg.innerHTML = '';
+  const W = svg.clientWidth || 900, narrow = W < 600;
+  const mL = 44, mR = narrow ? 8 : 104, plotH = 200, top = 12, H = top + plotH + 30;
+  const lx = Math.log(EPS_MIN), hx = Math.log(EPS_MAX);
+  const sx = e => mL + (W - mL - mR) * (Math.log(e) - lx) / (hx - lx);
+  const { max, step } = niceAxis(Math.max(real, ...rows.map(r => Math.max(r.leak, r.dist))));
+  const sy = v => top + plotH * (1 - v / max), dec = step < 0.1 ? 2 : 1;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  for (let i = 0; i * step <= max + 1e-9; i++) {
+    el('line', { x1: mL, x2: W - mR, y1: sy(i * step), y2: sy(i * step), stroke: 'var(--grid)' }, svg);
+    el('text', { x: mL - 6, y: sy(i * step) + 4, 'text-anchor': 'end' }, svg, (i * step).toFixed(dec));
+  }
+  for (const e of [0.1, 0.3, 1, 3, 10, 20])
+    el('text', { x: sx(e), y: top + plotH + 18, 'text-anchor': 'middle' }, svg, String(e));
+  el('text', { x: W - mR, y: top + plotH + 30, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg, 'ε (log scale)');
+  el('line', { x1: mL, x2: W - mR, y1: sy(0), y2: sy(0), stroke: 'var(--ink-3)' }, svg);
+  const path = f => rows.map((r, i) => `${i ? 'L' : 'M'}${sx(r.eps).toFixed(1)},${sy(f(r)).toFixed(1)}`).join('');
+  el('line', { x1: mL, x2: W - mR, y1: sy(real), y2: sy(real), stroke: 'var(--ink-3)', 'stroke-width': 1.5,
+    'stroke-dasharray': '1 3', 'stroke-linecap': 'round' }, svg);
+  el('path', { d: path(r => r.dist), fill: 'none', stroke: 'var(--ink-2)', 'stroke-width': 2, 'stroke-dasharray': '5 4' }, svg);
+  el('path', { d: path(r => r.leak), fill: 'none', stroke: 'var(--ink)', 'stroke-width': 2 }, svg);
+  el('line', { x1: sx(S.eps), x2: sx(S.eps), y1: top, y2: top + plotH, stroke: 'var(--ink-3)' }, svg);
+  if (!narrow) {   // direct labels at the line ends
+    const last = rows[rows.length - 1], lab = [['leakage', last.leak], ['distortion', last.dist], ['real leakage', real]]
+      .sort((a, b) => b[1] - a[1]);
+    let prev = -Infinity;
+    for (const [t, v] of lab) {
+      const y = Math.max(sy(v) + 4, prev + 13); prev = y;
+      el('text', { x: W - mR + 8, y }, svg, t);
+    }
+  }
+  // hover: crosshair snapped to the nearest ε of the grid
+  const guide = el('line', { y1: top, y2: top + plotH, stroke: 'var(--ink-2)', 'stroke-dasharray': '2 2',
+    visibility: 'hidden' }, svg);
+  const hit = el('rect', { x: mL, y: top, width: W - mL - mR, height: plotH, fill: 'transparent' }, svg);
+  hit.addEventListener('mousemove', ev => {
+    const b = svg.getBoundingClientRect(), x = (ev.clientX - b.left) * W / (b.width || W);
+    const r = rows.reduce((a, c) => Math.abs(sx(c.eps) - x) < Math.abs(sx(a.eps) - x) ? c : a);
+    guide.setAttribute('x1', sx(r.eps)); guide.setAttribute('x2', sx(r.eps)); guide.setAttribute('visibility', 'visible');
+    showTip(ev, `<div class="h">ε = ${fmtEps(r.eps)}, τ = ${S.tau.toFixed(2)}</div>` +
+      `Leakage TV ${r.leak.toFixed(3)} (real ${real.toFixed(3)})<br>Distortion TV ${r.dist.toFixed(3)}`);
+  });
+  hit.addEventListener('mouseleave', () => { guide.setAttribute('visibility', 'hidden'); hideTip(); });
+  $('sweeptbl').innerHTML = '<table><tr><th>ε</th><th>leakage TV</th><th>distortion TV</th></tr>' +
+    rows.filter((_, i) => i % 6 === 0).map(r => `<tr><td>${fmtEps(r.eps)}</td><td>${r.leak.toFixed(3)}</td>` +
+      `<td>${r.dist.toFixed(3)}</td></tr>`).join('') +
+    `<tr><td>real data</td><td>${real.toFixed(3)}</td><td>0</td></tr></table>`;
+}
+
+// --- histogram ------------------------------------------------------------------
+function drawHist(R) {
+  const D = cur(), G = D.groups;
+  const c = R.cols.find(x => x.name === S.sel), cpKey = activeCheckpoint();
+  const cp = cpKey && c.checkpoints[cpKey] ? c.checkpoints[cpKey].map(r => norm(r)) : null;
+  $('cpleg').style.display = cp ? '' : 'none';
+  $('htitle').textContent = `${c.name}: share of each ${D.sensitive} group (${G[0]}, ${G[1]}) in each ${c.ordinal ? 'bin' : 'level'}`;
+  $('hread').textContent = `Leakage TV ${c.tvReal.toFixed(3)} (real) → ${c.tvRel.toFixed(3)} (release), ` +
+    `balanced error ${((1 - c.tvRel) / 2).toFixed(3)}, mutual information I/H ${c.nmiReal.toFixed(3)} → ${c.nmiRel.toFixed(3)}. ` +
+    `Overall distribution off from real by ${c.distortion.toFixed(3)} TV (from the noise; the repair leaves it unchanged).` +
+    (c.proxy.length ? ` Proxy levels (real data): ${proxyText(c)}.` : '') +
+    (cp ? ` Dashed: the real AIM ${cpKey} release at ε ${D.checkpoints[cpKey].eps}, τ ${D.checkpoints[cpKey].tau}.` : '');
+  const svg = $('hist'); svg.innerHTML = '';
+  const W = svg.clientWidth || 900, k = c.labels.length;
+  const rotate = k > 8 || W < 600, mL = 44, mB = rotate ? 84 : 28, plotH = 260, H = plotH + mB + 10;
+  const plotW = W - mL - 4, gw = plotW / k, bw = Math.min(28, (gw - 8) / 2);
+  const all = [...c.realCond.flat(), ...c.rel.cond.flat(), ...(cp ? cp.flat() : [])];
+  const top = Math.max(0.05, Math.ceil(Math.max(...all) * 20) / 20), sy = v => 10 + plotH * (1 - v / top);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const step = top > 0.5 ? 0.2 : top > 0.2 ? 0.1 : 0.05;
+  for (let t = 0; t <= top + 1e-9; t += step) {
+    el('line', { x1: mL, x2: W, y1: sy(t), y2: sy(t), stroke: 'var(--grid)' }, svg);
+    el('text', { x: mL - 6, y: sy(t) + 4, 'text-anchor': 'end' }, svg, Math.round(t * 100) + '%');
+  }
+  const y0 = sy(0), colors = ['var(--g0)', 'var(--g1)'];
+  c.labels.forEach((l, j) => {
+    const gx = mL + j * gw, cx = gx + gw / 2, g = el('g', {}, svg);
+    [0, 1].forEach(s => {
+      const x = cx + (s === 0 ? -bw - 1 : 1), v = c.rel.cond[s][j];
+      if (sy(v) < y0 - 0.5) el('path', { d: vbar(x, y0, bw, y0 - sy(v)), fill: colors[s] }, g);
+      if (cp) el('rect', { x: x + 1, y: sy(cp[s][j]), width: bw - 2, height: Math.max(0, y0 - sy(cp[s][j])),
+        fill: 'none', stroke: 'var(--ink)', 'stroke-width': 1.5, 'stroke-dasharray': '3 2' }, g);
+      el('line', { x1: x - 2, x2: x + bw + 2, y1: sy(c.realCond[s][j]), y2: sy(c.realCond[s][j]),
+        stroke: 'var(--ink)', 'stroke-width': 2, 'stroke-linecap': 'round' }, g);
+    });
+    const px = c.proxy.find(p => p.level === l);
+    if (px) {   // label the proxy level above its tallest mark
+      const vmax = Math.max(c.rel.cond[0][j], c.rel.cond[1][j], c.realCond[0][j], c.realCond[1][j],
+        ...(cp ? [cp[0][j], cp[1][j]] : []));
+      el('text', { x: cx, y: sy(vmax) - 6, 'text-anchor': 'middle', class: 'badge' }, g, 'PROXY');
+    }
+    const lab = l.length > 18 ? l.slice(0, 17) + '…' : l;
+    el('text', rotate ? { x: cx, y: y0 + 14, 'text-anchor': 'end', transform: `rotate(-40 ${cx} ${y0 + 14})` }
+      : { x: cx, y: y0 + 18, 'text-anchor': 'middle' }, svg, lab);
+    const hit = el('rect', { x: gx, y: 0, width: gw, height: y0 + 4, fill: 'transparent' }, g);
+    hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${c.name} = ${l}</div>` +
+      G.map((who, s) => `${who}: release ${pct(c.rel.cond[s][j])}, real ${pct(c.realCond[s][j])}` +
+        (cp ? `, AIM ${pct(cp[s][j])}` : '')).join('<br>') +
+      (px ? `<br><b>Proxy:</b> ${pct(px.purity)} of these rows are ${px.group} (real data)` : '')));
+    hit.addEventListener('mouseleave', hideTip);
+  });
+  el('line', { x1: mL, x2: W, y1: y0, y2: y0, stroke: 'var(--ink-3)' }, svg);
+  $('tbl').innerHTML = '<table><tr><th>' + c.name + `</th><th>${G[0]}, real</th><th>${G[0]}, release</th>` +
+    `<th>${G[1]}, real</th><th>${G[1]}, release</th>` + (cp ? `<th>${G[0]}, AIM</th><th>${G[1]}, AIM</th>` : '') + '</tr>' +
+    c.labels.map((l, j) => `<tr><td>${l}${c.proxy.some(p => p.level === l) ? ' (proxy)' : ''}</td><td>${pct(c.realCond[0][j])}</td><td>${pct(c.rel.cond[0][j])}</td>` +
+      `<td>${pct(c.realCond[1][j])}</td><td>${pct(c.rel.cond[1][j])}</td>` +
+      (cp ? `<td>${pct(cp[0][j])}</td><td>${pct(cp[1][j])}</td>` : '') + '</tr>').join('') + '</table>';
+}
+
+// --- before vs after: the actual hybrid release (not simulated) -------------
+function baTV(t) { const n = t.map(r => norm(r)); return tv(n[0], n[1]); }
+
+function groupBars(svg, c, cond, top, other) {
+  svg.innerHTML = '';
+  const D = cur(), G = D.groups, W = svg.clientWidth || 440, k = c.labels.length;
+  const rotate = k > 6 || W < 420, mL = 40, mB = rotate ? 84 : 28, plotH = 180, H = plotH + mB + 10;
+  const gw = (W - mL - 4) / k, bw = Math.max(2, Math.min(22, (gw - 6) / 2 - 1));
+  const sy = v => 10 + plotH * (1 - v / top), y0 = sy(0);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const step = top > 0.5 ? 0.2 : top > 0.2 ? 0.1 : 0.05;
+  for (let t = 0; t <= top + 1e-9; t += step) {
+    el('line', { x1: mL, x2: W, y1: sy(t), y2: sy(t), stroke: 'var(--grid)' }, svg);
+    el('text', { x: mL - 6, y: sy(t) + 4, 'text-anchor': 'end' }, svg, Math.round(t * 100) + '%');
+  }
+  c.labels.forEach((l, j) => {
+    const gx = mL + j * gw, cx = gx + gw / 2, g = el('g', {}, svg);
+    [0, 1].forEach(s => {   // 2px surface gap between a level's two bars
+      const x = cx + (s === 0 ? -bw - 1 : 1), v = cond[s][j];
+      if (sy(v) < y0 - 0.5) el('path', { d: vbar(x, y0, bw, y0 - sy(v)), fill: `var(--g${s})` }, g);
+    });
+    const lab = l.length > 14 ? l.slice(0, 13) + '…' : l;
+    el('text', rotate ? { x: cx, y: y0 + 14, 'text-anchor': 'end', transform: `rotate(-40 ${cx} ${y0 + 14})` }
+      : { x: cx, y: y0 + 18, 'text-anchor': 'middle' }, svg, lab);
+    const hit = el('rect', { x: gx, y: 0, width: gw, height: y0 + 4, fill: 'transparent' }, g);
+    hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${c.name} = ${l}</div>` +
+      G.map((who, s) => `${who}: ${pct(cond[s][j])} (${other.name} ${pct(other.cond[s][j])})`).join('<br>')));
+    hit.addEventListener('mouseleave', hideTip);
+  });
+  el('line', { x1: mL, x2: W, y1: y0, y2: y0, stroke: 'var(--ink-3)' }, svg);
+}
+
+function drawBeforeAfter() {
+  const D = cur(), BA = D.before_after;
+  $('ba-body').style.display = BA ? '' : 'none';
+  $('ba-none').style.display = BA ? 'none' : '';
+  if (!BA) {
+    $('ba-sub').textContent = '';
+    $('ba-none').textContent = `No AIM hybrid release of ${D.label} on disk (fold 0, refit 0 in aim_fair/out/). ` +
+      'Run aim_fair/run_datasets.sh (or run_final.sh for Adult), then rebuild this page.';
+    return;
+  }
+  const merged = Object.entries(BA.merged);
+  $('ba-sub').textContent = `The actual release ${BA.file} (ε ${BA.eps}, τ ${BA.tau}; fold 0, refit 0) against the ` +
+    `real fold 0 training rows it was made from. Not simulated: the sliders above do not change this panel. ` +
+    (merged.length ? `The hybrid merged ${merged.map(([c, l]) => `${c}: ${l.join(' + ')}`).join('; ')} into one level, MASK.`
+      : 'The hybrid merged no levels.');
+  // all-columns table
+  const A = BA.all_columns;
+  $('ba-tbl').innerHTML = !A ? '<p class="note">Not computed: it needs the fold 0 test split on disk and the page built with the main (torch) environment.</p>' :
+    '<table><tr><th>Table</th><th>balanced error</th><th>folded tstr</th></tr>' +
+    A.map(r => `<tr class="${r.label.startsWith('AIM hybrid') || r.label === 'Real data' ? 'hi' : ''}"><td>${r.label}</td>` +
+      `<td>${r.ber.toFixed(3)}</td><td>${r.tstr.toFixed(3)}</td></tr>`).join('') + '</table>';
+  // per-column dumbbells
+  const rows = D.columns.map(c => ({ c, real: baTV(c.real), masked: c.real_masked ? baTV(c.real_masked) : null,
+    hyb: baTV(c.checkpoints.hybrid) })).sort((a, b) => b.real - a.real);
+  const svg = $('ba-rank'); svg.innerHTML = '';
+  const W = svg.clientWidth || 900, rowH = 26, valW = 128;
+  const labW = Math.min(W * 0.42, Math.max(...rows.map(r => r.c.name.length * 6.5)) + 14);
+  const { max, step } = niceAxis(Math.max(...rows.flatMap(r => [r.real, r.hyb, r.masked ?? 0])));
+  const x0 = labW, sx = v => x0 + (W - labW - valW) * v / max, H = rows.length * rowH + 22;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const dec = step < 0.1 ? 2 : 1;
+  for (let i = 0; i * step <= max + 1e-9; i++) {
+    el('line', { x1: sx(i * step), x2: sx(i * step), y1: 0, y2: rows.length * rowH, stroke: 'var(--grid)' }, svg);
+    el('text', { x: sx(i * step), y: H - 4, 'text-anchor': 'middle' }, svg, (i * step).toFixed(dec));
+  }
+  rows.forEach((r, i) => {
+    const y = i * rowH, cy = y + rowH / 2, g = el('g', { class: 'row' }, svg);
+    el('rect', { class: 'bg', x: 0, y, width: W, height: rowH, rx: 6,
+      fill: r.c.name === S.sel ? 'var(--sel)' : 'transparent' }, g);
+    el('text', { x: labW - 10, y: cy + 4, 'text-anchor': 'end',
+      style: r.c.name === S.sel ? 'fill:var(--ink);font-weight:600' : '' }, g, r.c.name);
+    el('line', { x1: sx(r.real), x2: sx(r.hyb), y1: cy, y2: cy, stroke: 'var(--ink-3)', 'stroke-width': 1.5 }, g);
+    el('circle', { cx: sx(r.real), cy, r: 5, fill: 'var(--panel)', stroke: 'var(--ink-2)', 'stroke-width': 2 }, g);
+    if (r.masked !== null) el('circle', { cx: sx(r.masked), cy, r: 5, fill: 'var(--panel)', stroke: 'var(--ink-2)',
+      'stroke-width': 2, 'stroke-dasharray': '2.5 2' }, g);
+    el('circle', { cx: sx(r.hyb), cy, r: 5, fill: 'var(--ink)', stroke: 'var(--panel)', 'stroke-width': 2 }, g);
+    el('text', { x: W - 4, y: cy + 4, 'text-anchor': 'end' }, g,
+      `${r.real.toFixed(2)} → ${r.masked !== null ? r.masked.toFixed(2) + ' → ' : ''}${r.hyb.toFixed(3)}`);
+    g.addEventListener('click', () => { S.sel = r.c.name; render(); });
+    g.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${r.c.name}</div>` +
+      `TV real ${r.real.toFixed(3)}` + (r.masked !== null ? `, with proxy levels merged ${r.masked.toFixed(3)}` : '') +
+      `<br>AIM hybrid release ${r.hyb.toFixed(3)}<br>Balanced error from this column alone: ` +
+      `${((1 - r.real) / 2).toFixed(3)} → ${((1 - r.hyb) / 2).toFixed(3)}`));
+    g.addEventListener('mouseleave', hideTip);
+  });
+  // side-by-side histograms of the selected column, one y-axis for both
+  const c = D.columns.find(x => x.name === S.sel);
+  const real = c.real.map(r => norm(r)), hyb = c.checkpoints.hybrid.map(r => norm(r));
+  const top = Math.max(0.05, Math.ceil(Math.max(...real.flat(), ...hyb.flat()) * 20) / 20);
+  $('ba-htitle').textContent = `${c.name}: share of each ${D.sensitive} group in each ${c.ordinal ? 'bin' : 'level'}` +
+    ` (TV ${baTV(c.real).toFixed(3)} → ${baTV(c.checkpoints.hybrid).toFixed(3)})`;
+  groupBars($('ba-real'), c, real, top, { name: 'release', cond: hyb });
+  groupBars($('ba-hyb'), c, hyb, top, { name: 'real', cond: real });
+  const G = D.groups;
+  $('ba-htbl').innerHTML = `<table><tr><th>${c.name}</th><th>${G[0]}, real</th><th>${G[0]}, release</th>` +
+    `<th>${G[1]}, real</th><th>${G[1]}, release</th></tr>` +
+    c.labels.map((l, j) => `<tr><td>${l}</td><td>${pct(real[0][j])}</td><td>${pct(hyb[0][j])}</td>` +
+      `<td>${pct(real[1][j])}</td><td>${pct(hyb[1][j])}</td></tr>`).join('') + '</table>';
+}
+
+function render() {
+  const R = compute();
+  $('epsv').textContent = fmtEps(S.eps);
+  $('tauv').textContent = S.tau.toFixed(2);
+  $('epsh').textContent = S.eps < 1 ? '(strong privacy, noisy)' : S.eps > 8 ? '(weak privacy)' : '';
+  $('tauh').textContent = S.tau === 0 ? '(no repair)' : S.tau === 1 ? '(full repair)' : '';
+  const sSplit = Math.sqrt(R.cols.length / (2 * R.rho)), sAim = aimSigma(R.rho);
+  $('noise').textContent = `zCDP ρ = ${R.rho.toFixed(4)} → Gaussian noise σ = ${R.sigma.toFixed(1)} rows per cell ` +
+    `(${cur().n.toLocaleString()} rows). Equal split over ${R.cols.length} tables: σ = ${sSplit.toFixed(1)}; ` +
+    `real AIM starts at σ = ${sAim.toFixed(1)} (${16 * cur().n_attributes} rounds) and halves it ` +
+    `whenever a measurement adds little. Noise seed ${S.seed}.`;
+  drawRank(R); drawSweep(); drawHist(R); drawBeforeAfter();
+}
+
+// switch dataset: keep ε, τ and the seed; select the leakiest real column
+function setDataset(name) {
+  S.ds = name; const D = cur();
+  S.z = normals(S.seed);
+  const tvReal = c => tv(norm(c.real[0]), norm(c.real[1]));
+  S.sel = D.columns.reduce((a, b) => tvReal(b) > tvReal(a) ? b : a).name;
+  document.querySelectorAll('.sens').forEach(e => { e.textContent = D.sensitive; });
+  document.querySelectorAll('.g0').forEach(e => { e.textContent = D.groups[0]; });
+  document.querySelectorAll('.g1').forEach(e => { e.textContent = D.groups[1]; });
+  $('dslabel').textContent = D.label;
+  $('gvs').textContent = `${D.groups[0]}-vs-${D.groups[1]}`;
+  $('dsnote').textContent = `protected: ${D.sensitive} · target: ${D.target}`;
+  $('ntab').textContent = D.columns.length;
+  $('cpchips').innerHTML = '';
+  for (const [k, cp] of Object.entries(D.checkpoints)) {
+    const b = document.createElement('button');
+    b.textContent = `AIM ${k}: ε ${cp.eps}, τ ${cp.tau}`;
+    b.title = `Jump to the setting of a real AIM release (${cp.file}) and overlay it`;
+    b.addEventListener('click', () => { S.eps = cp.eps; S.tau = cp.tau;
+      $('eps').value = sliderFromEps(cp.eps); $('tau').value = cp.tau; render(); });
+    $('cpchips').appendChild(b);
+  }
+  render();
+}
+
+if (!DATA) { $('err').style.display = 'block'; } else {
+  const names = Object.keys(DATA.datasets), sel = $('ds');
+  for (const n of names) {
+    const o = document.createElement('option');
+    o.value = n; o.textContent = DATA.datasets[n].label; sel.appendChild(o);
+  }
+  sel.disabled = names.length < 2;
+  sel.title = names.length < 2 ? 'Other datasets appear once their folds are on disk ' +
+    '(python aim_fair/export_folds.py --dataset D), then rebuild' : '';
+  sel.addEventListener('change', e => setDataset(e.target.value));
+  $('eps').value = sliderFromEps(S.eps); $('tau').value = S.tau;
+  $('eps').addEventListener('input', e => { S.eps = epsFromSlider(+e.target.value); render(); });
+  $('tau').addEventListener('input', e => { S.tau = +e.target.value; render(); });
+  $('reseed').addEventListener('click', () => { S.seed++; S.z = normals(S.seed); render(); });
+  for (const m of ['split', 'aim']) $('n-' + m).addEventListener('click', () => {
+    S.noise = m;
+    for (const o of ['split', 'aim']) $('n-' + o).setAttribute('aria-pressed', String(o === m));
+    render();
+  });
+  for (const m of ['tv', 'nmi']) $('m-' + m).addEventListener('click', () => {
+    S.metric = m;
+    for (const o of ['tv', 'nmi']) {
+      $('m-' + o).setAttribute('aria-pressed', String(o === m));
+      $('mnote-' + o).style.display = o === m ? '' : 'none';
+    }
+    render();
+  });
+  let t; addEventListener('resize', () => { clearTimeout(t); t = setTimeout(render, 100); });
+  setDataset(names[0]);
+}
+</script>
+</body>
+</html>
