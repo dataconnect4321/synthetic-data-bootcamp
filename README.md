@@ -164,8 +164,9 @@ python run_adult_flip.py --score-csv adult_results/hm_e3_lam4_argmax_synthetic.c
 python aim_fair/final_chart.py
 python aim_fair/task_auc.py
 
-# interactive leakage explorer (every dataset whose fold-0 split is on disk);
-# the main environment adds the all-columns leakage of the before/after panel
+# interactive dashboard (every dataset whose fold-0 split is on disk); main
+# environment. The scorecard tab needs the tau grid first (about 20 min):
+bash scripts/run_tau_grid.sh        # writes results/utility_tau_grid.csv
 python leakage_explorer.py          # writes results/leakage_explorer.html
 ```
 
@@ -173,7 +174,8 @@ To view it, open `results/leakage_explorer.html` in a browser (macOS: `open
 results/leakage_explorer.html`; Windows: `start results\leakage_explorer.html`).
 It is one self-contained file: no server or internet needed.
 
-What the committed page contains:
+What the committed page contains (three tabs: Scorecard, Leakage, Before vs
+after; ε is the privacy setting, τ the fairness setting):
 
 | | |
 |---|---|
@@ -182,12 +184,13 @@ What the committed page contains:
 | Real data | the 30,148 training rows; every "real" number and histogram |
 | Held-out data | the 15,074 test rows; used only for folded tstr |
 | Releases | `aim_fair/out/lk_e3_f0_r0_synthetic.csv` (hybrid: eps 3, delta 1e-5, private bins, tau 1, masking + rules) and `lk_plain_e3_f0_r0_synthetic.csv` (plain AIM, tau 0, same measurements); 30,148 rows each, refit 0 of one earlier run, not `run_final.sh` |
+| Scorecard | 5 refits of the hybrid at tau 0, 0.25, 0.5, 0.75, 1 from the same eps-3 measurements (`lk_e3_f0`, refit 0; post-processing, same privacy), plus plain AIM, all scored by `run_adult_flip.py --score-csv`: BER, A-NCB (as in RESULTS.md), income AUC, income parity, EO gap, validity, impossible rows. The real-data parity / EO use the same `downstream_sp_eo` trained on real data. Values in `results/utility_tau_grid.csv` |
 | All-columns leakage | the scorer's classifier (`paper_metrics.py`): BER on the table itself (3-fold, mean of 10 seeds) and folded tstr (trained on the table, tested on the held-out rows, masked like the table). Equal to `run_adult_flip.py --score-csv --mask-proxies` on the same file (hybrid: BER 0.5086, tstr 0.4018; the 3-fold x 10-refit means are 0.505 / 0.434) |
 
 Notes:
 
 - The page embeds **exact, non-private** per-sex counts of the real training fold (and the all-columns scores). It holds no row-level data, but it is not a DP release: do not share it as one.
-- The epsilon / tau histograms and the epsilon sweep are a marginal-level simulation in the browser: Gaussian noise on each [sex x column] table, then `fair_aim.py`'s repair. There is no Private-PGM fit, masking or rules. Only the before/after panel uses the actual release.
+- The Leakage tab's epsilon / tau histograms are a marginal-level simulation in the browser: Gaussian noise on each [sex x column] table, then `fair_aim.py`'s repair. There is no Private-PGM fit, masking or rules. The Scorecard and Before vs after tabs use actual releases (eps 3 only).
 - Numeric columns are shown in the public bins (`adult_domain.EDGES`), including for the release made with private bins; `native-country` shows its 10 most common levels plus "Other".
 - Proxy levels are flagged on the real training fold with `detect_proxy_classes`' rule. The hybrid detects them from its noisy measurements and merged the same levels (relationship: Husband, Wife).
 
@@ -220,6 +223,7 @@ bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
 | `aim_fair/adult_domain.py` | public bins and categories; encoding and decoding |
 | `aim_fair/run_aim.py`, `run_final.sh` | measure a fold and write refits; the 3-fold final run |
 | `aim_fair/final_chart.py`, `task_auc.py` | results tables and chart; task independence |
+| `scripts/run_tau_grid.sh`, `aim_fair/tau_grid_summary.py` | tau grid of hybrid refits from one private run, scored; the dashboard's scorecard |
 | `aim_fair/check_schema.py` | how well public vs private bins reproduce the real numeric values |
 | `aim_fair/export_folds.py` | the same 3-fold splits as `run_adult_flip.py` |
 | `datasets.py`, `aim_fair/run_datasets.sh`, `aim_fair/datasets_summary.py` | ACS-I Alabama / Utah and Dutch census: loaders, the 3-dataset run, its summary table |
@@ -228,7 +232,7 @@ bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
 | `run_flip_demo.py`, `run_flip_full_pipeline.py` | VAE training (FLIP phases) and latent diffusion |
 | `calibrate_dp.py` | Eq. 13 noise multipliers for a target epsilon |
 | `paper_heatmap_compare.py` | FLIP-as-published heatmaps against the paper's Fig. 3 |
-| `leakage_explorer.py`, `leakage_explorer_template.html` | interactive page (`results/leakage_explorer.html`): which columns leak the protected attribute, per-group histograms under a simulated epsilon / tau, real data vs the AIM hybrid release |
+| `leakage_explorer.py`, `leakage_explorer_template.html` | interactive dashboard (`results/leakage_explorer.html`): metrics scorecard along tau, which columns leak the protected attribute (simulated epsilon / tau), real data vs the AIM hybrid release |
 | `tabsyn-main/` | the parts of TabSyn used (Apache 2.0), with the FLIP terms in `tabsyn/vae/` |
 | `scripts/` | VAE run scripts |
 | `tests/` | unit tests (`aim_fair/test_aim_fair.py` for the AIM side) |

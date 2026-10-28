@@ -1,17 +1,21 @@
-"""Interactive leakage explorer: which columns leak the protected attribute,
-and how the privacy budget (epsilon) and the repair amount (tau) change each
-column's per-group histogram. Writes one self-contained page,
-results/leakage_explorer.html, with a dataset picker: Adult and every
-datasets.py dataset whose fold-0 training split is on disk.
+"""Interactive dashboard of privacy (epsilon), fairness (repair amount tau)
+and utility. Writes one self-contained page, results/leakage_explorer.html,
+with a dataset picker (Adult and every datasets.py dataset whose fold-0
+training split is on disk) and three tabs:
 
-The page simulates the AIM hybrid at the marginal level, in the browser:
-Gaussian noise on each [protected x column] count table (zCDP, rho split
-evenly over the tables), then the Feldman-style repair of
-aim_fair/fair_aim.py (coupling, repair_plans; pooled target). It is not a
-Private-PGM fit. Real AIM releases (fold 0, refit 0), when present in
-aim_fair/out/, are drawn as check points.
+  Scorecard       actual hybrid releases along tau at eps 3, scored
+                  (results/utility_tau_grid.csv, scripts/run_tau_grid.sh);
+  Leakage         which columns leak the protected attribute, and each
+                  column's per-group histogram in a release simulated in the
+                  browser: Gaussian noise on each [protected x column] count
+                  table (zCDP, rho split evenly), then the repair of
+                  aim_fair/fair_aim.py (coupling, repair_plans; pooled
+                  target). Not a Private-PGM fit; actual releases (fold 0,
+                  refit 0) in aim_fair/out/ are drawn as check points;
+  Before vs after the real data vs the actual hybrid release.
 
     python aim_fair/export_folds.py [--dataset D]   # once, writes aim_fair/data/
+    bash scripts/run_tau_grid.sh                    # the scorecard (Adult)
     python leakage_explorer.py
 """
 import json
@@ -24,7 +28,6 @@ import pandas as pd
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'aim_fair'))
 import adult_domain as AD  # noqa: E402
-import dp_schema as DS  # noqa: E402
 import datasets as D  # noqa: E402
 
 DATASETS = {   # name -> label shown in the picker
@@ -53,6 +56,9 @@ PROXY_THRESHOLD, PROXY_MIN_SUPPORT = 0.95, 0.01
 BER_SEEDS = 10    # all-columns BER: seeds averaged, as the scorer does
 ALL_COLUMNS = True   # False skips the classifiers (about a minute for Adult)
 OUT = os.path.join(HERE, 'results', 'leakage_explorer.html')
+# the scorecard: actual releases along tau (scripts/run_tau_grid.sh,
+# aim_fair/tau_grid_summary.py), Adult only
+SCORECARD = {'adult': (os.path.join(HERE, 'results', 'utility_tau_grid.csv'), 3)}
 
 
 def schema(name):
@@ -190,6 +196,16 @@ def all_columns_leakage(frames, numeric, categorical, sens):
     return rows
 
 
+def scorecard(name):
+    """{eps, rows} from the dataset's tau-grid csv, or None if missing."""
+    if name not in SCORECARD or not os.path.exists(SCORECARD[name][0]):
+        return None
+    path, eps = SCORECARD[name]
+    df = pd.read_csv(path)
+    df['tau'] = df['tau'].astype(object).where(df['tau'].notna(), None)
+    return {'eps': eps, 'rows': df.to_dict('records')}
+
+
 def build(name):
     """Page data for one dataset, or None if its fold-0 split is missing."""
     p = prefix(name)
@@ -278,14 +294,10 @@ def build(name):
              or 'none'))
     return {'label': DATASETS[name], 'sensitive': sens, 'target': target,
             'groups': groups, 'n': len(real), 'columns': cols,
-            # for AIM's own noise scale (FairAIM.run): d attributes, and the
-            # share of rho the private bins take (run_aim.py: only when the
-            # dataset has numeric columns)
-            'n_attributes': len(numeric) + len(categorical),
-            'aim_rho_share': 1 - DS.SCHEMA_RHO_SHARE if numeric else 1.0,
             'checkpoints': {k: {'eps': e, 'tau': t, 'file': f}
                             for k, (_, e, t, f) in releases.items()},
-            'before_after': before_after}
+            'before_after': before_after,
+            'scorecard': scorecard(name)}
 
 
 def main():

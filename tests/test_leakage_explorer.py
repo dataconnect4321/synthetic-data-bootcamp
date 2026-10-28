@@ -208,34 +208,6 @@ def test_build_other_datasets(tmp_path, monkeypatch):
             assert np.array(c['real']).sum() == ds['n']
 
 
-@needs_node
-def test_js_nmi_matches_sklearn(tmp_path):
-    from scipy.stats import entropy
-    from sklearn.metrics import mutual_info_score
-    rng = np.random.default_rng(1)
-    tables = [rng.integers(0, 500, (2, int(rng.integers(2, 12)))).tolist()
-              for _ in range(50)]
-    tables.append([[100, 0, 0], [0, 50, 50]])     # column determines group
-    tables.append([[30, 60], [10, 20]])           # independent
-    (tmp_path / 'n.js').write_text(
-        "const fs = require('fs');"
-        "const src = fs.readFileSync(process.argv[2], 'utf8').split('<script>')[1]"
-        ".split('// --- seeded noise')[0].replace(/const DATA = .*?;\\n/s, '');"
-        "const F = new Function(src + ';return {nmi};')();"
-        "console.log(JSON.stringify(JSON.parse(process.argv[3]).map(F.nmi)));")
-    out = subprocess.run([NODE, str(tmp_path / 'n.js'), TEMPLATE,
-                          json.dumps(tables)],
-                         capture_output=True, text=True, check=True)
-    for t, v in zip(tables, json.loads(out.stdout)):
-        t = np.array(t)
-        s = np.repeat([0, 1], t.sum(1))           # group of each row
-        x = np.concatenate([np.repeat(np.arange(t.shape[1]), r) for r in t])
-        want = mutual_info_score(s, x) / entropy(t.sum(1) / t.sum())
-        assert abs(v - want) < 1e-12
-    assert json.loads(out.stdout)[-2] == pytest.approx(1)
-    assert json.loads(out.stdout)[-1] == pytest.approx(0, abs=1e-12)
-
-
 def test_proxy_levels_match_detect_proxy_classes(tmp_path, monkeypatch):
     train = os.path.join(ROOT, 'aim_fair', 'data', 'fold0_train.csv')
     if not os.path.exists(train):
@@ -259,14 +231,12 @@ def test_proxy_levels_match_detect_proxy_classes(tmp_path, monkeypatch):
 
 
 @needs_node
-def test_simulation_properties_and_aim_sigma(tmp_path, monkeypatch):
+def test_simulation_properties(tmp_path, monkeypatch):
     """On the built Adult page: full repair (tau 1) leaves no per-column
-    leakage; the repair never changes the distortion (pooled target); the
-    sweep is the mean of compute() over its draws; and the AIM noise scale
-    shown equals FairAIM.run's starting sigma for the real run's rho."""
-    meta = os.path.join(ROOT, 'aim_fair', 'out', 'lk_e3_f0.json')
-    if not os.path.exists(meta):
-        pytest.skip('aim_fair/out/lk_e3_f0.json missing')
+    leakage, and the repair never changes the distortion (pooled target)."""
+    if not os.path.exists(os.path.join(ROOT, 'aim_fair', 'data',
+                                       'fold0_train.csv')):
+        pytest.skip('aim_fair/data/fold0_train.csv missing')
     monkeypatch.setattr(L, 'OUT', str(tmp_path / 'page.html'))
     monkeypatch.setattr(L, 'ALL_COLUMNS', False)
     L.main()
@@ -275,23 +245,16 @@ const fs = require('fs');
 let src = fs.readFileSync(process.argv[2], 'utf8').split('<script>')[1].split('// --- drawing helpers')[0];
 const DATA = JSON.parse(src.match(/const DATA = (\{.*?\});\n/s)[1]);
 src = src.replace(/const DATA = .*?;\n/s, '');
-const T = new Function('DATA', src + ';return {S, compute, normals, sweep, aimSigma, cdpRho, SWEEP_DRAWS};')(DATA);
-T.S.ds = 'adult';
-const out = { leak1: [], dist: [], sweep: [], aim3: T.aimSigma(T.cdpRho(3, 1e-5)) };
+const T = new Function('DATA', src + ';return {S, compute, normals};')(DATA);
+T.S.ds = 'adult'; T.S.z = T.normals(5);
+const out = { leak1: [], dist: [] };
 for (const eps of [0.1, 1, 3, 20]) {
-  const z = T.normals(5);
-  T.S.tau = 0; const a = T.compute(eps, z);
-  T.S.tau = 1; const b = T.compute(eps, z);
+  T.S.eps = eps;
+  T.S.tau = 0; const a = T.compute();
+  T.S.tau = 1; const b = T.compute();
   out.leak1.push(Math.max(...b.cols.map(c => c.tvRel)));
   out.dist.push(Math.max(...a.cols.map((c, i) => Math.abs(c.distortion - b.cols[i].distortion))));
 }
-T.S.tau = 0.5; const s = T.sweep(), r = s.rows[20];
-let m = 0;
-for (let i = 0; i < T.SWEEP_DRAWS; i++) {
-  const R = T.compute(r.eps, T.normals(1000 + i));
-  m += R.cols.reduce((x, c) => x + c.tvRel, 0) / R.cols.length;
-}
-out.sweep = [r.leak, m / T.SWEEP_DRAWS];
 console.log(JSON.stringify(out));
 """)
     out = json.loads(subprocess.run(
@@ -299,10 +262,6 @@ console.log(JSON.stringify(out));
         capture_output=True, text=True, check=True).stdout)
     assert max(out['leak1']) < 1e-12
     assert max(out['dist']) < 1e-12
-    assert out['sweep'][0] == pytest.approx(out['sweep'][1], abs=1e-12)
-    rho_aim = json.load(open(meta))['rho_aim']        # 95% of rho at eps 3
-    assert out['aim3'] == pytest.approx(np.sqrt(16 * 14 / (2 * 0.9 * rho_aim)),
-                                        rel=1e-9)
 
 
 def test_before_after_masked_counts(tmp_path, monkeypatch):
@@ -349,3 +308,47 @@ def test_all_columns_leakage_known_answers(monkeypatch):
                                  ['x'], ['sex', 'a', 'b'], 'sex')
     assert rows[0]['ber'] == 0 and rows[0]['tstr'] == 0
     assert abs(rows[1]['ber'] - 0.5) < 0.05 and abs(rows[1]['tstr'] - 0.5) < 0.05
+
+
+def test_scorecard_matches_grid_and_scorer(tmp_path, monkeypatch):
+    """The scorecard embedded in the page equals results/utility_tau_grid.csv,
+    and the csv's hybrid and plain rows equal the scorer's json for that
+    release (final_chart.METRICS: the RESULTS.md definitions)."""
+    grid = os.path.join(ROOT, 'results', 'utility_tau_grid.csv')
+    if not os.path.exists(grid):
+        pytest.skip('results/utility_tau_grid.csv missing: scripts/run_tau_grid.sh')
+    monkeypatch.setattr(L, 'OUT', str(tmp_path / 'page.html'))
+    monkeypatch.setattr(L, 'ALL_COLUMNS', False)
+    L.main()
+    sc = page_data(tmp_path / 'page.html')['adult']['scorecard']
+    df = pd.read_csv(grid)
+    assert sc['eps'] == 3 and len(sc['rows']) == len(df)
+    keys = ['ber', 'ancb', 'auc', 'income_parity', 'eo_gap', 'validity',
+            'impossible']
+    for got, (_, want) in zip(sc['rows'], df.iterrows()):
+        assert got['source'] == want['source']
+        np.testing.assert_allclose([got[k] for k in keys],
+                                   [want[k] for k in keys], atol=1e-12)
+    assert set(df.source) == {'AIM hybrid', 'Plain AIM', 'Real data'}
+    sys.path.insert(0, os.path.join(ROOT, 'aim_fair'))
+    from final_chart import METRICS
+    get = {k: g for k, _, _, g in METRICS}
+    res = os.path.join(ROOT, 'adult_results')
+    checked = 0
+    for _, row in df.iterrows():
+        if row.source == 'AIM hybrid':
+            tag = f"lk_tau{row.tau:g}_e3_f0_r0"
+        elif row.source == 'Plain AIM':
+            tag = 'lk_plain_e3_f0_r0'
+        else:
+            continue
+        path = os.path.join(res, tag + '.json')
+        if not os.path.exists(path):
+            continue
+        js = json.load(open(path))
+        for k in keys:
+            assert row[k] == pytest.approx(round(float(get[k](js)), 4),
+                                           abs=1e-9), (tag, k)
+        checked += 1
+    if not checked:
+        pytest.skip('scorer jsons not in adult_results/')

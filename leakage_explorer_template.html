@@ -31,6 +31,7 @@ body { margin: 0; background: var(--surface); color: var(--ink);
 main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
 h1 { font-size: 22px; margin: 0 0 4px; }
 h2 { font-size: 16px; margin: 0 0 2px; }
+h3 { font-size: 14px; margin: 16px 0 2px; }
 p { margin: 0 0 8px; }
 .sub, .note { color: var(--ink-2); }
 .note { font-size: 13px; }
@@ -40,27 +41,27 @@ p { margin: 0 0 8px; }
   position: sticky; top: 0; z-index: 2; }
 .ctl { display: flex; flex-direction: column; min-width: 200px; flex: 1; }
 .ctl label { font-size: 13px; color: var(--ink-2); }
+.ctl label .k { color: var(--ink); font-weight: 600; }
 .ctl b { color: var(--ink); font-variant-numeric: tabular-nums; }
 input[type=range] { width: 100%; accent-color: var(--ink-2); }
+input[type=range]:disabled { opacity: .4; }
 button { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
   border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
 button:hover { background: var(--sel); }
 select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
   border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; margin: 2px 0; }
 select:disabled { color: var(--ink-2); opacity: 1; }
-.seg { display: inline-flex; margin: 8px 0 6px; }
-.seg button { border-radius: 0; margin-left: -1px; }
-.seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
-.seg button:last-child { border-radius: 0 6px 6px 0; }
-.seg button[aria-pressed="true"] { background: var(--sel); font-weight: 600; }
+.tabs { display: flex; gap: 4px; margin-top: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none;
+  padding: 8px 12px; font-size: 14px; color: var(--ink-2); margin-bottom: -1px; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
 .badge { font-size: 10px; font-weight: 600; letter-spacing: .04em; color: var(--ink);
   border: 1px solid var(--ink-3); border-radius: 4px; padding: 0 4px; }
-h3 { font-size: 14px; margin: 16px 0 2px; }
+svg .badge { fill: var(--ink); font-size: 10px; font-weight: 600; letter-spacing: .04em; }
 .pair { display: flex; gap: 16px; flex-wrap: wrap; }
 .pair > div { flex: 1 1 300px; min-width: 0; }
 .pair .readout { margin: 6px 0 0; }
 #ba-tbl tr.hi td { font-weight: 600; }
-svg .badge { fill: var(--ink); font-size: 10px; font-weight: 600; letter-spacing: .04em; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .readout { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2);
@@ -71,6 +72,14 @@ svg .badge { fill: var(--ink); font-size: 10px; font-weight: 600; letter-spacing
   vertical-align: 3px; margin-right: 5px; }
 .dash { display: inline-block; width: 12px; height: 12px; border: 1.5px dashed var(--ink);
   border-radius: 2px; vertical-align: -1px; margin-right: 5px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.tile { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--panel); }
+.tile .t { font-size: 12px; color: var(--ink-2); }
+.tile .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.3; }
+.tile .r { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.multiples { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px 20px; margin-top: 8px; }
+.multiples h3 { margin: 0; font-size: 13px; }
+.multiples h3 span { font-weight: 400; color: var(--ink-3); }
 svg { display: block; width: 100%; overflow: visible; }
 svg text { fill: var(--ink-2); font-size: 12px; }
 .row { cursor: pointer; }
@@ -81,6 +90,8 @@ svg text { fill: var(--ink-2); font-size: 12px; }
   font-variant-numeric: tabular-nums; }
 #tip .h { font-weight: 600; margin-bottom: 2px; }
 details { margin-top: 10px; font-size: 13px; }
+details.how { color: var(--ink-2); }
+details.how p { margin: 6px 0; }
 table { border-collapse: collapse; margin-top: 6px; font-variant-numeric: tabular-nums; }
 th, td { padding: 2px 10px 2px 0; text-align: right; }
 th:first-child, td:first-child { text-align: left; }
@@ -89,131 +100,136 @@ th:first-child, td:first-child { text-align: left; }
 </head>
 <body>
 <main>
-  <h1>Which columns leak <span class="sens"></span>?</h1>
-  <p class="sub"><span id="dslabel"></span>, fold 0 training rows. Move ε (privacy) and τ (repair) to see how
-    each column's <span id="gvs"></span> histogram changes in a simulated AIM-hybrid release.</p>
+  <h1>Privacy, fairness and utility of synthetic <span id="dslabel"></span></h1>
+  <p class="sub"><b>ε</b> sets privacy and <b>τ</b> sets fairness. Protected attribute
+    <b class="sens"></b>, target <b id="target"></b>; fold 0.</p>
   <p id="err">No data embedded: build this page with <code>python leakage_explorer.py</code>.</p>
 
   <div class="panel controls">
-    <div class="ctl" style="min-width:160px;flex:0 1 200px">
+    <div class="ctl" style="min-width:140px;flex:0 1 180px">
       <label for="ds">Dataset</label>
       <select id="ds"></select>
-      <span class="readout" id="dsnote"></span>
     </div>
     <div class="ctl">
-      <label for="eps">Privacy budget ε = <b id="epsv"></b> <span id="epsh"></span></label>
+      <label for="eps"><span class="k">Privacy</span> · budget ε = <b id="epsv"></b>
+        <span id="epsh"></span></label>
       <input id="eps" type="range" min="0" max="1000" step="1">
     </div>
     <div class="ctl">
-      <label for="tau">Repair amount τ = <b id="tauv"></b> <span id="tauh"></span></label>
+      <label for="tau"><span class="k">Fairness</span> · repair τ = <b id="tauv"></b>
+        <span id="tauh"></span></label>
       <input id="tau" type="range" min="0" max="1" step="0.05">
     </div>
-    <div class="ctl" style="min-width:0;flex:0 1 auto">
-      <label>Noise per cell</label>
-      <div class="seg" role="group" aria-label="Noise scale" style="margin:2px 0">
-        <button id="n-split" aria-pressed="true" title="ρ split evenly over the [group × column] tables">Equal split</button>
-        <button id="n-aim" aria-pressed="false" title="The σ real AIM starts with at this ε (FairAIM.run)">AIM's starting σ</button>
-      </div>
-    </div>
-    <div class="chips">
-      <button id="reseed" title="Draw new Gaussian noise">Resample noise</button>
+    <div class="chips" id="leakchips">
+      <button id="reseed" title="Draw new Gaussian noise for the simulation">Resample noise</button>
       <span id="cpchips" class="chips"></span>
     </div>
-    <div class="readout" id="noise" style="flex-basis:100%"></div>
   </div>
 
-  <div class="panel">
-    <h2>Leakage by column</h2>
-    <div class="seg" role="group" aria-label="Leakage measure">
-      <button id="m-tv" aria-pressed="true">Distance (TV) · balanced error</button>
-      <button id="m-nmi" aria-pressed="false">Mutual information</button>
-    </div>
-    <p class="note" id="mnote-tv">How far apart the two <span class="sens"></span> groups' distributions of each column are:
-      the total-variation distance (TV), where 0 means identical. A classifier that sees only
-      this column guesses <span class="sens"></span> with balanced error (1 − TV)/2 at best (second axis row),
-      so a balanced error of 0.5 means no leak.
-      Click a row to show its histogram below.</p>
-    <p class="note" id="mnote-nmi" style="display:none">The share of the uncertainty about
-      <span class="sens"></span> that knowing this column removes: I(<span class="sens"></span>; column) / H(<span class="sens"></span>),
-      from 0 (no information) to 1 (the column determines <span class="sens"></span>). Unlike TV it weighs each
-      level by how many rows it holds, so one large, skewed level counts for more than a small one.
-      Click a row to show its histogram below.</p>
-    <div class="legend"><span><span class="sw" style="background:var(--bar)"></span>simulated release</span>
-      <span><span class="sw" style="background:var(--bar-real)"></span>real data</span>
-      <span><span class="badge">PROXY</span> has levels with ≥ 95% one group (≥ 1% of rows), pointing to
-        both groups: the levels the AIM hybrid merges (masks)</span></div>
-    <svg id="rank"></svg>
-  </div>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" id="tab-score" aria-controls="p-score" aria-selected="true">Scorecard</button>
+    <button role="tab" id="tab-leak" aria-controls="p-leak" aria-selected="false">Leakage</button>
+    <button role="tab" id="tab-ba" aria-controls="p-ba" aria-selected="false">Before vs after</button>
+  </nav>
 
-  <div class="panel">
-    <h2>What the noise costs, across ε</h2>
-    <p class="note">Averages over all columns and over 20 noise draws, at the current τ.
-      <b>Leakage</b>: the TV between the two groups in the simulated release.
-      <b>Distortion</b>: the TV between the release's overall distribution of a column and the real one,
-      which is what the noise costs (the repair moves the groups toward each other without changing it).
-      The vertical line marks the current ε.</p>
-    <div class="legend"><span><span class="tick"></span>leakage, release</span>
-      <span><span class="tick" style="border-top-style:dashed"></span>distortion, release</span>
-      <span><span class="tick" style="border-top:1.5px dotted var(--ink-3)"></span>leakage, real data</span></div>
-    <svg id="sweep"></svg>
-    <details><summary>Show as table</summary><div id="sweeptbl"></div></details>
-  </div>
-
-  <div class="panel">
-    <h2 id="htitle"></h2>
-    <p class="readout" id="hread"></p>
-    <div class="legend"><span><span class="sw" style="background:var(--g0)"></span><span class="g0"></span>, release</span>
-      <span><span class="sw" style="background:var(--g1)"></span><span class="g1"></span>, release</span>
-      <span><span class="tick"></span>real data</span>
-      <span id="cpleg" style="display:none"><span class="dash"></span>real AIM release</span></div>
-    <svg id="hist"></svg>
-    <details><summary>Show as table</summary><div id="tbl"></div></details>
-  </div>
-
-  <div class="panel" id="ba">
-    <h2>Before vs after: real data vs the AIM hybrid release</h2>
-    <p class="note" id="ba-sub"></p>
-    <div id="ba-body">
-      <h3>Leakage through all columns at once</h3>
-      <p class="note">Repairing columns one by one can leave <span class="sens"></span> readable from
-        combinations of columns, so this asks a classifier (the scorer's gradient-boosted trees,
-        <code>paper_metrics.py</code>) to recover it from every other column. For both measures 0.5 means no leak.
-        <b>Balanced error</b>: predicting the table's own <span class="sens"></span> column (3-fold, mean of 10 seeds).
-        <b>Folded tstr</b>: trained on the table, tested on real held-out people (fold 0 test rows), folded
-        as 0.5 − |BER − 0.5| so that a flipped label also counts as a leak.</p>
-      <div id="ba-tbl"></div>
-      <h3>Per column</h3>
-      <p class="note">TV between the two groups, real data → release. Where the hybrid merged proxy levels,
-        the middle mark is the real data with the same levels merged, which separates what the masking does
-        from what the repair does. Click a row to show its histograms below and above.</p>
-      <div class="legend"><span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2"/></svg>real data</span>
-        <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2" stroke-dasharray="2.5 2"/></svg>real data, proxy levels merged</span>
-        <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--ink)"/></svg>AIM hybrid release</span></div>
-      <svg id="ba-rank"></svg>
-      <h3 id="ba-htitle"></h3>
-      <div class="legend"><span><span class="sw" style="background:var(--g0)"></span><span class="g0"></span></span>
-        <span><span class="sw" style="background:var(--g1)"></span><span class="g1"></span></span></div>
-      <div class="pair">
-        <div><p class="readout">Real data</p><svg id="ba-real"></svg></div>
-        <div><p class="readout">AIM hybrid release</p><svg id="ba-hyb"></svg></div>
+  <!-- Scorecard: actual releases along τ -->
+  <section role="tabpanel" id="p-score" aria-labelledby="tab-score">
+    <div class="panel">
+      <h2>Scorecard</h2>
+      <p class="note" id="sc-sub"></p>
+      <div id="sc-body">
+        <div class="tiles" id="tiles"></div>
+        <div class="legend" style="margin-top:12px"><span><span class="tick"></span>AIM hybrid at each τ</span>
+          <span><span class="tick" style="border-top:1.5px dotted var(--ink-3)"></span>real data</span>
+          <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="4.5" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5"/></svg>plain AIM (no fairness steps)</span></div>
+        <div class="multiples" id="multiples"></div>
+        <details><summary>Show as table</summary><div id="sctbl"></div></details>
       </div>
-      <details><summary>Show as table</summary><div id="ba-htbl"></div></details>
+      <p class="note" id="sc-none" style="display:none"></p>
     </div>
-    <p class="note" id="ba-none" style="display:none"></p>
-  </div>
+    <details class="how"><summary>How this works</summary>
+      <p>Each point is an actual synthetic table: the AIM hybrid refitted from one set of private
+        measurements (ε 3, δ 1e-5, fold 0, refit 0) with repair amount τ; masking and consistency rules stay on.
+        Refits are post-processing, so every τ has the same privacy. Plain AIM is the same measurements with
+        no masking, repair or rules. All metrics are from <code>run_adult_flip.py --score-csv</code>
+        (<code>scripts/run_tau_grid.sh</code>). One refit per τ: differences of about 0.01–0.02 are refit noise,
+        which is also why τ = 1 here differs slightly from the release in Before vs after (a different refit
+        of the same measurements).</p>
+      <p><b>BER</b>: balanced error of a classifier predicting the table's own sex column from its other columns (0.5 = no link).
+        <b>A-NCB</b>: the FLIP paper's cluster-balance score with its own-sex adversary (higher = groups mix in
+        the clusters). It jumps once the sex label stops being predictable, so it mostly repeats BER; RESULTS.md
+        leaves it out of the verdict.
+        <b>Income AUC</b>: an income classifier trained on the table, tested on real held-out people.
+        <b>Parity / EO gap</b>: that classifier's gap between real men and women in &gt;50K predictions (all / true earners).
+        <b>Validity</b>: share of rows passing rules learned from the real data. <b>Impossible rows</b>: rows with a
+        sex–category pair absent from real data (e.g. a male wife).</p>
+    </details>
+  </section>
 
-  <p class="note" style="margin-top:16px">How this is simulated: each [<span class="sens"></span> × column] count table
-    gets Gaussian noise with an equal share of the zCDP budget ρ (δ = 1e-5). Then each group's
-    distribution is moved τ of the way to the pooled distribution using the transport plans of
-    <code>aim_fair/fair_aim.py</code> (monotone for binned numerics, minimal-move for categories).
-    This works on marginals only. It does not fit Private-PGM, mask proxies or apply consistency
-    rules. With <b>Equal split</b> it spends the budget on <span id="ntab"></span> tables, where real AIM spends it on
-    many more, so real noise is larger; <b>AIM's starting σ</b> uses the noise real AIM starts with at the same ε
-    instead (AIM then halves σ on some tables and combines several noisy tables in its model fit, so neither
-    setting is exact). Repairing each column separately does not remove leakage through
-    combinations of columns: the real AIM hybrid's release still teaches the protected attribute
-    slightly (folded tstr 0.43–0.49 across the four datasets, not 0.5; see RESULTS.md and
-    <code>results/datasets_summary.csv</code>).</p>
+  <!-- Leakage: per-column simulation -->
+  <section role="tabpanel" id="p-leak" aria-labelledby="tab-leak" hidden>
+    <div class="panel">
+      <h2>Which columns leak <span class="sens"></span>?</h2>
+      <p class="note">Gap between the two groups' distribution of each column (TV); the second axis row is the best
+        balanced error from that column alone (0.5 = no leak). Click a row.</p>
+      <div class="legend"><span><span class="sw" style="background:var(--bar-real)"></span>real data</span>
+        <span><span class="sw" style="background:var(--bar)"></span>simulated release at ε, τ</span>
+        <span><span class="badge">PROXY</span> has levels ≥ 95% one group</span></div>
+      <svg id="rank"></svg>
+    </div>
+    <div class="panel">
+      <h2 id="htitle"></h2>
+      <p class="readout" id="hread"></p>
+      <div class="legend"><span><span class="sw" style="background:var(--g0)"></span><span class="g0"></span>, release</span>
+        <span><span class="sw" style="background:var(--g1)"></span><span class="g1"></span>, release</span>
+        <span><span class="tick"></span>real data</span>
+        <span id="cpleg" style="display:none"><span class="dash"></span>actual AIM release</span></div>
+      <svg id="hist"></svg>
+      <details><summary>Show as table</summary><div id="tbl"></div></details>
+    </div>
+    <details class="how"><summary>How this works</summary>
+      <p>The sliders drive a simulation in the browser, not a new release: each [<span class="sens"></span> × column]
+        count table gets Gaussian noise with an equal share of the zCDP budget (δ 1e-5), then each group's
+        distribution is moved τ of the way to the pooled one with the transport plans of
+        <code>aim_fair/fair_aim.py</code>. The column's overall distribution stays the same, so τ costs no
+        distortion. It covers single columns only (no model fit, masking or rules), and real AIM's noise is
+        larger. The buttons <i>AIM plain / hybrid</i> jump to ε 3 and overlay the actual releases (dashed).</p>
+      <p><span id="noise"></span> The page holds exact counts of the real training fold: it is not a DP release.</p>
+    </details>
+  </section>
+
+  <!-- Before vs after: real data vs the actual hybrid release -->
+  <section role="tabpanel" id="p-ba" aria-labelledby="tab-ba" hidden>
+    <div class="panel" id="ba">
+      <h2>Real data vs the AIM hybrid release</h2>
+      <p class="note" id="ba-sub"></p>
+      <div id="ba-body">
+        <h3>Leakage through all columns (0.5 = no leak)</h3>
+        <div id="ba-tbl"></div>
+        <h3>Per column: TV between the groups</h3>
+        <div class="legend"><span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2"/></svg>real data</span>
+          <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2" stroke-dasharray="2.5 2"/></svg>real, proxy levels merged</span>
+          <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--ink)"/></svg>AIM hybrid release</span></div>
+        <svg id="ba-rank"></svg>
+        <h3 id="ba-htitle"></h3>
+        <div class="legend"><span><span class="sw" style="background:var(--g0)"></span><span class="g0"></span></span>
+          <span><span class="sw" style="background:var(--g1)"></span><span class="g1"></span></span></div>
+        <div class="pair">
+          <div><p class="readout">Real data</p><svg id="ba-real"></svg></div>
+          <div><p class="readout">AIM hybrid release</p><svg id="ba-hyb"></svg></div>
+        </div>
+        <details><summary>Show as table</summary><div id="ba-htbl"></div></details>
+      </div>
+      <p class="note" id="ba-none" style="display:none"></p>
+    </div>
+    <details class="how"><summary>How this works</summary>
+      <p>Not simulated: the actual release against the real training rows it was made from; the sliders do not
+        change this tab. <b>Balanced error</b>: the scorer's classifier (<code>paper_metrics.py</code>) predicts the
+        table's own sex column from all other columns (3-fold, mean of 10 seeds). <b>Folded tstr</b>: trained on the
+        table, tested on real held-out people, folded as 0.5 − |BER − 0.5|. The middle mark in the per-column chart
+        is the real data with the levels the hybrid merged, which separates masking from repair.</p>
+    </details>
+  </section>
 </main>
 <div id="tip"></div>
 <script>
@@ -268,8 +284,7 @@ function coupling(p, q, ordinal) {
   }
   return mass.map((row, i) => p[i] > 1e-12 ? row.map(m => m / p[i]) : row.map((_, j) => +(i === j)));
 }
-// returns {cond: [2][k] released P(x | group), pooled: [k] released P(x),
-//          w: [2] released P(group)}
+// returns {cond: [2][k] released P(x | group), pooled: [k] released P(x)}
 function release(noisy, ordinal, tau) {
   const pj = noisy.map(r => r.map(x => Math.max(x, 0)));
   const tot = pj.flat().reduce((a, b) => a + b, 0) || 1;
@@ -279,23 +294,9 @@ function release(noisy, ordinal, tau) {
     const T = coupling(c, target, ordinal);
     return c.map((_, j) => c.reduce((s, ci, i) => s + ci * ((1 - tau) * (i === j) + tau * T[i][j]), 0));
   });
-  return { cond, pooled: target.map((_, j) => w[0] * cond[0][j] + w[1] * cond[1][j]), w };
+  return { cond, pooled: target.map((_, j) => w[0] * cond[0][j] + w[1] * cond[1][j]) };
 }
 const tv = (a, b) => 0.5 * a.reduce((s, x, i) => s + Math.abs(x - b[i]), 0);
-// normalized mutual information I(S; X) / H(S) of a [2][k] joint (counts or
-// probabilities): the share of the group's uncertainty the column removes
-function nmi(joint) {
-  const p = joint.map(r => r.map(x => Math.max(x, 0)));
-  const tot = p.flat().reduce((a, b) => a + b, 0) || 1;
-  const ps = p.map(r => r.reduce((a, b) => a + b, 0) / tot);
-  const px = p[0].map((_, j) => (p[0][j] + p[1][j]) / tot);
-  let I = 0, H = 0;
-  ps.forEach((s, g) => {
-    if (s > 0) H -= s * Math.log(s);
-    p[g].forEach((x, j) => { const q = x / tot; if (q > 0) I += q * Math.log(q / (s * px[j])); });
-  });
-  return H > 0 ? Math.max(I, 0) / H : 0;
-}
 
 // --- seeded noise -----------------------------------------------------------
 function rng(seed) {
@@ -309,7 +310,7 @@ function normals(seed) {
 }
 
 // --- state ------------------------------------------------------------------
-const S = { ds: null, eps: 3, tau: 0, seed: 1, sel: null, z: null, metric: 'tv', noise: 'split' };
+const S = { ds: null, eps: 3, tau: 0, seed: 1, sel: null, z: null, tab: 'score' };
 const cur = () => DATA.datasets[S.ds];
 const epsFromSlider = v => Math.exp(Math.log(EPS_MIN) + v / 1000 * (Math.log(EPS_MAX) - Math.log(EPS_MIN)));
 const sliderFromEps = e => Math.round(1000 * (Math.log(e) - Math.log(EPS_MIN)) / (Math.log(EPS_MAX) - Math.log(EPS_MIN)));
@@ -321,19 +322,12 @@ function activeCheckpoint() {
   return null;
 }
 
-// AIM's own starting noise per cell at this ε (FairAIM.run): 16·d rounds,
-// 90% of its ρ on measurements; it halves σ whenever a measurement adds little
-function aimSigma(rho) {
-  const D = cur(), rounds = 16 * D.n_attributes;
-  return Math.sqrt(rounds / (2 * 0.9 * rho * D.aim_rho_share));
-}
-
-function compute(eps = S.eps, z = S.z) {
-  const D = cur(), rho = cdpRho(eps, DELTA), K = D.columns.length;
-  const sigma = S.noise === 'aim' ? aimSigma(rho) : Math.sqrt(K / (2 * rho));
+function compute() {
+  const D = cur(), rho = cdpRho(S.eps, DELTA), K = D.columns.length;
+  const sigma = Math.sqrt(K / (2 * rho));
   const cols = D.columns.map((c, ci) => {
     const realCond = c.real.map(r => norm(r));
-    const noisy = c.real.map((r, s) => r.map((x, j) => x + sigma * z[ci][s][j]));
+    const noisy = c.real.map((r, s) => r.map((x, j) => x + sigma * S.z[ci][s][j]));
     const rel = release(noisy, c.ordinal, S.tau);
     const realPooled = norm(c.real[0].map((x, j) => x + c.real[1][j]));
     // most group-skewed real level with >= 1% of rows
@@ -345,33 +339,9 @@ function compute(eps = S.eps, z = S.z) {
       if (!skew || m > skew.m) skew = { l, m, who: D.groups[pm >= 0.5 ? 0 : 1] };
     });
     return { ...c, realCond, rel, tvReal: tv(realCond[0], realCond[1]),
-      tvRel: tv(rel.cond[0], rel.cond[1]), distortion: tv(rel.pooled, realPooled), skew,
-      nmiReal: nmi(c.real), nmiRel: nmi(rel.cond.map((r, s) => r.map(x => rel.w[s] * x))) };
+      tvRel: tv(rel.cond[0], rel.cond[1]), distortion: tv(rel.pooled, realPooled), skew };
   });
   return { rho, sigma, cols };
-}
-
-// mean leakage and distortion over all columns, across ε, at the current τ:
-// the average over SWEEP_DRAWS fixed noise draws (separate from the page's seed)
-const SWEEP_DRAWS = 20, SWEEP_N = 61;
-const sweepEps = Array.from({ length: SWEEP_N }, (_, i) => epsFromSlider(1000 * i / (SWEEP_N - 1)));
-let sweepCache = { key: null };
-function sweep() {
-  const key = `${S.ds}|${S.tau}|${S.noise}`;
-  if (sweepCache.key === key) return sweepCache;
-  const zs = Array.from({ length: SWEEP_DRAWS }, (_, i) => normals(1000 + i));
-  const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
-  const rows = sweepEps.map(eps => {
-    let leak = 0, dist = 0;
-    for (const z of zs) {
-      const R = compute(eps, z);
-      leak += mean(R.cols.map(c => c.tvRel)); dist += mean(R.cols.map(c => c.distortion));
-    }
-    return { eps, leak: leak / zs.length, dist: dist / zs.length };
-  });
-  const real = mean(compute(S.eps, zs[0]).cols.map(c => c.tvReal));
-  sweepCache = { key, rows, real };
-  return sweepCache;
 }
 
 // --- drawing helpers --------------------------------------------------------
@@ -401,39 +371,121 @@ function showTip(ev, html) {
   tip.style.left = x + 'px'; tip.style.top = y + 'px';
 }
 const hideTip = () => { tip.style.display = 'none'; };
-
-// --- leakage ranking ----------------------------------------------------------
 // axis maximum and tick step: 3-5 ticks, covering every value
 function niceAxis(m) {
   const step = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25].find(s => m / s <= 5) || 0.25;
   return { max: Math.max(step, Math.ceil(m / step - 1e-9) * step), step };
 }
-const proxyText = c => c.proxy.map(p => `${p.level} → ${p.group} (${pct(p.purity)}, ${pct(p.support)} of rows)`).join('; ');
+
+// --- scorecard: actual releases along τ -------------------------------------
+const METRICS = [   // key, title, better, format
+  ['ber', 'BER, sex from other columns', '0.5 best', v => v.toFixed(3)],
+  ['ancb', "A-NCB, paper's version", 'higher', v => v.toFixed(3)],
+  ['auc', 'Income AUC on real people', 'higher', v => v.toFixed(3)],
+  ['income_parity', 'Income parity gap', 'lower', v => v.toFixed(3)],
+  ['eo_gap', 'Equalized-odds gap', 'lower', v => v.toFixed(3)],
+  ['validity', 'Validity', 'higher', v => v.toFixed(3)],
+  ['impossible', 'Impossible rows', 'lower', v => pct(v)],
+];
+// value range and 3-4 ticks for one metric, not anchored at 0
+function rangeAxis(vals) {
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const span = Math.max(hi - lo, 0.01);
+  const step = [0.002, 0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2].find(s => span / s <= 4) || 0.2;
+  lo = Math.floor(lo / step - 1e-9) * step; hi = Math.ceil(hi / step + 1e-9) * step;
+  if (hi - lo < 2 * step) hi = lo + 2 * step;
+  return { lo, hi, step };
+}
+function nearestPoint(pts) {
+  return pts.reduce((a, b) => Math.abs(b.tau - S.tau) < Math.abs(a.tau - S.tau) ? b : a);
+}
+
+function drawScorecard() {
+  const SC = cur().scorecard;
+  $('sc-body').style.display = SC ? '' : 'none';
+  $('sc-none').style.display = SC ? 'none' : '';
+  if (!SC) {
+    $('sc-sub').textContent = '';
+    $('sc-none').textContent = `No scorecard for ${cur().label}: run scripts/run_tau_grid.sh, then rebuild this page.`;
+    return;
+  }
+  const pts = SC.rows.filter(r => r.source === 'AIM hybrid').sort((a, b) => a.tau - b.tau);
+  const real = SC.rows.find(r => r.source === 'Real data'), plain = SC.rows.find(r => r.source === 'Plain AIM');
+  const at = nearestPoint(pts);
+  $('sc-sub').textContent = `Actual releases at ε = ${SC.eps} (fold 0, refit 0) as τ varies; the ε slider does not ` +
+    `apply here. Showing τ = ${at.tau}, the grid point nearest the slider.`;
+  // tiles: values at the current τ
+  $('tiles').innerHTML = METRICS.map(([k, t, better, f]) =>
+    `<div class="tile"><div class="t">${t}</div><div class="v">${f(at[k])}</div>` +
+    `<div class="r">${better} · real ${real ? f(real[k]) : '–'}</div></div>`).join('');
+  // small multiples
+  const box = $('multiples'); box.innerHTML = '';
+  for (const [k, t, better, f] of METRICS) {
+    const cell = document.createElement('div');
+    cell.innerHTML = `<h3>${t} <span>(${better})</span></h3>`;
+    box.appendChild(cell);
+    const svg = el('svg', {}, cell);
+    const W = svg.clientWidth || 300, mL = 46, mR = 34, top = 8, plotH = 110, H = top + plotH + 24;
+    const vals = [...pts.map(p => p[k]), ...(real ? [real[k]] : []), ...(plain ? [plain[k]] : [])];
+    const { lo, hi, step } = rangeAxis(vals);
+    const sx = v => mL + (W - mL - mR) * v, sy = v => top + plotH * (1 - (v - lo) / (hi - lo));
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+    for (let v = lo; v <= hi + 1e-9; v += step) {
+      el('line', { x1: mL, x2: W - mR, y1: sy(v), y2: sy(v), stroke: 'var(--grid)' }, svg);
+      el('text', { x: mL - 6, y: sy(v) + 4, 'text-anchor': 'end' }, svg, k === 'impossible' ? pct(v) : v.toFixed(step < 0.01 ? 3 : 2));
+    }
+    for (const x of [0, 0.25, 0.5, 0.75, 1])
+      el('text', { x: sx(x), y: top + plotH + 16, 'text-anchor': 'middle' }, svg, String(x));
+    el('text', { x: W - mR, y: top + plotH + 16, dx: 6, style: 'fill:var(--ink-3)' }, svg, 'τ');
+    if (real) {
+      el('line', { x1: mL, x2: W - mR, y1: sy(real[k]), y2: sy(real[k]), stroke: 'var(--ink-3)', 'stroke-width': 1.5,
+        'stroke-dasharray': '1 3', 'stroke-linecap': 'round' }, svg);
+      el('text', { x: W - mR + 4, y: sy(real[k]) + 4, style: 'fill:var(--ink-3)' }, svg, 'real');
+    }
+    el('line', { x1: sx(at.tau), x2: sx(at.tau), y1: top, y2: top + plotH, stroke: 'var(--ink-3)' }, svg);
+    el('path', { d: pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p.tau)},${sy(p[k])}`).join(''),
+      fill: 'none', stroke: 'var(--ink)', 'stroke-width': 2 }, svg);
+    if (plain) el('circle', { cx: sx(0), cy: sy(plain[k]), r: 4.5, fill: 'var(--panel)', stroke: 'var(--ink)', 'stroke-width': 1.5 }, svg);
+    for (const p of pts) {
+      const on = p === at;
+      el('circle', { cx: sx(p.tau), cy: sy(p[k]), r: on ? 5.5 : 3.5, fill: 'var(--ink)',
+        stroke: 'var(--panel)', 'stroke-width': 2 }, svg);
+      const hit = el('circle', { cx: sx(p.tau), cy: sy(p[k]), r: 12, fill: 'transparent', style: 'cursor:pointer' }, svg);
+      hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}, τ = ${p.tau}</div>` +
+        `AIM hybrid ${f(p[k])}` + (plain ? `<br>plain AIM ${f(plain[k])}` : '') + (real ? `<br>real data ${f(real[k])}` : '')));
+      hit.addEventListener('mouseleave', hideTip);
+      hit.addEventListener('click', () => { S.tau = p.tau; $('tau').value = p.tau; render(); });
+    }
+  }
+  const rows = [...pts.map(p => [`AIM hybrid, τ ${p.tau}`, p]), ...(plain ? [['Plain AIM', plain]] : []),
+    ...(real ? [['Real data', real]] : [])];
+  $('sctbl').innerHTML = '<table><tr><th></th>' + METRICS.map(m => `<th>${m[1]}</th>`).join('') + '</tr>' +
+    rows.map(([n, r]) => `<tr><td>${n}</td>` + METRICS.map(([k, , , f]) => `<td>${f(r[k])}</td>`).join('') + '</tr>').join('') +
+    '</table>';
+}
+
+// --- leakage ranking ----------------------------------------------------------
+const proxyText = c => c.proxy.map(p => `${p.level} → ${p.group} (${pct(p.purity)})`).join(', ');
 
 function drawRank(R) {
   const svg = $('rank'); svg.innerHTML = '';
-  const isTV = S.metric === 'tv';
-  const real = c => isTV ? c.tvReal : c.nmiReal, rel = c => isTV ? c.tvRel : c.nmiRel;
   const W = svg.clientWidth || 900, rowH = 28, valW = 92;
   // room for the longest name and its badge (~6.5 px per character at 12px)
   const labW = Math.min(W * 0.42, Math.max(...R.cols.map(c => c.name.length * 6.5 + (c.proxy.length ? 48 : 0))) + 14);
-  const order = [...R.cols].sort((a, b) => real(b) - real(a));   // fixed: by real leakage
-  const { max, step } = niceAxis(Math.max(...R.cols.flatMap(c => [real(c), rel(c)])));
+  const order = [...R.cols].sort((a, b) => b.tvReal - a.tvReal);   // fixed: by real leakage
+  const { max, step } = niceAxis(Math.max(...R.cols.flatMap(c => [c.tvReal, c.tvRel])));
   const x0 = labW, plotW = W - labW - valW, sx = v => x0 + plotW * v / max;
-  const axH = isTV ? 34 : 20, H = order.length * rowH + axH;
-  const dec = step < 0.1 ? 2 : 1;
+  const H = order.length * rowH + 34, dec = step < 0.1 ? 2 : 1;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
   for (let i = 0; i * step <= max + 1e-9; i++) {
     const t = i * step;
     el('line', { x1: sx(t), x2: sx(t), y1: 0, y2: order.length * rowH + 2, stroke: 'var(--grid)' }, svg);
     el('text', { x: sx(t), y: order.length * rowH + 16, 'text-anchor': 'middle' }, svg, t.toFixed(dec));
-    if (isTV) el('text', { x: sx(t), y: order.length * rowH + 30, 'text-anchor': 'middle',
+    el('text', { x: sx(t), y: order.length * rowH + 30, 'text-anchor': 'middle',
       style: 'fill:var(--ink-3)' }, svg, ((1 - t) / 2).toFixed(dec + 1));
   }
-  el('text', { x: x0 - 8, y: order.length * rowH + 16, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg,
-    isTV ? 'TV' : 'I / H');
-  if (isTV) el('text', { x: x0 - 8, y: order.length * rowH + 30, 'text-anchor': 'end', style: 'fill:var(--ink-3)' },
-    svg, 'balanced error');
+  el('text', { x: x0 - 8, y: order.length * rowH + 16, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg, 'TV');
+  el('text', { x: x0 - 8, y: order.length * rowH + 30, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg, 'balanced error');
   order.forEach((c, i) => {
     const y = i * rowH, g = el('g', { class: 'row' }, svg);
     el('rect', { class: 'bg', x: 0, y, width: W, height: rowH, rx: 6,
@@ -442,81 +494,18 @@ function drawRank(R) {
       style: c.name === S.sel ? 'fill:var(--ink);font-weight:600' : '' }, g);
     if (c.proxy.length) el('tspan', { class: 'badge' }, t, 'PROXY');
     el('tspan', c.proxy.length ? { dx: 6 } : {}, t, c.name);
-    if (real(c) > 0.0005) el('path', { d: hbar(x0, y + 5, sx(real(c)) - x0, rowH - 10), fill: 'var(--bar-real)' }, g);
-    if (rel(c) > 0.0005) el('path', { d: hbar(x0, y + 10, sx(rel(c)) - x0, rowH - 20), fill: 'var(--bar)' }, g);
+    if (c.tvReal > 0.0005) el('path', { d: hbar(x0, y + 5, sx(c.tvReal) - x0, rowH - 10), fill: 'var(--bar-real)' }, g);
+    if (c.tvRel > 0.0005) el('path', { d: hbar(x0, y + 10, sx(c.tvRel) - x0, rowH - 20), fill: 'var(--bar)' }, g);
     el('text', { x: W - 4, y: y + rowH / 2 + 4, 'text-anchor': 'end' }, g,
-      `${real(c).toFixed(2)} → ${rel(c).toFixed(2)}`);
+      `${c.tvReal.toFixed(2)} → ${c.tvRel.toFixed(2)}`);
     g.addEventListener('click', () => { S.sel = c.name; render(); });
     g.addEventListener('mousemove', ev => showTip(ev,
       `<div class="h">${c.name}</div>TV real ${c.tvReal.toFixed(3)} → release ${c.tvRel.toFixed(3)}<br>` +
-      `Balanced error from this column alone: ${((1 - c.tvReal) / 2).toFixed(3)} → ${((1 - c.tvRel) / 2).toFixed(3)}<br>` +
-      `Mutual information I/H: ${c.nmiReal.toFixed(3)} → ${c.nmiRel.toFixed(3)}` +
+      `Balanced error from this column alone: ${((1 - c.tvReal) / 2).toFixed(3)} → ${((1 - c.tvRel) / 2).toFixed(3)}` +
       (c.skew ? `<br>Most skewed level: <b>${c.skew.l}</b>, ${pct(c.skew.m)} ${c.skew.who}` : '') +
       (c.proxy.length ? `<br><b>Proxy levels:</b> ${proxyText(c)}` : '')));
     g.addEventListener('mouseleave', hideTip);
   });
-}
-
-// --- leakage and distortion across ε -------------------------------------------
-let sweepTimer = null;
-function drawSweep() {
-  // ~0.3 s of work: while τ is being dragged, keep the last curve and
-  // recompute once the slider rests
-  const stale = sweepCache.key !== null && sweepCache.key !== `${S.ds}|${S.tau}|${S.noise}` &&
-    sweepCache.key.split('|')[0] === S.ds;
-  if (stale) {
-    clearTimeout(sweepTimer);
-    sweepTimer = setTimeout(() => { sweep(); drawSweep(); }, 150);
-  }
-  const { rows, real } = stale ? sweepCache : sweep();
-  $('sweep').style.opacity = stale ? 0.4 : 1;
-  const svg = $('sweep'); svg.innerHTML = '';
-  const W = svg.clientWidth || 900, narrow = W < 600;
-  const mL = 44, mR = narrow ? 8 : 104, plotH = 200, top = 12, H = top + plotH + 30;
-  const lx = Math.log(EPS_MIN), hx = Math.log(EPS_MAX);
-  const sx = e => mL + (W - mL - mR) * (Math.log(e) - lx) / (hx - lx);
-  const { max, step } = niceAxis(Math.max(real, ...rows.map(r => Math.max(r.leak, r.dist))));
-  const sy = v => top + plotH * (1 - v / max), dec = step < 0.1 ? 2 : 1;
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
-  for (let i = 0; i * step <= max + 1e-9; i++) {
-    el('line', { x1: mL, x2: W - mR, y1: sy(i * step), y2: sy(i * step), stroke: 'var(--grid)' }, svg);
-    el('text', { x: mL - 6, y: sy(i * step) + 4, 'text-anchor': 'end' }, svg, (i * step).toFixed(dec));
-  }
-  for (const e of [0.1, 0.3, 1, 3, 10, 20])
-    el('text', { x: sx(e), y: top + plotH + 18, 'text-anchor': 'middle' }, svg, String(e));
-  el('text', { x: W - mR, y: top + plotH + 30, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg, 'ε (log scale)');
-  el('line', { x1: mL, x2: W - mR, y1: sy(0), y2: sy(0), stroke: 'var(--ink-3)' }, svg);
-  const path = f => rows.map((r, i) => `${i ? 'L' : 'M'}${sx(r.eps).toFixed(1)},${sy(f(r)).toFixed(1)}`).join('');
-  el('line', { x1: mL, x2: W - mR, y1: sy(real), y2: sy(real), stroke: 'var(--ink-3)', 'stroke-width': 1.5,
-    'stroke-dasharray': '1 3', 'stroke-linecap': 'round' }, svg);
-  el('path', { d: path(r => r.dist), fill: 'none', stroke: 'var(--ink-2)', 'stroke-width': 2, 'stroke-dasharray': '5 4' }, svg);
-  el('path', { d: path(r => r.leak), fill: 'none', stroke: 'var(--ink)', 'stroke-width': 2 }, svg);
-  el('line', { x1: sx(S.eps), x2: sx(S.eps), y1: top, y2: top + plotH, stroke: 'var(--ink-3)' }, svg);
-  if (!narrow) {   // direct labels at the line ends
-    const last = rows[rows.length - 1], lab = [['leakage', last.leak], ['distortion', last.dist], ['real leakage', real]]
-      .sort((a, b) => b[1] - a[1]);
-    let prev = -Infinity;
-    for (const [t, v] of lab) {
-      const y = Math.max(sy(v) + 4, prev + 13); prev = y;
-      el('text', { x: W - mR + 8, y }, svg, t);
-    }
-  }
-  // hover: crosshair snapped to the nearest ε of the grid
-  const guide = el('line', { y1: top, y2: top + plotH, stroke: 'var(--ink-2)', 'stroke-dasharray': '2 2',
-    visibility: 'hidden' }, svg);
-  const hit = el('rect', { x: mL, y: top, width: W - mL - mR, height: plotH, fill: 'transparent' }, svg);
-  hit.addEventListener('mousemove', ev => {
-    const b = svg.getBoundingClientRect(), x = (ev.clientX - b.left) * W / (b.width || W);
-    const r = rows.reduce((a, c) => Math.abs(sx(c.eps) - x) < Math.abs(sx(a.eps) - x) ? c : a);
-    guide.setAttribute('x1', sx(r.eps)); guide.setAttribute('x2', sx(r.eps)); guide.setAttribute('visibility', 'visible');
-    showTip(ev, `<div class="h">ε = ${fmtEps(r.eps)}, τ = ${S.tau.toFixed(2)}</div>` +
-      `Leakage TV ${r.leak.toFixed(3)} (real ${real.toFixed(3)})<br>Distortion TV ${r.dist.toFixed(3)}`);
-  });
-  hit.addEventListener('mouseleave', () => { guide.setAttribute('visibility', 'hidden'); hideTip(); });
-  $('sweeptbl').innerHTML = '<table><tr><th>ε</th><th>leakage TV</th><th>distortion TV</th></tr>' +
-    rows.filter((_, i) => i % 6 === 0).map(r => `<tr><td>${fmtEps(r.eps)}</td><td>${r.leak.toFixed(3)}</td>` +
-      `<td>${r.dist.toFixed(3)}</td></tr>`).join('') +
-    `<tr><td>real data</td><td>${real.toFixed(3)}</td><td>0</td></tr></table>`;
 }
 
 // --- histogram ------------------------------------------------------------------
@@ -525,12 +514,10 @@ function drawHist(R) {
   const c = R.cols.find(x => x.name === S.sel), cpKey = activeCheckpoint();
   const cp = cpKey && c.checkpoints[cpKey] ? c.checkpoints[cpKey].map(r => norm(r)) : null;
   $('cpleg').style.display = cp ? '' : 'none';
-  $('htitle').textContent = `${c.name}: share of each ${D.sensitive} group (${G[0]}, ${G[1]}) in each ${c.ordinal ? 'bin' : 'level'}`;
-  $('hread').textContent = `Leakage TV ${c.tvReal.toFixed(3)} (real) → ${c.tvRel.toFixed(3)} (release), ` +
-    `balanced error ${((1 - c.tvRel) / 2).toFixed(3)}, mutual information I/H ${c.nmiReal.toFixed(3)} → ${c.nmiRel.toFixed(3)}. ` +
-    `Overall distribution off from real by ${c.distortion.toFixed(3)} TV (from the noise; the repair leaves it unchanged).` +
-    (c.proxy.length ? ` Proxy levels (real data): ${proxyText(c)}.` : '') +
-    (cp ? ` Dashed: the real AIM ${cpKey} release at ε ${D.checkpoints[cpKey].eps}, τ ${D.checkpoints[cpKey].tau}.` : '');
+  $('htitle').textContent = `${c.name}: share of each ${D.sensitive} group in each ${c.ordinal ? 'bin' : 'level'}`;
+  $('hread').textContent = `TV ${c.tvReal.toFixed(3)} → ${c.tvRel.toFixed(3)} · distortion ${c.distortion.toFixed(3)}` +
+    (c.proxy.length ? ` · proxy: ${proxyText(c)}` : '') +
+    (cp ? ` · dashed: actual AIM ${cpKey} release` : '');
   const svg = $('hist'); svg.innerHTML = '';
   const W = svg.clientWidth || 900, k = c.labels.length;
   const rotate = k > 8 || W < 600, mL = 44, mB = rotate ? 84 : 28, plotH = 260, H = plotH + mB + 10;
@@ -621,13 +608,11 @@ function drawBeforeAfter() {
     return;
   }
   const merged = Object.entries(BA.merged);
-  $('ba-sub').textContent = `The actual release ${BA.file} (ε ${BA.eps}, τ ${BA.tau}; fold 0, refit 0) against the ` +
-    `real fold 0 training rows it was made from. Not simulated: the sliders above do not change this panel. ` +
-    (merged.length ? `The hybrid merged ${merged.map(([c, l]) => `${c}: ${l.join(' + ')}`).join('; ')} into one level, MASK.`
-      : 'The hybrid merged no levels.');
+  $('ba-sub').textContent = `Actual release, ε ${BA.eps}, τ ${BA.tau} (fold 0, refit 0)` +
+    (merged.length ? `; merged into MASK: ${merged.map(([c, l]) => `${c} ${l.join(' + ')}`).join('; ')}.` : '.');
   // all-columns table
   const A = BA.all_columns;
-  $('ba-tbl').innerHTML = !A ? '<p class="note">Not computed: it needs the fold 0 test split on disk and the page built with the main (torch) environment.</p>' :
+  $('ba-tbl').innerHTML = !A ? '<p class="note">Not computed: needs the fold 0 test split and the main (torch) environment.</p>' :
     '<table><tr><th>Table</th><th>balanced error</th><th>folded tstr</th></tr>' +
     A.map(r => `<tr class="${r.label.startsWith('AIM hybrid') || r.label === 'Real data' ? 'hi' : ''}"><td>${r.label}</td>` +
       `<td>${r.ber.toFixed(3)}</td><td>${r.tstr.toFixed(3)}</td></tr>`).join('') + '</table>';
@@ -680,18 +665,36 @@ function drawBeforeAfter() {
       `<td>${pct(real[1][j])}</td><td>${pct(hyb[1][j])}</td></tr>`).join('') + '</table>';
 }
 
+// --- tabs and rendering ---------------------------------------------------------
+const TABS = ['score', 'leak', 'ba'];
+function setTab(t) {
+  S.tab = t;
+  for (const x of TABS) {
+    $('tab-' + x).setAttribute('aria-selected', String(x === t));
+    $('p-' + x).hidden = x !== t;
+  }
+  try { localStorage.setItem('leakage-explorer-tab', t); } catch (e) { /* storage blocked */ }
+  render();
+}
+
 function render() {
-  const R = compute();
   $('epsv').textContent = fmtEps(S.eps);
   $('tauv').textContent = S.tau.toFixed(2);
-  $('epsh').textContent = S.eps < 1 ? '(strong privacy, noisy)' : S.eps > 8 ? '(weak privacy)' : '';
-  $('tauh').textContent = S.tau === 0 ? '(no repair)' : S.tau === 1 ? '(full repair)' : '';
-  const sSplit = Math.sqrt(R.cols.length / (2 * R.rho)), sAim = aimSigma(R.rho);
-  $('noise').textContent = `zCDP ρ = ${R.rho.toFixed(4)} → Gaussian noise σ = ${R.sigma.toFixed(1)} rows per cell ` +
-    `(${cur().n.toLocaleString()} rows). Equal split over ${R.cols.length} tables: σ = ${sSplit.toFixed(1)}; ` +
-    `real AIM starts at σ = ${sAim.toFixed(1)} (${16 * cur().n_attributes} rounds) and halves it ` +
-    `whenever a measurement adds little. Noise seed ${S.seed}.`;
-  drawRank(R); drawSweep(); drawHist(R); drawBeforeAfter();
+  // the scorecard and before/after are actual releases: ε does not apply there
+  $('eps').disabled = S.tab !== 'leak';
+  $('leakchips').style.display = S.tab === 'leak' ? '' : 'none';
+  $('epsh').textContent = S.tab !== 'leak' ? '(simulation only: Leakage tab)' :
+    S.eps < 1 ? '(more private, more noise)' : S.eps > 8 ? '(less private)' : '';
+  $('tauh').textContent = S.tab === 'ba' ? '(not used here: τ 1 release)' :
+    S.tau === 0 ? '(no repair)' : S.tau === 1 ? '(full repair)' : '';
+  if (S.tab === 'score') drawScorecard();
+  if (S.tab === 'leak') {
+    const R = compute();
+    $('noise').textContent = `At ε ${fmtEps(S.eps)}: zCDP ρ = ${R.rho.toFixed(4)}, noise σ = ${R.sigma.toFixed(1)} rows ` +
+      `per cell over ${R.cols.length} tables (${cur().n.toLocaleString()} rows); seed ${S.seed}.`;
+    drawRank(R); drawHist(R);
+  }
+  if (S.tab === 'ba') drawBeforeAfter();
 }
 
 // switch dataset: keep ε, τ and the seed; select the leakiest real column
@@ -704,14 +707,12 @@ function setDataset(name) {
   document.querySelectorAll('.g0').forEach(e => { e.textContent = D.groups[0]; });
   document.querySelectorAll('.g1').forEach(e => { e.textContent = D.groups[1]; });
   $('dslabel').textContent = D.label;
-  $('gvs').textContent = `${D.groups[0]}-vs-${D.groups[1]}`;
-  $('dsnote').textContent = `protected: ${D.sensitive} · target: ${D.target}`;
-  $('ntab').textContent = D.columns.length;
+  $('target').textContent = D.target;
   $('cpchips').innerHTML = '';
   for (const [k, cp] of Object.entries(D.checkpoints)) {
     const b = document.createElement('button');
     b.textContent = `AIM ${k}: ε ${cp.eps}, τ ${cp.tau}`;
-    b.title = `Jump to the setting of a real AIM release (${cp.file}) and overlay it`;
+    b.title = `Jump to the setting of an actual AIM release (${cp.file}) and overlay it`;
     b.addEventListener('click', () => { S.eps = cp.eps; S.tau = cp.tau;
       $('eps').value = sliderFromEps(cp.eps); $('tau').value = cp.tau; render(); });
     $('cpchips').appendChild(b);
@@ -733,19 +734,13 @@ if (!DATA) { $('err').style.display = 'block'; } else {
   $('eps').addEventListener('input', e => { S.eps = epsFromSlider(+e.target.value); render(); });
   $('tau').addEventListener('input', e => { S.tau = +e.target.value; render(); });
   $('reseed').addEventListener('click', () => { S.seed++; S.z = normals(S.seed); render(); });
-  for (const m of ['split', 'aim']) $('n-' + m).addEventListener('click', () => {
-    S.noise = m;
-    for (const o of ['split', 'aim']) $('n-' + o).setAttribute('aria-pressed', String(o === m));
-    render();
-  });
-  for (const m of ['tv', 'nmi']) $('m-' + m).addEventListener('click', () => {
-    S.metric = m;
-    for (const o of ['tv', 'nmi']) {
-      $('m-' + o).setAttribute('aria-pressed', String(o === m));
-      $('mnote-' + o).style.display = o === m ? '' : 'none';
-    }
-    render();
-  });
+  for (const t of TABS) $('tab-' + t).addEventListener('click', () => setTab(t));
+  try { const t = localStorage.getItem('leakage-explorer-tab'); if (TABS.includes(t)) S.tab = t; }
+  catch (e) { /* storage blocked */ }
+  for (const x of TABS) {
+    $('tab-' + x).setAttribute('aria-selected', String(x === S.tab));
+    $('p-' + x).hidden = x !== S.tab;
+  }
   let t; addEventListener('resize', () => { clearTimeout(t); t = setTimeout(render, 100); });
   setDataset(names[0]);
 }
