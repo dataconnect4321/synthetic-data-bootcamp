@@ -2,14 +2,18 @@
 reproduction of FLIP vs FLIP's reported numbers, every number from FLIP's
 own evaluation protocol where the paper defines one.
 
-  AIM hybrid  run_adult_refits.sh tables (aimre), fold 0, 3 refits averaged
+  AIM hybrid  the tau grid's tau-1 tables (scripts/run_tau_grid.sh,
+              aimfinal_tau1), fold 0, 3 refits averaged: the same tables as
+              the dashboard scorecard's fold-0 point at tau 1
   FLIP repro  flipfaithful_e3_f0_lam4 (see final_chart.py), fold 0
   FLIP paper  values read off the paper's Fig. 3 (Adult, lambda 4, eps 3)
 
 Data-level metrics (BER, A-NCB in the paper's own-adversary form, tstr,
 utility, realism) come from the run_adult_flip.py --score-csv JSONs.
 Downstream metrics come from flip_protocol.py (LightGBM, every
-non-protected attribute as a target, Eqs. 14 and 15; income at 0.5).
+non-protected attribute as a target, Eqs. 14 and 15; income at 0.5). A
+source whose JSONs are not on disk keeps its column of the existing csv
+(printed), as flip_protocol.py keeps its rows.
 
 Writes results/flip_faithful_comparison.{csv,png}.
 
@@ -32,7 +36,7 @@ SOURCES = [   # name, scorer JSONs, flip_protocol.py source, color
     ('FLIP paper (reported)', None, None, '#ffffff'),
     ('FLIP reproduction', 'flipfaithful_e3_f0_lam4.json',
      'FLIP reproduction (lambda 4, nominal eps 3)', '#eb6834'),
-    ('AIM hybrid', 'aimre_e3_f0_r*.json', 'AIM hybrid', '#2a78d6'),
+    ('AIM hybrid', 'aimfinal_tau1_e3_f0_r*.json', 'AIM hybrid', '#2a78d6'),
 ]
 PM = 'paper_metrics'
 METRICS = [   # key, label, better, format, getter (scorer JSON)
@@ -72,6 +76,8 @@ def values():
     tg = pd.read_csv(os.path.join(ROOT, 'results', 'flip_protocol_targets.csv'))
     inc = pd.read_csv(os.path.join(ROOT, 'results', 'flip_protocol_income.csv'))
     tg, inc = tg[tg.scope == 'fold0'], inc[inc.scope == 'fold0']
+    old_path = os.path.join(ROOT, 'results', 'flip_faithful_comparison.csv')
+    old = pd.read_csv(old_path) if os.path.exists(old_path) else None
     out = {}
     for name, pat, proto, _ in SOURCES:
         if pat is None:
@@ -79,6 +85,17 @@ def values():
             continue
         runs = [json.load(open(p)) for p in
                 sorted(glob.glob(os.path.join(ROOT, 'adult_results', pat)))]
+        if not runs:
+            if old is None or name not in old:
+                raise SystemExit(f'{name}: no adult_results/{pat} and no '
+                                 'existing csv column')
+            col = dict(zip(old.metric, old[name]))
+            out[name] = {k: None if pd.isna(col[lab.replace('\n', ' ')])
+                         else float(col[lab.replace('\n', ' ')])
+                         for k, lab, *_ in METRICS + EXTRA}
+            print(f'{name}: no scorer JSONs on disk, column kept from '
+                  f'{os.path.relpath(old_path, ROOT)}')
+            continue
         v = {k: float(np.mean([g(d) for d in runs]))
              for k, *_, g in METRICS + EXTRA if g is not None}
         t = tg[tg.source == proto]

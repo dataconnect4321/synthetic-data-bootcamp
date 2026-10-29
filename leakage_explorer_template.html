@@ -51,6 +51,7 @@ input[type=range]:disabled { opacity: .4; }
 button { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
   border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
 button:hover { background: var(--sel); }
+button[aria-pressed="true"] { background: var(--sel); border-color: var(--ink-3); font-weight: 600; }
 select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
   border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; margin: 2px 0; }
 select:disabled { color: var(--ink-2); opacity: 1; }
@@ -163,6 +164,7 @@ th:first-child, td:first-child { text-align: left; }
 
   <nav class="tabs" role="tablist" aria-label="Views">
     <button role="tab" id="tab-score" aria-controls="p-score" aria-selected="true">Scorecard</button>
+    <button role="tab" id="tab-flip" aria-controls="p-flip" aria-selected="false">FLIP-faithful</button>
     <button role="tab" id="tab-leak" aria-controls="p-leak" aria-selected="false">Leakage</button>
     <button role="tab" id="tab-ba" aria-controls="p-ba" aria-selected="false">Before vs after</button>
     <button role="tab" id="tab-graph" aria-controls="p-graph" aria-selected="false">Model graph</button>
@@ -173,6 +175,11 @@ th:first-child, td:first-child { text-align: left; }
     <div class="panel">
       <h2>Scorecard</h2>
       <p class="note" id="sc-sub"></p>
+      <div class="chips" id="sc-folds" role="group" aria-label="Folds shown">
+        <button id="sc-all" aria-pressed="true">Mean of folds (± sd)</button>
+        <button id="sc-f0" aria-pressed="false">Fold 0 (as FLIP-faithful)</button>
+      </div>
+      <p class="note" id="sc-match" style="margin-top:6px"></p>
       <div id="sc-body">
         <div class="legend"><span><span class="tick"></span>AIM hybrid along τ (● = τ <span id="sc-tau"></span>)</span>
           <span id="sc-bandleg"><span class="sw" style="background:var(--band)"></span><span id="sc-bandlab"></span></span>
@@ -190,25 +197,63 @@ th:first-child, td:first-child { text-align: left; }
         post-processing, so every τ has the same privacy. <b>Plain AIM</b> (left of the τ axis) is the same
         measurements with no masking, repair or rules: the privacy-only baseline. A point is the mean over
         refits within each fold, then over folds; the band is ± 1 sd across the fold means, the convention of
-        the ± in RESULTS.md. All metrics are from <code>run_adult_flip.py --score-csv</code>
-        (<code>scripts/run_tau_grid.sh</code>, <code>results/utility_tau_grid.csv</code>). Before vs after
+        the ± in RESULTS.md. <b>Fold 0</b> shows that fold alone (the mean of its 3 refits, no band): at τ 1 these
+        are the same tables, and so the same numbers, as the AIM column of the FLIP-faithful tab. BER, A-NCB, AUC,
+        validity and impossible rows are from <code>run_adult_flip.py --score-csv</code>; the downstream fairness
+        metrics follow FLIP's own protocol (<code>aim_fair/flip_protocol.py</code>, LightGBM). The grid:
+        <code>scripts/run_tau_grid.sh</code>, <code>results/utility_tau_grid.csv</code>. Before vs after
         shows one release (fold 0, refit 0), so its numbers differ slightly from these means.</p>
       <p><b>The strip at the top</b> compares plain AIM with the hybrid at τ 1 in each fold (same measurements,
         so the difference is paired): Δ is the mean of the per-fold differences, ± their sd, and the count says
         in how many folds the hybrid moved the same way.</p>
       <p><b>FLIP</b> (square): the values the FLIP paper reports for Adult at λ 4, ε 3 (its Fig. 3), computed by its
         own evaluation code, so not the same way as the AIM points (e.g. its income AUC is 0.66; our scorer gives
-        0.90 on our reproduction of FLIP). FLIP does not report validity or impossible rows (n/r). Hover a FLIP
-        mark for our reproduction (fold 0, scored like AIM; <code>results/final_comparison.csv</code>). FLIP's ε is
-        nominal and covers the VAE only; AIM's ε covers the whole release.</p>
+        0.90 on our reproduction of FLIP). FLIP does not report validity, impossible rows or its per-target means
+        (n/r). Hover a FLIP mark for our reproduction (fold 0, scored like AIM;
+        <code>results/flip_faithful_comparison.csv</code>). FLIP's ε is nominal and covers the VAE only; AIM's ε
+        covers the whole release.</p>
       <p><b>BER</b>: balanced error of a classifier predicting the table's own sex column from its other columns (0.5 = no link).
         <b>A-NCB</b>: the FLIP paper's cluster-balance score with its own-sex adversary (higher = groups mix in
         the clusters). It jumps once the sex label stops being predictable, so it mostly repeats BER; RESULTS.md
         leaves it out of the verdict.
         <b>Income AUC</b>: an income classifier trained on the table, tested on real held-out people.
-        <b>Parity / EO gap</b>: that classifier's gap between real men and women in &gt;50K predictions (all / true earners).
+        <b>Parity / EO gap</b>: FLIP's protocol, a LightGBM income model trained on the table and tested on real
+        held-out people: its gap between men and women in &gt;50K predictions at threshold 0.5 (all / true earners,
+        the TPR gap; FLIP does not define its EO number). <b>Eq. 14 / Eq. 15</b>: the same, with every other
+        attribute as the target in turn: the largest gap over classes in the share predicted (categorical), and the
+        distance between the sexes' predicted values over the real sd (numeric), averaged over targets.
         <b>Validity</b>: share of rows passing rules learned from the real data. <b>Impossible rows</b>: rows with a
         sex–category pair absent from real data (e.g. a male wife).</p>
+      <p><b>Other datasets</b> (ACS-I, Dutch): only τ 1 and plain AIM were run (<code>aim_fair/run_datasets.sh</code>,
+        <code>results/datasets_summary.csv</code>), so there is no τ curve, no FLIP mark, and the strip's Δ is the
+        difference of the fold means, not paired. Dutch's target is occupation, so its AUC and gaps are about
+        occupation. Their parity / EO gap are still the scorer's classifier, not FLIP's protocol. Without their
+        fold-0 data on disk only this tab is shown.</p>
+    </details>
+  </section>
+
+  <!-- FLIP-faithful: every source under FLIP's own protocol -->
+  <section role="tabpanel" id="p-flip" aria-labelledby="tab-flip" hidden>
+    <div class="panel">
+      <h2>FLIP-faithful comparison</h2>
+      <p class="note">UCI Adult, sex protected, ε 3, fold 0. Our two sources are scored identically, by FLIP's own
+        protocol where the paper defines one. The best value in each row is in bold.</p>
+      <p class="note" id="ff-match"></p>
+      <div id="ff-tbl" style="overflow-x:auto"></div>
+      <p class="note" id="ff-none" style="display:none"></p>
+    </div>
+    <details class="how"><summary>How this works</summary>
+      <p><b>AIM hybrid</b>: the mean of 3 refits at τ 1 from fold 0's saved ε-3 measurements: the τ grid's own tables
+        (<code>aimfinal_tau1_e3_f0</code>), so this column equals the scorecard's fold-0 point at τ 1, metric for
+        metric; the line above checks it. <b>FLIP reproduction</b>: FLIP as published, λ 4, nominal ε 3 (VAE only),
+        fold 0. <b>FLIP paper</b>: read off the paper's Fig. 3 (Adult, λ 4, ε 3), computed by its own code, so
+        indicative only; n/r = not reported.</p>
+      <p>BER, A-NCB, tstr, AUC, realism, validity and impossible rows are from <code>run_adult_flip.py --score-csv</code>.
+        The downstream rows follow FLIP Sections 5.3 and 6.5 (<code>aim_fair/flip_protocol.py</code>): LightGBM trained
+        on the table, predicting real test people. *FLIP does not define its equalized-odds number; ours is the TPR gap
+        (equal opportunity); <code>results/flip_protocol_income.csv</code> has the other candidates.
+        Epsilon-identifiability measures closeness to real rows, not leakage. From
+        <code>results/flip_faithful_comparison.csv</code> (<code>aim_fair/flip_faithful_chart.py</code>).</p>
     </details>
   </section>
 
@@ -389,7 +434,7 @@ function normals(seed) {
 }
 
 // --- state ------------------------------------------------------------------
-const S = { ds: null, eps: 3, tau: 0, seed: 1, sel: null, z: null, tab: 'score', gk: null, ghi: null };
+const S = { ds: null, eps: 3, tau: 0, seed: 1, sel: null, z: null, tab: 'score', gk: null, ghi: null, scFold: null };
 const cur = () => DATA.datasets[S.ds];
 const epsFromSlider = v => Math.exp(Math.log(EPS_MIN) + v / 1000 * (Math.log(EPS_MAX) - Math.log(EPS_MIN)));
 const sliderFromEps = e => Math.round(1000 * (Math.log(e) - Math.log(EPS_MIN)) / (Math.log(EPS_MAX) - Math.log(EPS_MIN)));
@@ -463,9 +508,13 @@ const METRICS = [   // key, title, better, format
   ['auc', 'Income AUC on real people', 'higher', v => v.toFixed(3)],
   ['income_parity', 'Income parity gap', 'lower', v => v.toFixed(3)],
   ['eo_gap', 'Equalized-odds gap', 'lower', v => v.toFixed(3)],
+  ['sp_cat', 'Mean parity, all categorical targets (Eq. 14)', 'lower', v => v.toFixed(3)],
+  ['w1_num', 'Mean W1 / sd, all numeric targets (Eq. 15)', 'lower', v => v.toFixed(3)],
   ['validity', 'Validity', 'higher', v => v.toFixed(3)],
   ['impossible', 'Impossible rows', 'lower', v => pct(v)],
 ];
+// the metrics a dataset's scorecard has (the other datasets: no Eq. 14 / 15)
+const metricsOf = SC => METRICS.filter(([k]) => SC.rows.some(r => r[k] != null));
 // value range and 3-4 ticks for one metric, not anchored at 0
 function rangeAxis(vals) {
   let lo = Math.min(...vals), hi = Math.max(...vals);
@@ -493,12 +542,15 @@ const runsText = r => r.folds > 1 ? `${r.refits} refit${r.refits > 1 ? 's' : ''}
   r.refits > 1 ? `${r.refits} refits of one fold` : 'one run';
 const clamp01 = v => Math.min(1, Math.max(0, v));
 const spread = (r, k) => [clamp01(r[k] - (sdOf(r, k) ?? 0)), clamp01(r[k] + (sdOf(r, k) ?? 0))];
-// the summary rows of the grid (the per-fold rows carry a fold)
-function scoreRows(SC) {
-  const agg = SC.rows.filter(r => r.fold == null);
+// the summary rows of the grid (fold null), or one fold's rows
+function scoreRows(SC, fold = null) {
+  const agg = SC.rows.filter(r => (r.fold ?? null) === fold);
   return { pts: agg.filter(r => r.source === 'AIM hybrid').sort((a, b) => a.tau - b.tau),
     real: agg.find(r => r.source === 'Real data'), plain: agg.find(r => r.source === 'Plain AIM') };
 }
+
+// metric titles name the dataset's target (Dutch: occupation)
+const tl = t => t.replace('Income', cur().target[0].toUpperCase() + cur().target.slice(1));
 
 function drawScorecard() {
   const SC = cur().scorecard;
@@ -509,7 +561,15 @@ function drawScorecard() {
     $('sc-none').textContent = `No scorecard for ${cur().label}: run scripts/run_tau_grid.sh, then rebuild this page.`;
     return;
   }
-  const { pts, real, plain } = scoreRows(SC);
+  // fold 0 alone: only where the grid has per-fold rows
+  const hasF0 = SC.rows.some(r => r.fold === 0);
+  if (!hasF0) S.scFold = null;
+  $('sc-folds').style.display = hasF0 ? '' : 'none';
+  $('sc-all').setAttribute('aria-pressed', String(S.scFold == null));
+  $('sc-f0').setAttribute('aria-pressed', String(S.scFold === 0));
+  $('sc-match').textContent = matchText(SC);
+  const METRICS = metricsOf(SC);
+  const { pts, real, plain } = scoreRows(SC, S.scFold);
   const B = SC.baseline, at = nearestPoint(pts);
   const banded = pts.some(p => METRICS.some(([k]) => sdOf(p, k) != null));
   $('sc-flipleg').style.display = B ? '' : 'none';
@@ -519,12 +579,13 @@ function drawScorecard() {
   $('sc-tau').textContent = at.tau;
   $('sc-sub').textContent = `Actual releases at ε = ${SC.eps}: ` + (at.folds > 1 || at.refits > 1 ?
     `each point is the mean of ${runsText(at)}` : 'one refit of fold 0 per τ, so no error bars ' +
-    '(refit noise is about 0.01–0.02)') + `. τ snaps to the computed grid (now ${at.tau}); the ε slider ` +
-    'does not apply here.';
+    '(refit noise is about 0.01–0.02)') + (pts.length > 1 ?
+    `. τ snaps to the computed grid (now ${at.tau}); the ε slider does not apply here.` :
+    `. Only τ ${at.tau} was run for this dataset (aim_fair/run_datasets.sh); the τ grid is Adult only.`);
   // small multiples along τ: [plain | τ 0 … 1 | FLIP]
   const box = $('multiples'); box.innerHTML = '';
-  for (const [k, t, better, f] of METRICS) {
-    const cell = document.createElement('div');
+  for (const [k, t0, better, f] of METRICS) {
+    const t = tl(t0), cell = document.createElement('div');
     cell.id = 'm-' + k;
     const s = sdOf(at, k);
     cell.innerHTML = `<h3>${t} <span>(${better})</span></h3><p class="now"><b>${f(at[k])}</b>` +
@@ -546,7 +607,11 @@ function drawScorecard() {
     }
     for (const x of [0, 0.25, 0.5, 0.75, 1])
       el('text', { x: sx(x), y: top + plotH + 16, 'text-anchor': 'middle' }, svg, x ? String(x) : 'τ 0');
-    if (pts.every(p => sdOf(p, k) != null)) {   // ± 1 sd band along τ
+    if (pts.length === 1 && sdOf(pts[0], k) != null) {   // one τ: its sd as a short band
+      const [pl, ph] = spread(pts[0], k);
+      el('rect', { x: sx(pts[0].tau) - 6, y: sy(ph), width: 12, height: Math.max(0, sy(pl) - sy(ph)), rx: 2,
+        fill: 'var(--band)' }, svg);
+    } else if (pts.every(p => sdOf(p, k) != null)) {   // ± 1 sd band along τ
       const up = pts.map(p => `${sx(p.tau)},${sy(spread(p, k)[1])}`);
       const dn = pts.map(p => `${sx(p.tau)},${sy(spread(p, k)[0])}`).reverse();
       el('path', { d: `M${up.join('L')}L${dn.join('L')}Z`, fill: 'var(--band)' }, svg);
@@ -608,9 +673,62 @@ function drawScorecard() {
   const rows = [...pts.map(p => [`AIM hybrid, τ ${p.tau}`, p]), ...(plain ? [['Plain AIM', plain]] : []),
     ...(B ? [[`${B.label} (${B.note})`, B.values], ['FLIP, our reproduction', B.repro]] : []),
     ...(real ? [['Real data', real]] : [])];
-  $('sctbl').innerHTML = '<table><tr><th></th>' + METRICS.map(m => `<th>${m[1]}</th>`).join('') + '</tr>' +
+  $('sctbl').innerHTML = '<table><tr><th></th>' + METRICS.map(m => `<th>${tl(m[1])}</th>`).join('') + '</tr>' +
     rows.map(([n, r]) => `<tr><td>${n}</td>` + METRICS.map(([k, , , f]) =>
       `<td>${r[k] == null ? 'n/r' : fmtSd(r, k, f)}</td>`).join('') + '</tr>').join('') + '</table>';
+}
+
+// the build's check: FLIP-faithful AIM column vs the scorecard's fold 0 at τ 1
+function matchText(SC) {
+  const C = SC.faithful && SC.faithful.check;
+  if (!C) return '';
+  const bad = C.filter(c => !c.ok);
+  if (bad.length) return `⚠ Fold 0 at τ 1 differs from the FLIP-faithful AIM column in ${bad.map(c => c.key).join(', ')}: ` +
+    'rebuild after scripts/run_tau_grid.sh and aim_fair/flip_faithful_chart.py.';
+  return S.scFold === 0 ? `✓ τ 1 here is the FLIP-faithful tab's AIM column: all ${C.length} shared metrics match.` :
+    'Fold 0 shows the same tables as the FLIP-faithful tab (its τ 1 point is that tab\'s AIM column).';
+}
+
+// --- FLIP-faithful: FLIP paper vs FLIP reproduction vs AIM hybrid, FLIP's protocol
+const FF_GROUPS = [   // heading, keys (in this order)
+  ['Data level (FLIP\'s primary criteria)', ['ber', 'ancb', 'tstr']],
+  ['Utility and realism', ['auc', 'alpha', 'beta', 'validity', 'impossible']],
+  ['Downstream (FLIP Sections 5.3 and 6.5, LightGBM)', ['income_parity', 'eo_gap', 'sp_cat', 'w1_num']],
+  ['Privacy', ['eps_id']],
+];
+const FF_COLS = [['paper', 'FLIP paper, reported'], ['repro', 'FLIP reproduction'], ['aim', 'AIM hybrid']];
+function drawFaithful() {
+  const F = cur().scorecard && cur().scorecard.faithful;
+  $('ff-tbl').style.display = F ? '' : 'none';
+  $('ff-none').style.display = F ? 'none' : '';
+  if (!F) {
+    $('ff-match').textContent = '';
+    $('ff-none').textContent = 'No FLIP-faithful comparison: run python aim_fair/flip_faithful_chart.py, then rebuild.';
+    return;
+  }
+  const C = Object.fromEntries((F.check || []).map(c => [c.key, c]));
+  const n = Object.keys(C).length, bad = Object.values(C).filter(c => !c.ok).length;
+  $('ff-match').textContent = !n ? '' : bad ? `⚠ ${bad} of ${n} metrics differ from the scorecard's fold-0 point at τ 1.` :
+    `✓ The AIM column equals the scorecard's fold-0 point at τ 1 in all ${n} metrics they share (marked ✓).`;
+  const byKey = Object.fromEntries(F.rows.map(r => [r.key, r]));
+  const fmt = (k, v) => v == null ? '<span style="color:var(--ink-3)">n/r</span>' :
+    k === 'impossible' ? pct(v) : v.toFixed(k === 'income_parity' || k === 'eo_gap' || k === 'sp_cat' || k === 'w1_num' ? 3 : 2);
+  let html = '<table><tr><th>Metric</th><th>better</th>' + FF_COLS.map(([, h]) => `<th>${h}</th>`).join('') + '<th></th></tr>';
+  for (const [head, keys] of FF_GROUPS) {
+    const rows = keys.map(k => byKey[k]).filter(Boolean);
+    if (!rows.length) continue;
+    html += `<tr><td colspan="6" style="padding-top:10px;font-weight:600">${head}</td></tr>`;
+    for (const r of rows) {
+      const vals = FF_COLS.map(([c]) => r[c]).filter(v => v != null);
+      const best = r.better === 'lower' ? Math.min(...vals) : Math.max(...vals);
+      const c = C[r.key];
+      html += `<tr><td>${r.label}</td><td style="color:var(--ink-2)">${r.better}</td>` +
+        FF_COLS.map(([col]) => `<td>${r[col] != null && r[col] === best && vals.length > 1 ? '<b>' + fmt(r.key, r[col]) + '</b>' :
+          fmt(r.key, r[col])}</td>`).join('') +
+        `<td title="${c ? `scorecard fold 0, τ 1: ${fmt(r.key, c.scorecard)}` : 'not on the scorecard'}">${c ? (c.ok ? '✓' : '⚠') : ''}</td></tr>`;
+    }
+  }
+  $('ff-tbl').innerHTML = html + '</table>';
 }
 
 // --- headline findings: plain AIM → hybrid at τ 1, paired within folds ------
@@ -627,6 +745,7 @@ function pairedDiff(SC, k) {
 function deltaNote(D) {
   if (!D) return '';
   const s = (D.m < 0 ? '−' : '+') + Math.abs(D.m).toFixed(3);
+  if (D.unpaired) return `Δ ${s} · of the fold means, no per-fold pairing`;
   if (D.sd == null) return `Δ ${s} · one fold, no error bar`;
   return `Δ ${s} ± ${D.sd.toFixed(3)} · ${D.same}/${D.n} folds ${D.m < 0 ? 'lower' : 'higher'}`;
 }
@@ -644,10 +763,12 @@ function drawFindings() {
   if ($('findings').hidden) return;
   $('fd-head').textContent = `Plain AIM → AIM hybrid at τ 1, from the same ε ${SC.eps} measurements · ` +
     `${cur().label}, ${runsText(H)}`;
+  // without per-fold rows (datasets_summary.csv) the difference of the means, unpaired
+  const diff = k => pairedDiff(SC, k) ?? { m: H[k] - R.plain[k], unpaired: true };
   $('fgrid').innerHTML = FINDINGS.map(([k, label, note]) =>
-    `<button class="fd" data-k="${k}" title="Show on the scorecard"><span class="fl">${label}</span>` +
+    `<button class="fd" data-k="${k}" title="Show on the scorecard"><span class="fl">${tl(label)}</span>` +
     `<span class="fv">${R.plain[k].toFixed(3)}<span class="ar">→</span><b>${H[k].toFixed(3)}</b></span>` +
-    `<span class="fn">${note(R.plain, H, R.real, pairedDiff(SC, k))}</span></button>`).join('');
+    `<span class="fn">${note(R.plain, H, R.real, diff(k))}</span></button>`).join('');
 }
 
 // --- leakage ranking ----------------------------------------------------------
@@ -969,7 +1090,7 @@ function togglePlay() {
 }
 
 // --- tabs and rendering ---------------------------------------------------------
-const TABS = ['score', 'leak', 'ba', 'graph'];
+const TABS = ['score', 'flip', 'leak', 'ba', 'graph'];
 function setTab(t) {
   S.tab = t;
   for (const x of TABS) {
@@ -988,10 +1109,11 @@ function render() {
   $('leakchips').style.display = S.tab === 'leak' ? '' : 'none';
   $('epsh').textContent = S.tab !== 'leak' ? '(simulation only: Leakage tab)' :
     S.eps < 1 ? '(more private, more noise)' : S.eps > 8 ? '(less private)' : '';
-  $('tauh').textContent = S.tab === 'ba' ? '(not used here: τ 1 release)' :
+  $('tauh').textContent = S.tab === 'ba' || S.tab === 'flip' ? '(not used here: τ 1 release)' :
     S.tab === 'graph' ? '(not used here: one saved AIM run)' :
     S.tau === 0 ? '(no repair)' : S.tau === 1 ? '(full repair)' : '';
   if (S.tab === 'score') drawScorecard();
+  if (S.tab === 'flip') drawFaithful();
   if (S.tab === 'leak') {
     const R = compute();
     $('noise').textContent = `At ε ${fmtEps(S.eps)}: zCDP ρ = ${R.rho.toFixed(4)}, noise σ = ${R.sigma.toFixed(1)} rows ` +
@@ -1006,6 +1128,21 @@ function render() {
 function setDataset(name) {
   S.ds = name; const D = cur();
   S.gk = null; S.ghi = null; if (gTimer) stopPlay();
+  // only the scorecard when the dataset's fold-0 data is not on disk
+  for (const x of TABS.slice(1)) $('tab-' + x).hidden = !!D.scorecard_only;
+  // FLIP-faithful: Adult only, where its csv exists
+  $('tab-flip').hidden = !(D.scorecard && D.scorecard.faithful);
+  if (S.tab === 'flip' && $('tab-flip').hidden) { setTab('score'); }
+  $('tab-score').title = D.scorecard_only ? `Only the scorecard for ${D.label}: its fold-0 data is not ` +
+    'on disk (python aim_fair/export_folds.py --dataset D, then rebuild)' : '';
+  $('dslabel').textContent = D.label;
+  $('target').textContent = D.target;
+  if (D.scorecard_only) {
+    S.sel = null; $('cpchips').innerHTML = '';
+    drawFindings();
+    if (S.tab !== 'score') setTab('score'); else render();
+    return;
+  }
   S.z = normals(S.seed);
   const tvReal = c => tv(norm(c.real[0]), norm(c.real[1]));
   S.sel = D.columns.reduce((a, b) => tvReal(b) > tvReal(a) ? b : a).name;
@@ -1044,6 +1181,8 @@ if (!DATA) { $('err').style.display = 'block'; } else {
   $('g-k').addEventListener('input', e => { if (gTimer) stopPlay(); S.gk = +e.target.value; drawGraph(); });
   $('g-play').addEventListener('click', togglePlay);
   for (const t of TABS) $('tab-' + t).addEventListener('click', () => setTab(t));
+  $('sc-all').addEventListener('click', () => { S.scFold = null; render(); });
+  $('sc-f0').addEventListener('click', () => { S.scFold = 0; render(); });
   $('fgrid').addEventListener('click', e => {   // a finding: its chart on the scorecard, flashed
     const b = e.target.closest('.fd'); if (!b) return;
     setTab('score');

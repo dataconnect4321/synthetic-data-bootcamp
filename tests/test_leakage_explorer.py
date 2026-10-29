@@ -268,15 +268,18 @@ console.log(JSON.stringify(out));
 def test_before_after_masked_counts(tmp_path, monkeypatch):
     """The real data with the hybrid's merged levels: read from the run's
     json, and counted like an independent crosstab."""
-    hyb = os.path.join(ROOT, 'aim_fair', 'out', 'lk_e3_f0_r0_synthetic.csv')
-    if not os.path.exists(hyb):
+    # the release the page uses: first candidate found, as in the explorer
+    found = [f for f in (c.format(p='') for c in L.CHECKPOINTS['hybrid'][0])
+             if os.path.exists(os.path.join(ROOT, 'aim_fair', 'out', f))]
+    if not found:
         pytest.skip('hybrid release missing')
+    hyb = os.path.join(ROOT, 'aim_fair', 'out', found[0])
     assert L.merged_levels(hyb) == {'relationship': ['Husband', 'Wife']}
     monkeypatch.setattr(L, 'OUT', str(tmp_path / 'page.html'))
     monkeypatch.setattr(L, 'ALL_COLUMNS', False)
     L.main()
     A = page_data(tmp_path / 'page.html')['adult']
-    assert A['before_after']['file'] == 'lk_e3_f0_r0_synthetic.csv'
+    assert A['before_after']['file'] == found[0]
     assert A['before_after']['all_columns'] is None
     real = pd.read_csv(os.path.join(ROOT, 'aim_fair', 'data', 'fold0_train.csv'))
     m = real.relationship.where(~real.relationship.isin(['Husband', 'Wife']), 'MASK')
@@ -314,9 +317,10 @@ def test_all_columns_leakage_known_answers(monkeypatch):
 def test_scorecard_matches_grid_and_scorer(tmp_path, monkeypatch):
     """The scorecard embedded in the page equals results/utility_tau_grid.csv;
     each summary row (no fold) is the mean of its per-fold rows, with the sd
-    across them; each per-fold hybrid and plain row is the mean of the
-    scorer's jsons of that fold's refits 0 .. refits - 1 (final_chart.METRICS:
-    the RESULTS.md definitions)."""
+    across them; each per-fold row is the mean over that fold's refits 0 ..
+    refits - 1 of the scorer's jsons (final_chart.METRICS: the RESULTS.md
+    definitions) and of FLIP's protocol (flip_protocol.run_scores' cache:
+    income parity, EO, Eq. 14 and Eq. 15 means)."""
     grid = os.path.join(ROOT, 'results', 'utility_tau_grid.csv')
     if not os.path.exists(grid):
         pytest.skip('results/utility_tau_grid.csv missing: scripts/run_tau_grid.sh')
@@ -326,8 +330,10 @@ def test_scorecard_matches_grid_and_scorer(tmp_path, monkeypatch):
     sc = page_data(tmp_path / 'page.html')['adult']['scorecard']
     df = pd.read_csv(grid)
     assert sc['eps'] == 3 and len(sc['rows']) == len(df)
-    keys = ['ber', 'ancb', 'auc', 'income_parity', 'eo_gap', 'validity',
-            'impossible']
+    scorer = ['ber', 'ancb', 'auc', 'validity', 'impossible']
+    proto = {'income_parity': 'parity', 'eo_gap': 'eo_gap', 'sp_cat': 'sp_cat',
+             'w1_num': 'w1_num'}
+    keys = scorer + list(proto)
     sds = [k + '_sd' for k in keys]
     for got, (_, want) in zip(sc['rows'], df.iterrows()):
         assert got['source'] == want['source']
@@ -351,43 +357,86 @@ def test_scorecard_matches_grid_and_scorer(tmp_path, monkeypatch):
     get = {k: g for k, _, _, g in METRICS}
     res = os.path.join(ROOT, 'adult_results')
     checked = 0
-    for _, row in df[df.fold.notna() & (df.source != 'Real data')].iterrows():
-        paths = [os.path.join(res, row.runs.format(f=int(row.fold), r=r) + '.json')
-                 for r in range(int(row.refits))]
-        if not all(os.path.exists(p) for p in paths):
+    for _, row in df[df.fold.notna()].iterrows():
+        tags = [row.runs.format(f=int(row.fold), r=r) for r in range(int(row.refits))]
+        protos = [os.path.join(res, 'flipproto', t + '.json') for t in tags]
+        if not all(os.path.exists(p) for p in protos):
             continue
-        vals = [[float(get[k](json.load(open(p)))) for k in keys] for p in paths]
-        np.testing.assert_allclose(row[keys].astype(float), np.mean(vals, 0),
+        pv = [[json.load(open(p))[proto[k]] for k in proto] for p in protos]
+        np.testing.assert_allclose(row[list(proto)].astype(float), np.mean(pv, 0),
                                    atol=6e-5, err_msg=row.runs)
+        if row.source != 'Real data':
+            vals = [[float(get[k](json.load(open(os.path.join(res, t + '.json')))))
+                     for k in scorer] for t in tags]
+            np.testing.assert_allclose(row[scorer].astype(float), np.mean(vals, 0),
+                                       atol=6e-5, err_msg=row.runs)
         checked += 1
     if not checked:
-        pytest.skip('scorer jsons not in adult_results/')
+        pytest.skip('scorer / protocol jsons not in adult_results/')
 
 
-def test_flip_baseline_matches_final_comparison(tmp_path, monkeypatch):
-    """The scorecard's FLIP baseline: the paper's reported values from
-    results/final_comparison.csv (None where the paper reports nothing:
-    validity, impossible rows), and our reproduction (flip_faithful_repro)
-    for every scorecard metric."""
-    comp = os.path.join(ROOT, 'results', 'final_comparison.csv')
+def test_scorecard_only_from_datasets_summary(tmp_path, monkeypatch):
+    """A dataset with no fold-0 split but rows in results/datasets_summary.csv
+    gets only a scorecard: plain AIM, the hybrid at tau 1 and the real data,
+    their means and sds as in the csv, missing values as None."""
+    summary = os.path.join(ROOT, 'results', 'datasets_summary.csv')
+    if not os.path.exists(summary):
+        pytest.skip('results/datasets_summary.csv missing: aim_fair/datasets_summary.py')
+    (tmp_path / 'results').mkdir()
+    shutil.copy(summary, tmp_path / 'results')
+    shutil.copy(TEMPLATE, tmp_path)
+    monkeypatch.setattr(L, 'HERE', str(tmp_path))
+    monkeypatch.setattr(L, 'OUT', str(tmp_path / 'page.html'))
+    L.main()
+    P = page_data(tmp_path / 'page.html')
+    df = pd.read_csv(summary)
+    assert sorted(P) == sorted(df.dataset.unique())     # adult: no split, no grid
+    for name, ds in P.items():
+        assert ds['scorecard_only'] and 'columns' not in ds
+        sc = ds['scorecard']
+        assert sc['eps'] == 3 and sc['baseline'] is None
+        want = df[df.dataset == name]
+        assert [(r['source'], r['tau']) for r in sc['rows']] == [
+            L.SUMMARY_SOURCES[s][:2] for s in want.source]
+        for got, (_, w) in zip(sc['rows'], want.iterrows()):
+            for k in ('ber', 'auc', 'income_parity', 'eo_gap', 'ber_sd', 'num_w1'):
+                assert got[k] == (None if pd.isna(w[k]) else w[k])
+            assert got['fold'] is None and got['folds'] == w['folds']
+
+
+def test_flip_faithful_matches_csv_and_scorecard(tmp_path, monkeypatch):
+    """The FLIP-faithful tab and the scorecard's FLIP baseline equal
+    results/flip_faithful_comparison.csv (impossible rows as a fraction; None
+    where a source reports nothing), and its AIM hybrid column equals the
+    scorecard's fold-0 row at tau 1 in every metric both have: the same
+    tables (aimfinal_tau1_e3_f0_r*)."""
+    comp = os.path.join(ROOT, *L.FAITHFUL)
     grid = os.path.join(ROOT, 'results', 'utility_tau_grid.csv')
     if not (os.path.exists(comp) and os.path.exists(grid)):
-        pytest.skip('results/final_comparison.csv or utility_tau_grid.csv missing')
+        pytest.skip('results/flip_faithful_comparison.csv or utility_tau_grid.csv missing')
     monkeypatch.setattr(L, 'OUT', str(tmp_path / 'page.html'))
     monkeypatch.setattr(L, 'ALL_COLUMNS', False)
     L.main()
-    B = page_data(tmp_path / 'page.html')['adult']['scorecard']['baseline']
-    df = pd.read_csv(comp).set_index('metric')
-    keys = {'ber', 'ancb', 'auc', 'income_parity', 'eo_gap', 'validity',
-            'impossible'}
-    assert set(B['values']) == set(B['repro']) == keys
-    for label, key in L.FLIP_METRICS.items():
-        paper = df.loc[label, 'flip_paper_reported']
-        assert B['values'][key] == (None if pd.isna(paper) else paper)
-        assert B['repro'][key] == df.loc[label, 'flip_faithful_repro']
-    assert [k for k, v in B['values'].items() if v is None] == ['validity',
-                                                              'impossible']
+    sc = page_data(tmp_path / 'page.html')['adult']['scorecard']
+    F, B = sc['faithful'], sc['baseline']
+    df = pd.read_csv(comp)
+    assert [r['label'] for r in F['rows']] == list(df.metric)
+    for r, (_, w) in zip(F['rows'], df.iterrows()):
+        s = 0.01 if r['key'] in L.PERCENT else 1
+        for col, v in L.FAITHFUL_SOURCES.items():
+            assert r[v] == (None if pd.isna(w[col]) else pytest.approx(w[col] * s))
+        assert B['values'][r['key']] == r['paper'] and B['repro'][r['key']] == r['repro']
     assert B['values']['ancb'] == 0.91 and B['values']['auc'] == 0.66
+    assert B['values']['validity'] is None and B['values']['sp_cat'] is None
+    # the AIM column is the scorecard's fold 0 at tau 1
+    at = pd.read_csv(grid).query("source == 'AIM hybrid' and tau == 1 and fold == 0").iloc[0]
+    shared = [r for r in F['rows'] if r['key'] in at.index]
+    assert {r['key'] for r in shared} == {'ber', 'ancb', 'auc', 'impossible',
+                                          'income_parity', 'eo_gap', 'sp_cat',
+                                          'w1_num', 'validity'}
+    for r in shared:
+        assert abs(r['aim'] - at[r['key']]) <= 1e-4 + 1e-9, r['key']
+    assert len(F['check']) == len(shared) and all(c['ok'] for c in F['check'])
 
 
 def test_model_graph_from_pickle(tmp_path, monkeypatch):

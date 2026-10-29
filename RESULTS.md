@@ -295,26 +295,28 @@ synthesis. Even then, its impossible rows need handling.
 | Metric | Better | FLIP paper, reported | FLIP reproduction | **AIM hybrid** |
 |---|---|---|---|---|
 | **Data level (FLIP's primary criteria)** | | | | |
-| BER, synthetic sex label (0.5 best) | higher | 0.49 | 0.16 | **0.50** |
-| A-NCB, paper's own-adversary version | higher | **0.91** | 0.27 | 0.88 |
-| Release teaches real sex, folded tstr (0.5 best) | higher | not reported | 0.17 | **0.45** |
+| BER, synthetic sex label (0.5 best) | higher | 0.49 | 0.16 | **0.51** |
+| A-NCB, paper's own-adversary version | higher | **0.91** | 0.27 | 0.90 |
+| Release teaches real sex, folded tstr (0.5 best) | higher | not reported | 0.17 | **0.38** |
 | **Utility and realism** | | | | |
 | Income AUC on real people | higher | 0.66 | 0.90 | 0.90 |
-| Alpha-precision | higher | 0.40 | 0.90 | **0.99** |
+| Alpha-precision | higher | 0.40 | 0.90 | **0.98** |
 | Beta-recall | higher | 0.21 | 0.19 | **0.39** |
 | Validity | higher | not reported | 0.56 | **0.89** |
 | Impossible rows | lower | not reported | 43% | **0%** |
 | **Downstream (FLIP Sections 5.3 and 6.5, LightGBM)** | | | | |
-| Income parity, threshold 0.5 | lower | **0.12** | 0.231 | 0.144 |
-| Income EO gap* | lower | 0.26 | **0.073** | 0.116 |
-| Mean parity over all categorical targets (Eq. 14) | lower | not reported | 0.218 | **0.166** |
-| Mean W1 / sd over all numeric targets (Eq. 15) | lower | not reported | 0.147 | **0.102** |
+| Income parity, threshold 0.5 | lower | **0.12** | 0.231 | 0.123 |
+| Income EO gap* | lower | 0.26 | **0.073** | 0.094 |
+| Mean parity over all categorical targets (Eq. 14) | lower | not reported | 0.218 | **0.164** |
+| Mean W1 / sd over all numeric targets (Eq. 15) | lower | not reported | 0.147 | **0.101** |
 | **Privacy** | | | | |
 | Guarantee | | nominal eps 3 (VAE only) | nominal eps 3 (VAE only) | **eps 3, whole release** |
-| Epsilon-identifiability (closeness, not leakage) | lower | **0.09** | 0.14 | 0.36 |
+| Epsilon-identifiability (closeness, not leakage) | lower | **0.09** | 0.14 | 0.35 |
 
 Our two sources: fold 0, the same split and real test people. The AIM
-hybrid averages 3 refits from run_final.sh's saved measurements. The paper
+hybrid averages 3 refits at tau 1 from run_final.sh's saved measurements:
+the tau grid's tables (`aimfinal_tau1_e3_f0`), so the dashboard's scorecard
+shows the same numbers at fold 0, tau 1. The paper
 column was read off FLIP's Fig. 3 (Adult, lambda 4, eps 3).
 
 \* FLIP does not define its equalized-odds number. Ours is the TPR gap
@@ -354,20 +356,20 @@ what FLIP's numbers mean.
 ### What it shows
 
 - **Data-level fairness:**
-  - The AIM hybrid matches what the paper reports for FLIP (BER 0.50 vs
-    0.49, A-NCB 0.88 vs 0.91).
+  - The AIM hybrid matches what the paper reports for FLIP (BER 0.51 vs
+    0.49, A-NCB 0.90 vs 0.91).
   - Our reproduction of FLIP never gets there (BER 0.16).
 - **Utility and realism:**
   - The AIM hybrid keeps far more utility and realism than the paper
-    reports for FLIP: AUC 0.90 vs 0.66, alpha-precision 0.99 vs 0.40.
+    reports for FLIP: AUC 0.90 vs 0.66, alpha-precision 0.98 vs 0.40.
   - Its rows are valid: 0% impossible rows, vs 43% for the reproduction.
 - **Downstream parity, on FLIP's own task-agnostic protocol:** the hybrid
-  has the lowest mean gap, for categorical targets (0.166 vs 0.218) and for
-  numeric targets (0.102 vs 0.147).
+  has the lowest mean gap, for categorical targets (0.164 vs 0.218) and for
+  numeric targets (0.101 vs 0.147).
 - **Where FLIP is better:**
-  - The paper reports lower income parity (0.12 vs 0.144), but at AUC
-    0.66, where the model is close to uninformative.
-  - The reproduction has the lowest income EO gap (0.073 vs 0.116).
+  - The paper reports slightly lower income parity (0.12 vs 0.123), but at
+    AUC 0.66, where the model is close to uninformative.
+  - The reproduction has the lowest income EO gap (0.073 vs 0.094).
 
 ### Limits
 
@@ -375,9 +377,9 @@ what FLIP's numbers mean.
   protocol, but its EO definition is unknown, and so is the Fig. 3 target.
 - **The FLIP table exists for fold 0 only,** so the comparison is on
   fold 0.
-- **Threshold effect at 0.5:** the hybrid's model selects 15% of people,
-  vs 21% for real data. At matched selection, income parity is 0.196 for
-  the hybrid vs 0.174 for the reproduction, and EO is 0.138 vs 0.044.
+- **Threshold effect at 0.5:** the hybrid's model selects 14% of people,
+  vs 21% for real data. At matched selection, income parity is 0.173 for
+  the hybrid vs 0.174 for the reproduction, and EO is 0.112 vs 0.044.
 
 ## FLIP as published: the paper's Fig. 3 layout
 
@@ -411,8 +413,8 @@ PRESET=final LAMS="0 4" bash scripts/run_paper_grid.sh   # best VAE, no DP
 bash scripts/run_best_vae_dp.sh                  # best VAE, nominal eps 3
 python aim_fair/final_chart.py                   # results/final_comparison.{png,csv}, final_aim_vs_vae.csv
 python aim_fair/task_auc.py                      # results/task_auc.csv
-bash aim_fair/run_adult_refits.sh                # 3 hybrid + 3 plain refits per fold (aimre)
-aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py   # FLIP protocol (LightGBM)
+bash scripts/run_tau_grid.sh                     # tau grid: 3 refits per tau and fold, plain AIM
+python aim_fair/flip_protocol.py                 # FLIP protocol (LightGBM) on its tau-1 and plain tables
 python aim_fair/flip_faithful_chart.py           # results/flip_faithful_comparison.{png,csv}
 ```
 

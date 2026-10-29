@@ -1,13 +1,18 @@
 """Interactive dashboard of privacy (epsilon), fairness (repair amount tau)
 and utility. Writes one self-contained page, results/leakage_explorer.html,
 with a dataset picker (Adult and every datasets.py dataset whose fold-0
-training split is on disk) and four tabs:
+training split is on disk, or with only the Scorecard tab when just its row
+of results/datasets_summary.csv is) and five tabs:
 
   Scorecard       actual hybrid releases along tau at eps 3, scored, mean
-                  and sd across folds (results/utility_tau_grid.csv,
-                  scripts/run_tau_grid.sh); the same grid feeds a strip of
-                  headline findings at the top (plain AIM -> hybrid at tau
-                  1, paired within folds);
+                  and sd across folds or fold 0 alone (results/
+                  utility_tau_grid.csv, scripts/run_tau_grid.sh); the same
+                  grid feeds a strip of headline findings at the top (plain
+                  AIM -> hybrid at tau 1, paired within folds);
+  FLIP-faithful   the AIM hybrid vs FLIP's reproduction vs FLIP's reported
+                  numbers under FLIP's own protocol (results/
+                  flip_faithful_comparison.csv), with a check that its AIM
+                  column equals the scorecard's fold-0 point at tau 1;
   Leakage         which columns leak the protected attribute, and each
                   column's per-group histogram in a release simulated in the
                   browser: Gaussian noise on each [protected x column] count
@@ -49,7 +54,8 @@ CHECKPOINTS = {
     'plain': (['{p}aimfinalplain_e3_f0_r0_synthetic.csv',
                '{p}aimplain_e3_f0_r0_synthetic.csv',
                '{p}lk_plain_e3_f0_r0_synthetic.csv'], 3, 0),
-    'hybrid': (['{p}aimfinal_e3_f0_r0_synthetic.csv',
+    'hybrid': (['{p}aimfinal_tau1_e3_f0_r0_synthetic.csv',   # tau grid
+                '{p}aimfinal_e3_f0_r0_synthetic.csv',
                 '{p}aim_e3_f0_r0_synthetic.csv',
                 '{p}lk_e3_f0_r0_synthetic.csv'], 3, 1),
 }
@@ -70,14 +76,36 @@ ALL_COLUMNS = True   # False skips the classifiers (about a minute for Adult)
 OUT = os.path.join(HERE, 'results', 'leakage_explorer.html')
 # the scorecard: actual releases along tau (scripts/run_tau_grid.sh,
 # aim_fair/tau_grid_summary.py), Adult only
-SCORECARD = {'adult': (os.path.join(HERE, 'results', 'utility_tau_grid.csv'), 3)}
-# the FLIP baseline: results/final_comparison.csv metric label -> key
-FLIP_METRICS = {'Income parity': 'income_parity',
-                'Equalized-odds gap': 'eo_gap',
-                'BER, synthetic sex label': 'ber',
-                "A-NCB (paper's version)*": 'ancb',
-                'Income AUC on real people': 'auc',
-                'Validity': 'validity', 'Impossible rows': 'impossible'}
+SCORECARD = {'adult': (('results', 'utility_tau_grid.csv'), 3)}   # under HERE
+# the other datasets: tau 1 and plain AIM only, mean and sd across folds
+# (aim_fair/run_datasets.sh, aim_fair/datasets_summary.py)
+SUMMARY = ('results', 'datasets_summary.csv')
+SUMMARY_SOURCES = {   # its source -> (scorecard source, tau, refits per fold)
+    'Real data (reference)': ('Real data', None, 1),
+    'Plain AIM, eps 3': ('Plain AIM', None, 3),
+    'AIM hybrid, eps 3': ('AIM hybrid', 1.0, 3)}
+# the FLIP-faithful comparison (aim_fair/flip_faithful_chart.py): FLIP's own
+# protocol, fold 0; its AIM hybrid is the tau grid's tau-1 tables, so it
+# equals the scorecard's fold-0 row at tau 1. Metric label -> key (the
+# scorecard's key where it has the metric)
+FAITHFUL = ('results', 'flip_faithful_comparison.csv')   # under HERE
+FAITHFUL_SOURCES = {'FLIP paper (reported)': 'paper',
+                    'FLIP reproduction': 'repro', 'AIM hybrid': 'aim'}
+FLIP_METRICS = {
+    'Sex-inference BER (0.5 = sex unrecoverable)': 'ber',
+    "A-NCB, paper's version (1 = full independence)": 'ancb',
+    'Income AUC on real people (utility)': 'auc',
+    'Alpha-precision (realism)': 'alpha',
+    'Impossible rows (%) (e.g. male wives)': 'impossible',
+    'Income parity (threshold 0.5)': 'income_parity',
+    'Income EO gap* (threshold 0.5)': 'eo_gap',
+    'Mean parity, all categorical targets (FLIP Eq. 14)': 'sp_cat',
+    'Mean W1/sd, all numeric targets (FLIP Eq. 15)': 'w1_num',
+    'Validity (rule-consistent rows)': 'validity',
+    'tstr sex BER (folded; 0.5 best)': 'tstr',
+    'Beta-recall': 'beta',
+    'Epsilon-identifiability': 'eps_id'}
+PERCENT = {'impossible'}   # the csv's percent, the scorecard's fraction
 
 
 def schema(name):
@@ -215,36 +243,87 @@ def all_columns_leakage(frames, numeric, categorical, sens):
     return rows
 
 
-def flip_baseline():
-    """FLIP at lambda 4, eps 3 from results/final_comparison.csv
-    (aim_fair/final_chart.py), or None if missing:
-      values  the FLIP paper's reported numbers (its Fig. 3, its own
-              evaluation code); None where it reports nothing (validity,
-              impossible rows);
-      repro   FLIP as published, reproduced here (fold 0) and scored like
-              the AIM tables."""
-    path = os.path.join(HERE, 'results', 'final_comparison.csv')
+def faithful():
+    """The FLIP-faithful comparison from its csv, or None if missing:
+    [{key, label, better, paper, repro, aim}] in the csv's order, in the
+    scorecard's units (impossible rows as a fraction); None where a source
+    reports nothing."""
+    path = os.path.join(HERE, *FAITHFUL)
     if not os.path.exists(path):
         return None
-    df = pd.read_csv(path).set_index('metric')
-    paper, repro = df['flip_paper_reported'], df['flip_faithful_repro']
+    rows = []
+    for r in pd.read_csv(path).to_dict('records'):
+        k = FLIP_METRICS[r['metric']]
+        s = 0.01 if k in PERCENT else 1
+        rows.append({'key': k, 'label': r['metric'], 'better': r['better'],
+                     **{v: None if pd.isna(r[c]) else round(float(r[c]) * s, 6)
+                        for c, v in FAITHFUL_SOURCES.items()}})
+    return rows
+
+
+def flip_baseline(rows):
+    """FLIP at lambda 4, eps 3 for the scorecard, from the faithful rows:
+      values  the FLIP paper's reported numbers (its Fig. 3, its own
+              evaluation code); None where it reports nothing (validity,
+              impossible rows, the per-target means);
+      repro   FLIP as published, reproduced here (fold 0) and scored like
+              the AIM tables (FLIP's protocol for the downstream metrics)."""
     return {'label': 'FLIP paper', 'note': 'λ 4, nominal ε 3, Fig. 3',
-            'values': {k: None if pd.isna(paper[m]) else float(paper[m])
-                       for m, k in FLIP_METRICS.items()},
-            'repro': {k: float(repro[m]) for m, k in FLIP_METRICS.items()}}
+            'values': {r['key']: r['paper'] for r in rows},
+            'repro': {r['key']: r['repro'] for r in rows}}
+
+
+def faithful_check(rows, grid):
+    """The faithful AIM hybrid against the scorecard's fold-0 row at tau 1
+    (the same tables): [{key, faithful, scorecard, ok}] for every metric
+    both have. Both are rounded to 4 decimals, so ok allows 1e-4."""
+    at = next((r for r in grid if r['source'] == 'AIM hybrid' and
+               r['tau'] == 1 and r['fold'] == 0), None)
+    if at is None:
+        return None
+    out = []
+    for r in rows:
+        if at.get(r['key']) is None or r['aim'] is None:
+            continue
+        a, b = r['aim'], float(at[r['key']])
+        out.append({'key': r['key'], 'faithful': a, 'scorecard': b,
+                    'ok': abs(a - b) <= 1e-4 + 1e-9})
+    bad = [c['key'] for c in out if not c['ok']]
+    print('FLIP-faithful AIM hybrid vs scorecard (fold 0, tau 1): '
+          + (f'MISMATCH in {", ".join(bad)}' if bad else
+             f'all {len(out)} shared metrics match'))
+    return out
 
 
 def scorecard(name):
-    """{eps, rows, baseline} from the dataset's tau-grid csv, or None if
-    missing. Rows carry the mean over folds, <metric>_sd (None when the grid
-    has one run) and the folds x refits behind them."""
-    if name not in SCORECARD or not os.path.exists(SCORECARD[name][0]):
+    """{eps, rows, baseline} from the dataset's tau-grid csv, else its rows
+    of results/datasets_summary.csv (tau 1 only, no per-fold rows), or None
+    if neither has it. Rows carry the mean over folds, <metric>_sd (None when
+    the grid has one run) and the folds x refits behind them."""
+    rel, eps = SCORECARD.get(name, ((), None))
+    path = os.path.join(HERE, *rel)
+    if rel and os.path.exists(path):
+        df = pd.read_csv(path)
+        df = df.astype(object).where(df.notna(), None)
+        rows = df.to_dict('records')
+        F = faithful() if name == 'adult' else None
+        return {'eps': eps, 'rows': rows,
+                'baseline': F and flip_baseline(F),
+                'faithful': F and {'rows': F, 'check': faithful_check(F, rows)}}
+    path = os.path.join(HERE, *SUMMARY)
+    if not os.path.exists(path):
         return None
-    path, eps = SCORECARD[name]
     df = pd.read_csv(path)
+    df = df[df.dataset == name].drop(columns='dataset')
+    if df.empty:
+        return None
     df = df.astype(object).where(df.notna(), None)
-    return {'eps': eps, 'rows': df.to_dict('records'),
-            'baseline': flip_baseline() if name == 'adult' else None}
+    rows = []
+    for r in df.to_dict('records'):
+        source, tau, refits = SUMMARY_SOURCES[r['source']]
+        rows.append({**r, 'source': source, 'tau': tau, 'fold': None,
+                     'refits': refits})
+    return {'eps': 3, 'rows': rows, 'baseline': None, 'faithful': None}
 
 
 def model_graph(name):
@@ -289,12 +368,18 @@ def model_graph(name):
 
 
 def build(name):
-    """Page data for one dataset, or None if its fold-0 split is missing."""
+    """Page data for one dataset; only its scorecard if its fold-0 split is
+    missing; None if it has neither."""
     p = prefix(name)
     train = os.path.join(HERE, 'aim_fair', 'data', f'{p}fold0_train.csv')
-    if not os.path.exists(train):
-        return None
     numeric, categorical, sens, target = schema(name)
+    if not os.path.exists(train):
+        sc = scorecard(name)
+        if sc is None:
+            return None
+        print(f'{name}: scorecard only (no fold-0 split)')
+        return {'label': DATASETS[name], 'sensitive': sens, 'target': target,
+                'scorecard_only': True, 'scorecard': sc}
     read = dict(dtype={c: str for c in categorical})
     real = pd.read_csv(train, **read)
     # the two groups, the larger first
@@ -392,8 +477,8 @@ def main():
         else:
             data[name] = d
     if skipped:
-        print('skipped (no fold-0 split; python aim_fair/export_folds.py '
-              '--dataset D): ' + ', '.join(skipped))
+        print('skipped (no fold-0 split or scorecard; python '
+              'aim_fair/export_folds.py --dataset D): ' + ', '.join(skipped))
     if not data:
         sys.exit('no dataset on disk: run python aim_fair/export_folds.py')
     with open(os.path.join(HERE, 'leakage_explorer_template.html'),
