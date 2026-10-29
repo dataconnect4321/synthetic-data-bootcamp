@@ -90,6 +90,41 @@ svg .badge { fill: var(--ink); font-size: 10px; font-weight: 600; letter-spacing
 .multiples .now .pm { color: var(--ink-3); }
 .multiples > div { border-radius: 8px; padding: 6px; margin: -6px; transition: background-color 1.2s; }
 .multiples > div.flash { background: var(--sel); transition: none; }
+/* attribute rows: label | bars (plain AIM over the hybrid) | values */
+.dbg { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 14px 0 2px; }
+.dbg:first-child { margin-top: 4px; }
+.dbr { display: grid; grid-template-columns: minmax(0, 15em) minmax(0, 1fr) 9em; gap: 0 14px;
+  align-items: center; padding: 2px 6px; margin: 0 -6px; border-radius: 6px; transition: background-color 1.2s; }
+.dbr.flash { background: var(--sel); transition: none; }
+.dbr:hover { background: var(--sel); transition: none; }
+.dbr .l { font-size: 13px; line-height: 1.3; }
+.dbr .l span { color: var(--ink-3); }
+.dbr .v { font-size: 13px; text-align: right; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dbr .v b { color: var(--ink); font-weight: 600; }
+@media (max-width: 640px) {
+  .dbr { grid-template-columns: minmax(0, 1fr) auto; padding: 4px 6px; }
+  .dbr svg { grid-column: 1 / -1; grid-row: 2; }
+}
+/* question cards (one τ only): a question, a verdict, three bars, one note */
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 10px; }
+@media (max-width: 640px) { .cards { grid-template-columns: minmax(0, 1fr); } }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px 10px; }
+.card h3 { margin: 0; font-size: 14px; }
+.card .vd { font-size: 18px; font-weight: 600; margin: 4px 0 6px; line-height: 1.3; }
+.card .vd span { font-size: 13px; font-weight: 400; color: var(--ink-2); }
+.card .cn { font-size: 12px; color: var(--ink-3); margin: 6px 0 0; line-height: 1.4; }
+/* across datasets: the cards' questions x datasets, a verdict and two numbers per cell */
+.ax { overflow-x: auto; }
+.ax table { width: 100%; min-width: 600px; table-layout: fixed; }
+.ax th { font-weight: 400; font-size: 12px; text-align: center; padding: 0 4px 6px; }
+.ax th:first-child { width: 13em; text-align: left; }
+.ax th button { font-size: 12px; padding: 3px 8px; }
+.ax td { text-align: center; padding: 8px 4px; vertical-align: middle; font-size: 12px; color: var(--ink-3);
+  border-top: 1px solid var(--border); }
+.ax td:first-child { text-align: left; font-size: 13px; color: var(--ink); line-height: 1.3; }
+.ax td.cur { background: var(--sel); }
+.ax td b { color: var(--ink); font-weight: 600; }
+.ax .axv { font-size: 14px; font-weight: 600; color: var(--ink); }
 /* headline findings: four numbers under the title, no boxes */
 .findings { margin: 20px 0 4px; }
 .findings .eyebrow { font-size: 12px; color: var(--ink-3); margin: 0 0 10px; }
@@ -181,15 +216,30 @@ th:first-child, td:first-child { text-align: left; }
       </div>
       <p class="note" id="sc-match" style="margin-top:6px"></p>
       <div id="sc-body">
-        <div class="legend"><span><span class="tick"></span>AIM hybrid along τ (● = τ <span id="sc-tau"></span>)</span>
+        <div class="legend" id="sc-legend"><span id="sc-tauleg"><span class="tick"></span>AIM hybrid along τ (● = τ <span id="sc-tau"></span>)</span>
           <span id="sc-bandleg"><span class="sw" style="background:var(--band)"></span><span id="sc-bandlab"></span></span>
           <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="4.5" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5"/></svg>plain AIM (same measurements, no fairness steps)</span>
           <span><span class="tick" style="border-top:1.5px dotted var(--ink-3)"></span>real data</span>
           <span id="sc-flipleg"><svg width="14" height="14" style="display:inline;vertical-align:-2px"><rect x="2.5" y="2.5" width="9" height="9" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5"/></svg><span id="sc-fliplab"></span> (↑↓ off scale)</span></div>
         <div class="multiples" id="multiples"></div>
+        <div class="cards" id="cards"></div>
         <details><summary>Show as table</summary><div id="sctbl"></div></details>
       </div>
       <p class="note" id="sc-none" style="display:none"></p>
+    </div>
+    <div class="panel" id="tg-panel">
+      <h2>Which attributes got fairer?</h2>
+      <p class="note" id="tg-sub"></p>
+      <div class="legend"><span><span class="sw" style="background:var(--bar)"></span>plain AIM (privacy only)</span>
+        <span><span class="sw" style="background:var(--ink)"></span>AIM hybrid (privacy + fairness)</span></div>
+      <div id="tg"></div>
+      <details><summary>Show as table</summary><div id="tgtbl"></div></details>
+    </div>
+    <div class="panel" id="ax-panel">
+      <h2>Does it hold on every dataset?</h2>
+      <p class="note">The same four questions as the scorecard, for each dataset: the verdict, then plain AIM →
+        AIM hybrid. The outcome is income, except occupation for Dutch. Click a dataset to open it.</p>
+      <div class="ax" id="ax"></div>
     </div>
     <details class="how"><summary>How this works</summary>
       <p>Each point is made of actual synthetic tables: the AIM hybrid refitted with repair amount τ from a
@@ -225,10 +275,20 @@ th:first-child, td:first-child { text-align: left; }
         <b>Validity</b>: share of rows passing rules learned from the real data. <b>Impossible rows</b>: rows with a
         sex–category pair absent from real data (e.g. a male wife).</p>
       <p><b>Other datasets</b> (ACS-I, Dutch): only τ 1 and plain AIM were run (<code>aim_fair/run_datasets.sh</code>,
-        <code>results/datasets_summary.csv</code>), so there is no τ curve, no FLIP mark, and the strip's Δ is the
-        difference of the fold means, not paired. Dutch's target is occupation, so its AUC and gaps are about
-        occupation. Their parity / EO gap are still the scorer's classifier, not FLIP's protocol. Without their
+        <code>results/datasets_summary.csv</code>), so there is no τ curve and no FLIP mark (the FLIP paper reports no
+        results for them, and our FLIP reproduction covers Adult only). The scorecard asks four questions instead:
+        sex guessed right = 1 − BER (50% = a coin flip, ✓ at 52% or less); the outcome's parity gap and the mean
+        Eq. 14 gap over the category attributes (✓ if smaller than plain AIM's); the cost in AUC (✓ if under 0.03). The
+        downstream numbers follow FLIP's protocol (<code>aim_fair/flip_protocol.py --dataset D</code>), as on Adult, but only their means were
+        saved, so they have no ± sd; the strip's Δ is the difference of the fold means, not paired. Dutch's target is
+        occupation, so its AUC and gaps are about occupation, and it has no numeric columns (no Eq. 15). Without their
         fold-0 data on disk only this tab is shown.</p>
+      <p><b>Which attributes got fairer</b>: FLIP's protocol attribute by attribute: each attribute in turn is predicted
+        by a LightGBM model trained on the table and tested on real held-out people, and the bar is the gap between the
+        sexes' predictions (Eq. 14 for category attributes, W1 / real sd for number attributes). Coded column names are
+        shown in words (e.g. SCHL = education); the table has the codes and the real data's gaps. Lower means the table teaches less of a sex
+        difference about that attribute. Mean of 3 refits × 3 folds; the hybrid is τ 1 (for Adult, the τ grid's τ-1 tables).
+        From <code>results/flip_protocol_targets*.csv</code>.</p>
     </details>
   </section>
 
@@ -512,6 +572,11 @@ const METRICS = [   // key, title, better, format
   ['w1_num', 'Mean W1 / sd, all numeric targets (Eq. 15)', 'lower', v => v.toFixed(3)],
   ['validity', 'Validity', 'higher', v => v.toFixed(3)],
   ['impossible', 'Impossible rows', 'lower', v => pct(v)],
+  // datasets_summary.csv only (the other datasets' scorecard)
+  ['tstr', 'Release teaches real sex, folded tstr', '0.5 best', v => v.toFixed(3)],
+  ['alpha', 'Alpha-precision', 'higher', v => v.toFixed(3)],
+  ['beta', 'Beta-recall', 'higher', v => v.toFixed(3)],
+  ['eps_id', 'Epsilon-identifiability', 'lower', v => v.toFixed(3)],
 ];
 // the metrics a dataset's scorecard has (the other datasets: no Eq. 14 / 15)
 const metricsOf = SC => METRICS.filter(([k]) => SC.rows.some(r => r[k] != null));
@@ -582,9 +647,18 @@ function drawScorecard() {
     '(refit noise is about 0.01–0.02)') + (pts.length > 1 ?
     `. τ snaps to the computed grid (now ${at.tau}); the ε slider does not apply here.` :
     `. Only τ ${at.tau} was run for this dataset (aim_fair/run_datasets.sh); the τ grid is Adult only.`);
+  // one τ (the other datasets): a dumbbell row per metric instead of τ charts
+  const single = pts.length === 1;
+  $('sc-legend').style.display = single ? 'none' : '';
+  $('multiples').style.display = single ? 'none' : '';
+  $('cards').style.display = single ? '' : 'none';
+  if (single) $('sc-sub').textContent = `What the fairness steps change: plain AIM (privacy only) against the AIM hybrid ` +
+    `(privacy + fairness), both from the same ε ${SC.eps} private measurements, averaged over ${runsText(at)}. ` +
+    'The full list of metrics is in the table below.';
   // small multiples along τ: [plain | τ 0 … 1 | FLIP]
-  const box = $('multiples'); box.innerHTML = '';
-  for (const [k, t0, better, f] of METRICS) {
+  const box = $('multiples'); box.innerHTML = ''; $('cards').innerHTML = '';
+  if (single) drawCards(plain, at, real, SC.targets);
+  for (const [k, t0, better, f] of single ? [] : METRICS) {
     const t = tl(t0), cell = document.createElement('div');
     cell.id = 'm-' + k;
     const s = sdOf(at, k);
@@ -678,6 +752,164 @@ function drawScorecard() {
       `<td>${r[k] == null ? 'n/r' : fmtSd(r, k, f)}</td>`).join('') + '</tr>').join('') + '</table>';
 }
 
+// --- question cards (one τ only): plain AIM vs AIM hybrid in plain words -------
+// what "selected" means for the dataset's outcome
+const OUTCOME = { income: 'predicted to earn over $50K', occupation: 'predicted a high-level occupation' };
+const pts_ = v => (100 * v).toFixed(1) + ' pts';
+// the cards' four questions, shared with the across-datasets table so both give
+// the same verdicts: val turns a scorecard row into the number shown
+const QUESTIONS = [
+  { k: 'ber', q: 'Can a model guess sex from the other columns?', val: r => 1 - r.ber, fmt: pct,
+    ok: (P, H) => 1 - H.ber <= 0.52, yes: 'No', no: 'Still partly' },
+  { k: 'income_parity', q: 'Gap between men and women in the outcome', val: r => r.income_parity, fmt: pts_,
+    ok: (P, H) => H.income_parity < P.income_parity, yes: 'Closer', no: 'Not closer' },
+  { k: 'sp_cat', q: 'Average gap over all attributes', val: r => r.sp_cat, fmt: pts_,
+    ok: (P, H) => H.sp_cat < P.sp_cat, yes: 'Fairer', no: 'Not fairer' },
+  { k: 'auc', q: 'What it costs: prediction quality (AUC)', val: r => r.auc, fmt: v => v.toFixed(3),
+    ok: (P, H) => Math.abs(H.auc - P.auc) < 0.03, yes: 'Little', no: 'Noticeable' },
+];
+const QN = Object.fromEntries(QUESTIONS.map(x => [x.k, x]));
+const verdict = (x, P, H) => x.ok(P, H) ? `✓ ${x.yes}` : `✗ ${x.no}`;
+
+// three bars (real, plain, hybrid) on 0 .. max, with an optional reference line
+function cardBars(svg, rows, max, fmt, ref) {
+  const W = svg.clientWidth || 300, labW = 74, valW = 58, rowH = 22, top = ref ? 14 : 2;
+  const H = top + rows.length * rowH;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const sx = v => labW + (W - labW - valW) * Math.min(1, Math.max(0, v / max));
+  rows.forEach(([label, v, fill, bold], i) => {
+    const y = top + i * rowH;
+    el('text', { x: 0, y: y + 15, style: bold ? 'fill:var(--ink);font-weight:600' : '' }, svg, label);
+    el('path', { d: hbar(labW, y + 5, Math.max(1, sx(v) - labW), 12), fill }, svg);
+    el('text', { x: W, y: y + 15, 'text-anchor': 'end', style: bold ? 'fill:var(--ink);font-weight:600' : '' }, svg, fmt(v));
+  });
+  if (ref) {
+    el('line', { x1: sx(ref[0]), x2: sx(ref[0]), y1: top - 4, y2: H, stroke: 'var(--ink-2)', 'stroke-dasharray': '3 3' }, svg);
+    el('text', { x: sx(ref[0]), y: 9, 'text-anchor': 'middle', style: 'font-size:11px;fill:var(--ink-2)' }, svg, ref[1]);
+  }
+}
+
+function drawCards(P, H, R, targets) {
+  const box = $('cards'), out = OUTCOME[cur().target] || `predicted ${cur().target} = 1`;
+  const card = (id, q, verdict, sub, bars, max, fmt, note, ref) => {
+    const c = document.createElement('div'); c.className = 'card'; c.id = id;
+    c.innerHTML = `<h3>${q}</h3><p class="vd">${verdict} <span>${sub}</span></p><svg></svg><p class="cn">${note}</p>`;
+    box.appendChild(c);
+    cardBars(c.querySelector('svg'), bars, max, fmt, ref);
+  };
+  const three = k => [['Real data', R[k], 'var(--bar-real)'], ['Plain AIM', P[k], 'var(--bar)'],
+    ['AIM hybrid', H[k], 'var(--ink)', true]];
+  // 1. sex from the other columns: guessing accuracy = 1 - BER, 50% = a coin flip
+  const acc = r => ({ ...r, acc: 1 - r.ber });
+  const [aR, aP, aH] = [acc(R), acc(P), acc(H)];
+  card('m-ber', 'Can a model guess someone\'s sex from the other columns?',
+    verdict(QN.ber, P, H), QN.ber.ok(P, H) ? '— no better than a coin flip' : '',
+    [['Real data', aR.acc, 'var(--bar-real)'], ['Plain AIM', aP.acc, 'var(--bar)'], ['AIM hybrid', aH.acc, 'var(--ink)', true]],
+    1, pct, `Share of people whose sex a classifier guesses right from the table (balanced). ` +
+    `Plain AIM keeps the real data's link (${pct(aP.acc)}); the hybrid removes it.`, [0.5, 'coin flip']);
+  // 2. the outcome: the gap between men and women in the share selected
+  const dP = H.income_parity - P.income_parity;
+  card('m-income_parity', `Are men and women equally likely to be ${out}?`,
+    verdict(QN.income_parity, P, H), `— gap ${dP < 0 ? 'down' : 'up'} ${pts_(Math.abs(dP))}`, three('income_parity'),
+    niceAxis(Math.max(R.income_parity, P.income_parity, H.income_parity)).max, pts_,
+    `A model trained on each table, tested on real people: the difference between men and women in the share ` +
+    `${out}. Smaller is fairer.`);
+  // 3. every attribute as the target in turn
+  if (H.sp_cat != null) {
+    const n = targets ? targets.filter(t => t.metric === 'SP').length : 0;
+    const fewer = targets ? targets.filter(t => t.metric === 'SP' && t['AIM hybrid'] < t['Plain AIM']).length : 0;
+    card('m-sp_cat', 'And for every other attribute, not just the outcome?',
+      verdict(QN.sp_cat, P, H), n ? `— smaller gap on ${fewer} of ${n} attributes` : '',
+      three('sp_cat'), niceAxis(Math.max(R.sp_cat, P.sp_cat, H.sp_cat)).max, pts_,
+      'Each attribute in turn is predicted from the others; the bar is the average gap between men and women. ' +
+      'The panel below lists them one by one.');
+  }
+  // 4. the cost: prediction quality and valid rows
+  const dA = H.auc - P.auc, dV = H.validity - P.validity;
+  card('m-auc', 'What does it cost?', verdict(QN.auc, P, H),
+    `— AUC ${dA < 0 ? '−' : '+'}${Math.abs(dA).toFixed(3)}`, three('auc'), 1, v => v.toFixed(3),
+    `Prediction quality (AUC) of a model trained on the table and tested on real people; 1 = perfect, 0.5 = guessing. ` +
+    `Rows that pass the real data's consistency rules: ${pct(P.validity)} → ${pct(H.validity)}` +
+    ` (${dV < 0 ? '−' : '+'}${(100 * Math.abs(dV)).toFixed(1)} pts).`, [0.5, 'guessing']);
+}
+
+// --- which attributes got fairer: plain AIM vs hybrid, attribute by attribute ---
+// readable names for the coded columns (ACS-I PUMS codes, Dutch, Adult)
+const ATTR_NAMES = { AGEP: 'age', WKHP: 'hours worked per week', COW: 'class of worker', SCHL: 'education',
+  MAR: 'marital status', OCCP: 'occupation', POBP: 'place of birth', RELP: 'relationship to householder',
+  RAC1P: 'race', edu_level: 'education level', cur_eco_activity: 'current economic activity',
+  prev_residence_place: 'previous residence', country_birth: 'country of birth', fnlwgt: 'census weight',
+  'education-num': 'years of education' };
+const attrName = t => ATTR_NAMES[t] || t.replace(/[_-]/g, ' ');
+const TG_GROUPS = [   // metric, heading, format
+  ['SP', 'Category attributes: gap in the share predicted for each category', pts_],
+  ['W1', 'Number attributes: gap in the predicted value, as % of the attribute\'s spread', pct]];
+const PROTO_SRC = ['Real data', 'Plain AIM', 'AIM hybrid'];
+
+// two bars, plain AIM (grey) over the hybrid (ink), on 0 .. max
+function pairBars(svg, p, h, max) {
+  const W = svg.clientWidth || 300, H = 24;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const w = v => Math.max(1, W * Math.min(1, v / max));
+  el('path', { d: hbar(0, 2, w(p), 9), fill: 'var(--bar)' }, svg);
+  el('path', { d: hbar(0, 13, w(h), 9), fill: 'var(--ink)' }, svg);
+}
+
+function drawTargets() {
+  const T = cur().scorecard && cur().scorecard.targets;
+  $('tg-panel').hidden = !T;
+  if (!T) return;
+  const box = $('tg'); box.innerHTML = '';
+  const fewer = T.filter(r => r['AIM hybrid'] < r['Plain AIM']).length;
+  $('tg-sub').innerHTML = `A model predicts each attribute from the rest of the table: how differently does it treat ` +
+    `men and women? Shorter is fairer. <b>The hybrid's gap is smaller on ${fewer} of ${T.length} attributes.</b>`;
+  for (const [m, head, fmt] of TG_GROUPS) {
+    const rows = T.filter(r => r.metric === m).sort((a, b) => b['Plain AIM'] - a['Plain AIM']);
+    if (!rows.length) continue;
+    const h = document.createElement('div'); h.className = 'dbg'; h.textContent = head; box.appendChild(h);
+    const { max } = niceAxis(Math.max(...rows.flatMap(r => [r['Plain AIM'], r['AIM hybrid']])));
+    for (const r of rows) {
+      const name = attrName(r.target) + (r.target === cur().target ? ' <span>(the outcome)</span>' : '');
+      const p = r['Plain AIM'], hy = r['AIM hybrid'];
+      const row = document.createElement('div'); row.className = 'dbr';
+      row.innerHTML = `<div class="l">${name}</div><svg></svg><div class="v">${fmt(p)} → <b>${fmt(hy)}</b> ` +
+        `${hy < p ? '✓' : '✗'}</div>`;
+      box.appendChild(row);
+      pairBars(row.querySelector('svg'), p, hy, max);
+      row.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${name}</div>plain AIM: ${fmt(p)}` +
+        `<br>AIM hybrid: ${fmt(hy)}<br>real data: ${fmt(r['Real data'])}` +
+        `<br><span style="color:var(--ink-3)">column ${r.target}</span>`));
+      row.addEventListener('mouseleave', hideTip);
+    }
+  }
+  const f = v => v.toFixed(3);
+  $('tgtbl').innerHTML = '<table><tr><th>Attribute</th><th>column</th><th>metric</th>' +
+    PROTO_SRC.map(s => `<th>${s}</th>`).join('') + '</tr>' +
+    T.map(r => `<tr><td>${attrName(r.target)}</td><td>${r.target}</td><td>${r.metric === 'W1' ? 'W1 / sd (Eq. 15)' :
+      'SP (Eq. 14)'}</td>` + PROTO_SRC.map(s => `<td>${f(r[s])}</td>`).join('') + '</tr>').join('') + '</table>';
+}
+
+// --- across datasets: the cards' four questions for every dataset ---------------
+function drawAcross() {
+  const sets = Object.entries(DATA.datasets).map(([n, D]) => {
+    const R = D.scorecard && scoreRows(D.scorecard), H = R && R.pts.find(p => p.tau === 1);
+    return H && R.plain ? { n, D, H, P: R.plain } : null;
+  }).filter(Boolean);
+  $('ax-panel').hidden = sets.length < 2;
+  if (sets.length < 2) return;
+  const cell = (s, x) => {
+    if (s.H[x.k] == null || s.P[x.k] == null) return '<td>n/a</td>';
+    return `<td${s.n === S.ds ? ' class="cur"' : ''}><div class="axv">${verdict(x, s.P, s.H)}</div>` +
+      `${x.fmt(x.val(s.P))} → <b>${x.fmt(x.val(s.H))}</b></td>`;
+  };
+  $('ax').innerHTML = '<table><tr><th></th>' + sets.map(s => `<th><button data-ds="${s.n}"` +
+    (s.n === S.ds ? ' aria-pressed="true"' : '') + `>${s.D.label}</button></th>`).join('') + '</tr>' +
+    QUESTIONS.map(x => `<tr><td>${x.q}</td>` + sets.map(s => cell(s, x)).join('') + '</tr>').join('') + '</table>';
+  $('ax').querySelectorAll('button[data-ds]').forEach(b => b.addEventListener('click', () => {
+    $('ds').value = b.dataset.ds; setDataset(b.dataset.ds);
+  }));
+}
+
 // the build's check: FLIP-faithful AIM column vs the scorecard's fold 0 at τ 1
 function matchText(SC) {
   const C = SC.faithful && SC.faithful.check;
@@ -759,7 +991,8 @@ const FINDINGS = [   // key, label, note (plain, hybrid τ 1, real, paired diffe
 
 function drawFindings() {
   const SC = cur().scorecard, R = SC && scoreRows(SC), H = R && R.pts.find(p => p.tau === 1);
-  $('findings').hidden = !(H && R.plain && R.real);
+  // one τ only: the scorecard's question cards say the same, so no strip
+  $('findings').hidden = !(H && R.plain && R.real && R.pts.length > 1);
   if ($('findings').hidden) return;
   $('fd-head').textContent = `Plain AIM → AIM hybrid at τ 1, from the same ε ${SC.eps} measurements · ` +
     `${cur().label}, ${runsText(H)}`;
@@ -1112,7 +1345,7 @@ function render() {
   $('tauh').textContent = S.tab === 'ba' || S.tab === 'flip' ? '(not used here: τ 1 release)' :
     S.tab === 'graph' ? '(not used here: one saved AIM run)' :
     S.tau === 0 ? '(no repair)' : S.tau === 1 ? '(full repair)' : '';
-  if (S.tab === 'score') drawScorecard();
+  if (S.tab === 'score') { drawScorecard(); drawTargets(); drawAcross(); }
   if (S.tab === 'flip') drawFaithful();
   if (S.tab === 'leak') {
     const R = compute();
@@ -1130,6 +1363,8 @@ function setDataset(name) {
   S.gk = null; S.ghi = null; if (gTimer) stopPlay();
   // only the scorecard when the dataset's fold-0 data is not on disk
   for (const x of TABS.slice(1)) $('tab-' + x).hidden = !!D.scorecard_only;
+  // ε and τ drive nothing on a scorecard of one τ: hide them there
+  for (const x of ['eps', 'tau']) $(x).closest('.ctl').style.display = D.scorecard_only ? 'none' : '';
   // FLIP-faithful: Adult only, where its csv exists
   $('tab-flip').hidden = !(D.scorecard && D.scorecard.faithful);
   if (S.tab === 'flip' && $('tab-flip').hidden) { setTab('score'); }
@@ -1137,6 +1372,7 @@ function setDataset(name) {
     'on disk (python aim_fair/export_folds.py --dataset D, then rebuild)' : '';
   $('dslabel').textContent = D.label;
   $('target').textContent = D.target;
+  document.querySelectorAll('.sens').forEach(e => { e.textContent = D.sensitive; });
   if (D.scorecard_only) {
     S.sel = null; $('cpchips').innerHTML = '';
     drawFindings();

@@ -106,6 +106,12 @@ FLIP_METRICS = {
     'Beta-recall': 'beta',
     'Epsilon-identifiability': 'eps_id'}
 PERCENT = {'impossible'}   # the csv's percent, the scorecard's fraction
+# FLIP's protocol per dataset (aim_fair/flip_protocol.py [--dataset D]): every
+# attribute as a target, and the outcome at threshold 0.5; scope 'all' (3
+# folds x 3 refits). {s} is '' for Adult, else '_' + the dataset.
+PROTOCOL_TARGETS = 'flip_protocol_targets{s}.csv'   # in results/
+PROTOCOL_OUTCOME = 'flip_protocol_outcome{s}.csv'   # Adult: ..._income.csv
+PROTOCOL_SOURCES = ['Real data', 'Plain AIM', 'AIM hybrid']
 
 
 def schema(name):
@@ -295,13 +301,54 @@ def faithful_check(rows, grid):
     return out
 
 
+def protocol(name):
+    """FLIP's protocol for the dataset's real data, plain AIM and hybrid
+    (scope 'all'), or None if its csvs are missing:
+      means    {source: {income_parity, eo_gap, sp_cat, w1_num}}: the
+               outcome's parity and TPR gap at 0.5, and the means over
+               targets of Eq. 14 and W1 / sd (as flip_datasets_table.py)
+      targets  [{target, metric ('SP' | 'W1'), <source>: value_sd}] in the
+               csv's order."""
+    s = '' if name == 'adult' else '_' + name
+    t_path = os.path.join(HERE, 'results', PROTOCOL_TARGETS.format(s=s))
+    o_path = os.path.join(HERE, 'results', 'flip_protocol_income.csv'
+                          if name == 'adult' else PROTOCOL_OUTCOME.format(s=s))
+    if not (os.path.exists(t_path) and os.path.exists(o_path)):
+        return None
+    t = pd.read_csv(t_path)
+    o = pd.read_csv(o_path)
+    t = t[(t.scope == 'all') & t.source.isin(PROTOCOL_SOURCES)]
+    o = o[(o.scope == 'all') & (o.threshold.astype(str) == '0.5')]
+    means, targets = {}, {}
+    for src in PROTOCOL_SOURCES:
+        ts, os_ = t[t.source == src], o[o.source == src]
+        if ts.empty or os_.empty:
+            return None
+        w1 = ts[ts.metric == 'W1'].value_sd
+        means[src] = {
+            'income_parity': float(os_.parity.iloc[0]),
+            'eo_gap': float(os_['EO = TPR gap'].iloc[0]),
+            'sp_cat': float(ts[ts.metric != 'W1'].value_sd.mean()),
+            'w1_num': float(w1.mean()) if len(w1) else None}
+        for r in ts.itertuples():
+            targets.setdefault(r.target, {
+                'target': r.target,
+                'metric': 'W1' if r.metric == 'W1' else 'SP'})[src] = \
+                float(r.value_sd)
+    return {'means': means, 'targets': list(targets.values())}
+
+
 def scorecard(name):
-    """{eps, rows, baseline} from the dataset's tau-grid csv, else its rows
-    of results/datasets_summary.csv (tau 1 only, no per-fold rows), or None
-    if neither has it. Rows carry the mean over folds, <metric>_sd (None when
-    the grid has one run) and the folds x refits behind them."""
+    """{eps, rows, baseline, targets} from the dataset's tau-grid csv, else
+    its rows of results/datasets_summary.csv (tau 1 only, no per-fold rows),
+    or None if neither has it. Rows carry the mean over folds, <metric>_sd
+    (None when the grid has one run) and the folds x refits behind them.
+    For the summary's datasets, the downstream metrics are replaced by FLIP's
+    protocol, as on Adult's grid (means only: no sd)."""
     rel, eps = SCORECARD.get(name, ((), None))
     path = os.path.join(HERE, *rel)
+    P = protocol(name)
+    targets = P and P['targets']
     if rel and os.path.exists(path):
         df = pd.read_csv(path)
         df = df.astype(object).where(df.notna(), None)
@@ -309,21 +356,27 @@ def scorecard(name):
         F = faithful() if name == 'adult' else None
         return {'eps': eps, 'rows': rows,
                 'baseline': F and flip_baseline(F),
-                'faithful': F and {'rows': F, 'check': faithful_check(F, rows)}}
+                'faithful': F and {'rows': F, 'check': faithful_check(F, rows)},
+                'targets': targets}
     path = os.path.join(HERE, *SUMMARY)
     if not os.path.exists(path):
         return None
     df = pd.read_csv(path)
-    df = df[df.dataset == name].drop(columns='dataset')
+    df = df[df.dataset == name].drop(columns='dataset').rename(
+        columns={'tstr_folded': 'tstr', 'tstr_folded_sd': 'tstr_sd'})
     if df.empty:
         return None
     df = df.astype(object).where(df.notna(), None)
     rows = []
     for r in df.to_dict('records'):
         source, tau, refits = SUMMARY_SOURCES[r['source']]
+        if P:
+            for k, v in P['means'][source].items():
+                r[k], r[k + '_sd'] = v, None
         rows.append({**r, 'source': source, 'tau': tau, 'fold': None,
                      'refits': refits})
-    return {'eps': 3, 'rows': rows, 'baseline': None, 'faithful': None}
+    return {'eps': 3, 'rows': rows, 'baseline': None, 'faithful': None,
+            'targets': targets, 'protocol': P is not None}
 
 
 def model_graph(name):

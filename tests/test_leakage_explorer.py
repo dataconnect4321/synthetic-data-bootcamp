@@ -402,6 +402,40 @@ def test_scorecard_only_from_datasets_summary(tmp_path, monkeypatch):
             for k in ('ber', 'auc', 'income_parity', 'eo_gap', 'ber_sd', 'num_w1'):
                 assert got[k] == (None if pd.isna(w[k]) else w[k])
             assert got['fold'] is None and got['folds'] == w['folds']
+            assert got['tstr'] == w['tstr_folded']
+
+
+def test_protocol_matches_flip_datasets_table():
+    """FLIP's protocol on the other datasets: the means the scorecard uses
+    equal results/flip_protocol_datasets.csv (flip_datasets_table.py, its own
+    reading of the same csvs), and the per-target rows average to them."""
+    table = os.path.join(ROOT, 'results', 'flip_protocol_datasets.csv')
+    if not os.path.exists(table):
+        pytest.skip('results/flip_protocol_datasets.csv missing')
+    df = pd.read_csv(table)
+    keys = {'income_parity': 'parity', 'eo_gap': 'eo', 'sp_cat': 'sp_cat',
+            'w1_num': 'w1_num'}
+    checked = 0
+    for name in ('acs_al', 'acs_ut', 'dutch'):
+        P = L.protocol(name)
+        if P is None:
+            continue
+        sc = L.scorecard(name)
+        for src in L.PROTOCOL_SOURCES:
+            want = df[(df.dataset == L.DATASETS[name]) & (df.source == src)].iloc[0]
+            got = P['means'][src]
+            row = next(r for r in sc['rows'] if r['source'] == src)
+            for k, c in keys.items():
+                if pd.isna(want[c]):
+                    assert got[k] is None and row[k] is None
+                    continue
+                assert abs(got[k] - want[c]) < 1e-4, (name, src, k)
+                assert row[k] == got[k] and row[k + '_sd'] is None
+            sp = [t[src] for t in P['targets'] if t['metric'] == 'SP']
+            assert abs(np.mean(sp) - got['sp_cat']) < 1e-12
+        checked += 1
+    if not checked:
+        pytest.skip('flip_protocol_*_<dataset>.csv missing')
 
 
 def test_flip_faithful_matches_csv_and_scorecard(tmp_path, monkeypatch):
