@@ -288,6 +288,97 @@ synthesis. Even then, its impossible rows need handling.
 - **Tuning is not covered.** Settings were chosen by scoring on real data,
   which is outside DP. A deployed release must fix them in advance.
 
+## The most faithful comparison: FLIP's own evaluation protocol
+
+![FLIP-faithful comparison](results/flip_faithful_comparison.png)
+
+| Metric | Better | FLIP paper, reported | FLIP reproduction | **AIM hybrid** |
+|---|---|---|---|---|
+| **Data level (FLIP's primary criteria)** | | | | |
+| BER, synthetic sex label (0.5 best) | higher | 0.49 | 0.16 | **0.50** |
+| A-NCB, paper's own-adversary version | higher | **0.91** | 0.27 | 0.88 |
+| Release teaches real sex, folded tstr (0.5 best) | higher | not reported | 0.17 | **0.45** |
+| **Utility and realism** | | | | |
+| Income AUC on real people | higher | 0.66 | 0.90 | 0.90 |
+| Alpha-precision | higher | 0.40 | 0.90 | **0.99** |
+| Beta-recall | higher | 0.21 | 0.19 | **0.39** |
+| Validity | higher | not reported | 0.56 | **0.89** |
+| Impossible rows | lower | not reported | 43% | **0%** |
+| **Downstream (FLIP Sections 5.3 and 6.5, LightGBM)** | | | | |
+| Income parity, threshold 0.5 | lower | **0.12** | 0.231 | 0.144 |
+| Income EO gap* | lower | 0.26 | **0.073** | 0.116 |
+| Mean parity over all categorical targets (Eq. 14) | lower | not reported | 0.218 | **0.166** |
+| Mean W1 / sd over all numeric targets (Eq. 15) | lower | not reported | 0.147 | **0.102** |
+| **Privacy** | | | | |
+| Guarantee | | nominal eps 3 (VAE only) | nominal eps 3 (VAE only) | **eps 3, whole release** |
+| Epsilon-identifiability (closeness, not leakage) | lower | **0.09** | 0.14 | 0.36 |
+
+Our two sources: fold 0, the same split and real test people. The AIM
+hybrid averages 3 refits from run_final.sh's saved measurements. The paper
+column was read off FLIP's Fig. 3 (Adult, lambda 4, eps 3).
+
+\* FLIP does not define its equalized-odds number. Ours is the TPR gap
+(equal opportunity). `results/flip_protocol_income.csv` also has the FPR
+gap, their max and their mean. None of them gives 0.26 on our reproduction.
+
+### Why this comparison is closer to FLIP's own metrics
+
+The headline table above scores every source with our own scorer: one
+HistGradientBoosting income model, with SP and EO for income only. This
+section instead follows the paper's own evaluation, so each number means
+what FLIP's numbers mean.
+
+- **The paper's classifier.** FLIP trains LightGBM for its downstream
+  numbers (Section 5.3), so the downstream metrics here use LightGBM.
+- **Every attribute as a target, not only income.** FLIP is task-agnostic,
+  and its downstream evaluation predicts each non-protected attribute in
+  turn (Section 6.5). Income alone would test one task the method was never
+  tuned for.
+- **The paper's equations.**
+  - Categorical targets use Eq. 14: the largest gap, over classes, in the
+    share predicted for that class.
+  - Numeric targets use Eq. 15: the Wasserstein-1 distance between the
+    sexes' predicted values. It is divided by the real sd so targets can
+    be averaged.
+- **The paper's version of the data-level metrics.**
+  - BER is computed on the table's own sex column (Def. 1).
+  - A-NCB uses the paper's own-sex adversary.
+  - These are FLIP's primary fairness criteria, so they lead the table.
+- **One split, one scorer, one set of real test people** for our FLIP
+  reproduction and the AIM hybrid. The only number not scored by our code
+  is the paper column.
+- **The paper's numbers are kept as published,** and shown only where the
+  paper reports them. FLIP does not report realism, tstr or per-target
+  means.
+
+### What it shows
+
+- **Data-level fairness:**
+  - The AIM hybrid matches what the paper reports for FLIP (BER 0.50 vs
+    0.49, A-NCB 0.88 vs 0.91).
+  - Our reproduction of FLIP never gets there (BER 0.16).
+- **Utility and realism:**
+  - The AIM hybrid keeps far more utility and realism than the paper
+    reports for FLIP: AUC 0.90 vs 0.66, alpha-precision 0.99 vs 0.40.
+  - Its rows are valid: 0% impossible rows, vs 43% for the reproduction.
+- **Downstream parity, on FLIP's own task-agnostic protocol:** the hybrid
+  has the lowest mean gap, for categorical targets (0.166 vs 0.218) and for
+  numeric targets (0.102 vs 0.147).
+- **Where FLIP is better:**
+  - The paper reports lower income parity (0.12 vs 0.144), but at AUC
+    0.66, where the model is close to uninformative.
+  - The reproduction has the lowest income EO gap (0.073 vs 0.116).
+
+### Limits
+
+- **FLIP's evaluation code is not public.** We followed its stated
+  protocol, but its EO definition is unknown, and so is the Fig. 3 target.
+- **The FLIP table exists for fold 0 only,** so the comparison is on
+  fold 0.
+- **Threshold effect at 0.5:** the hybrid's model selects 15% of people,
+  vs 21% for real data. At matched selection, income parity is 0.196 for
+  the hybrid vs 0.174 for the reproduction, and EO is 0.138 vs 0.044.
+
 ## FLIP as published: the paper's Fig. 3 layout
 
 Our reproduction of FLIP as published on fold 0, lambda x epsilon, with the
@@ -320,6 +411,9 @@ PRESET=final LAMS="0 4" bash scripts/run_paper_grid.sh   # best VAE, no DP
 bash scripts/run_best_vae_dp.sh                  # best VAE, nominal eps 3
 python aim_fair/final_chart.py                   # results/final_comparison.{png,csv}, final_aim_vs_vae.csv
 python aim_fair/task_auc.py                      # results/task_auc.csv
+bash aim_fair/run_adult_refits.sh                # 3 hybrid + 3 plain refits per fold (aimre)
+aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py   # FLIP protocol (LightGBM)
+python aim_fair/flip_faithful_chart.py           # results/flip_faithful_comparison.{png,csv}
 ```
 
 ## References

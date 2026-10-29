@@ -44,3 +44,6 @@ Data/
 aim_fair/.venv/
 aim_fair/out/
 aim_fair/data/
+
+# AIF360 / LightGBM / XGBoost environment (Python 3.12)
+aim_fair/.venv-aif360/
