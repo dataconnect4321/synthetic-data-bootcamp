@@ -10,8 +10,10 @@
 #   PUBLIC_BINS=1 bash aim_fair/run_final.sh   # fixed public bins instead
 cd "$(dirname "$0")/.."
 export PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8
-PY=${PY:-python}                                   # main environment
-AIMPY=${AIMPY:-aim_fair/.venv/Scripts/python.exe}  # mbi + JAX environment
+PY=${PY:-$(command -v python || command -v python3)}   # main environment
+# mbi + JAX environment: the venv's python on macOS / Linux, or on Windows
+[ -x aim_fair/.venv/bin/python ] && V=aim_fair/.venv/bin/python || V=aim_fair/.venv/Scripts/python.exe
+AIMPY=${AIMPY:-$V}
 FOLDS=${FOLDS:-"0 1 2"}
 R="0 1 2 3 4 5 6 7 8 9"
 A=aimfinal; X=""

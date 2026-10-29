@@ -1,0 +1,1444 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leakage Explorer</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --panel: #ffffff; --border: #e4e3df;
+  --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8984; --grid: #ecebe7;
+  --g0: #2a78d6; --g1: #eb6834; --bar: #6e6d68; --bar-real: #e2e1dc; --sel: #f1f0ec;
+  --band: rgba(11, 11, 10, .08);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface: #1a1a19; --panel: #222221; --border: #3a3a37;
+    --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8f8e86; --grid: #2f2f2c;
+    --g0: #3987e5; --g1: #d95926; --bar: #b3b2aa; --bar-real: #3a3a37; --sel: #2c2c2a;
+    --band: rgba(240, 239, 236, .11);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #1a1a19; --panel: #222221; --border: #3a3a37;
+  --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8f8e86; --grid: #2f2f2c;
+  --g0: hsl(213, 33%, 36%); --g1: #d95926; --bar: #b3b2aa; --bar-real: #3a3a37; --sel: #2c2c2a;
+  --band: rgba(240, 239, 236, .11);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 0 0 2px; }
+h3 { font-size: 14px; margin: 16px 0 2px; }
+p { margin: 0 0 8px; }
+.sub, .note { color: var(--ink-2); }
+.note { font-size: 13px; }
+.panel { background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px; margin-top: 16px; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: end;
+  position: sticky; top: 0; z-index: 2; }
+.ctl { display: flex; flex-direction: column; min-width: 200px; flex: 1; }
+.ctl label { font-size: 13px; color: var(--ink-2); }
+.ctl label .k { color: var(--ink); font-weight: 600; }
+.ctl b { color: var(--ink); font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; accent-color: var(--ink-2); }
+input[type=range]:disabled { opacity: .4; }
+button { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button:hover { background: var(--sel); }
+button[aria-pressed="true"] { background: var(--sel); border-color: var(--ink-3); font-weight: 600; }
+select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; margin: 2px 0; }
+select:disabled { color: var(--ink-2); opacity: 1; }
+.tabs { display: flex; gap: 4px; margin-top: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none;
+  padding: 8px 12px; font-size: 14px; color: var(--ink-2); margin-bottom: -1px; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+.badge { font-size: 10px; font-weight: 600; letter-spacing: .04em; color: var(--ink);
+  border: 1px solid var(--ink-3); border-radius: 4px; padding: 0 4px; }
+svg .badge { fill: var(--ink); font-size: 10px; font-weight: 600; letter-spacing: .04em; }
+.pair { display: flex; gap: 16px; flex-wrap: wrap; }
+.pair > div { flex: 1 1 300px; min-width: 0; }
+.pair .readout { margin: 6px 0 0; }
+#ba-tbl tr.hi td { font-weight: 600; }
+#g-tbl tr.hi td { font-weight: 600; }
+.gnode { cursor: pointer; outline: none; }
+.gnode:focus-visible circle { stroke: var(--ink); stroke-width: 2; }
+.gstep { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.gstep input { flex: 1 1 200px; width: auto; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.readout { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2);
+  margin: 6px 0 4px; }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+  vertical-align: -1px; margin-right: 5px; }
+.tick { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--ink);
+  vertical-align: 3px; margin-right: 5px; }
+.dash { display: inline-block; width: 12px; height: 12px; border: 1.5px dashed var(--ink);
+  border-radius: 2px; vertical-align: -1px; margin-right: 5px; }
+/* auto-fill, not auto-fit: a cell is measured before the next one exists */
+.multiples { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px 20px; margin-top: 8px; }
+.multiples h3 { margin: 0; font-size: 13px; }
+.multiples h3 span { font-weight: 400; color: var(--ink-3); }
+.multiples .now { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; margin: 0 0 2px; }
+.multiples .now b { color: var(--ink); font-size: 15px; }
+.multiples .now .pm { color: var(--ink-3); }
+.multiples > div { border-radius: 8px; padding: 6px; margin: -6px; transition: background-color 1.2s; }
+.multiples > div.flash { background: var(--sel); transition: none; }
+/* attribute rows: label | bars (plain AIM over the hybrid) | values */
+.dbg { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 14px 0 2px; }
+.dbg:first-child { margin-top: 4px; }
+.dbr { display: grid; grid-template-columns: minmax(0, 15em) minmax(0, 1fr) 9em; gap: 0 14px;
+  align-items: center; padding: 2px 6px; margin: 0 -6px; border-radius: 6px; transition: background-color 1.2s; }
+.dbr.flash { background: var(--sel); transition: none; }
+.dbr:hover { background: var(--sel); transition: none; }
+.dbr .l { font-size: 13px; line-height: 1.3; }
+.dbr .l span { color: var(--ink-3); }
+.dbr .v { font-size: 13px; text-align: right; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dbr .v b { color: var(--ink); font-weight: 600; }
+@media (max-width: 640px) {
+  .dbr { grid-template-columns: minmax(0, 1fr) auto; padding: 4px 6px; }
+  .dbr svg { grid-column: 1 / -1; grid-row: 2; }
+}
+/* question cards (one τ only): a question, a verdict, three bars, one note */
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 10px; }
+@media (max-width: 640px) { .cards { grid-template-columns: minmax(0, 1fr); } }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px 10px; }
+.card h3 { margin: 0; font-size: 14px; }
+.card .vd { font-size: 18px; font-weight: 600; margin: 4px 0 6px; line-height: 1.3; }
+.card .vd span { font-size: 13px; font-weight: 400; color: var(--ink-2); }
+.card .cn { font-size: 12px; color: var(--ink-3); margin: 6px 0 0; line-height: 1.4; }
+/* across datasets: the cards' questions x datasets, a verdict and two numbers per cell */
+.ax { overflow-x: auto; }
+.ax table { width: 100%; min-width: 600px; table-layout: fixed; }
+.ax th { font-weight: 400; font-size: 12px; text-align: center; padding: 0 4px 6px; }
+.ax th:first-child { width: 13em; text-align: left; }
+.ax th button { font-size: 12px; padding: 3px 8px; }
+.ax td { text-align: center; padding: 8px 4px; vertical-align: middle; font-size: 12px; color: var(--ink-3);
+  border-top: 1px solid var(--border); }
+.ax td:first-child { text-align: left; font-size: 13px; color: var(--ink); line-height: 1.3; }
+.ax td.cur { background: var(--sel); }
+.ax td b { color: var(--ink); font-weight: 600; }
+.ax .axv { font-size: 14px; font-weight: 600; color: var(--ink); }
+/* headline findings: four numbers under the title, no boxes */
+.findings { margin: 20px 0 4px; }
+.findings .eyebrow { font-size: 12px; color: var(--ink-3); margin: 0 0 10px; }
+.fgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.fd { all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 3px;
+  padding: 0 16px; border-left: 1px solid var(--border); cursor: pointer; }
+.fd:first-child { border-left: 0; padding-left: 0; }
+.fd .fl { font-size: 12px; color: var(--ink-2); }
+.fd .fv { font-size: 22px; line-height: 1.2; font-variant-numeric: tabular-nums;
+  letter-spacing: -.01em; color: var(--ink-3); white-space: nowrap; }
+.fd .fv b { color: var(--ink); font-weight: 600; }
+.fd .fv .ar { font-size: 15px; margin: 0 3px; }
+.fd .fn { font-size: 12px; line-height: 1.4; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.fd:hover .fl, .fd:focus-visible .fl { color: var(--ink); }
+.fd:focus-visible { outline: 2px solid var(--ink-3); outline-offset: 4px; border-radius: 4px; }
+@media (max-width: 640px) {
+  .fgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 16px; }
+  .fd:nth-child(3) { border-left: 0; padding-left: 0; }
+  .fd .fv { font-size: 19px; }
+}
+svg { display: block; width: 100%; overflow: visible; }
+.legend svg { display: inline; width: 14px; margin-right: 5px; }
+svg text { fill: var(--ink-2); font-size: 12px; }
+.row { cursor: pointer; }
+.row:hover .bg { fill: var(--sel); }
+#tip { position: fixed; pointer-events: none; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; max-width: 280px; z-index: 5;
+  font-variant-numeric: tabular-nums; }
+#tip .h { font-weight: 600; margin-bottom: 2px; }
+details { margin-top: 10px; font-size: 13px; }
+details.how { color: var(--ink-2); }
+details.how p { margin: 6px 0; }
+table { border-collapse: collapse; margin-top: 6px; font-variant-numeric: tabular-nums; }
+th, td { padding: 2px 10px 2px 0; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+#err { display: none; color: #e34948; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Privacy, fairness and utility of synthetic <span id="dslabel"></span></h1>
+  <p class="sub"><b>ε</b> sets privacy and <b>τ</b> sets fairness. Protected attribute
+    <b class="sens"></b>, target <b id="target"></b>.</p>
+  <p id="err">No data embedded: build this page with <code>python leakage_explorer.py</code>.</p>
+
+  <section class="findings" id="findings" aria-label="Headline results" hidden>
+    <p class="eyebrow" id="fd-head"></p>
+    <div class="fgrid" id="fgrid"></div>
+  </section>
+
+  <div class="panel controls">
+    <div class="ctl" style="min-width:140px;flex:0 1 180px">
+      <label for="ds">Dataset</label>
+      <select id="ds"></select>
+    </div>
+    <div class="ctl">
+      <label for="eps"><span class="k">Privacy</span> · budget ε = <b id="epsv"></b>
+        <span id="epsh"></span></label>
+      <input id="eps" type="range" min="0" max="1000" step="1">
+    </div>
+    <div class="ctl">
+      <label for="tau"><span class="k">Fairness</span> · repair τ = <b id="tauv"></b>
+        <span id="tauh"></span></label>
+      <input id="tau" type="range" min="0" max="1" step="0.05">
+    </div>
+    <div class="chips" id="leakchips">
+      <button id="reseed" title="Draw new Gaussian noise for the simulation">Resample noise</button>
+      <span id="cpchips" class="chips"></span>
+    </div>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" id="tab-score" aria-controls="p-score" aria-selected="true">Scorecard</button>
+    <button role="tab" id="tab-flip" aria-controls="p-flip" aria-selected="false">FLIP-faithful</button>
+    <button role="tab" id="tab-leak" aria-controls="p-leak" aria-selected="false">Leakage</button>
+    <button role="tab" id="tab-ba" aria-controls="p-ba" aria-selected="false">Before vs after</button>
+    <button role="tab" id="tab-graph" aria-controls="p-graph" aria-selected="false">Model graph</button>
+  </nav>
+
+  <!-- Scorecard: actual releases along τ -->
+  <section role="tabpanel" id="p-score" aria-labelledby="tab-score">
+    <div class="panel">
+      <h2>Scorecard</h2>
+      <p class="note" id="sc-sub"></p>
+      <div class="chips" id="sc-folds" role="group" aria-label="Folds shown">
+        <button id="sc-all" aria-pressed="true">Mean of folds (± sd)</button>
+        <button id="sc-f0" aria-pressed="false">Fold 0 (as FLIP-faithful)</button>
+      </div>
+      <p class="note" id="sc-match" style="margin-top:6px"></p>
+      <div id="sc-body">
+        <div class="legend" id="sc-legend"><span id="sc-tauleg"><span class="tick"></span>AIM hybrid along τ (● = τ <span id="sc-tau"></span>)</span>
+          <span id="sc-bandleg"><span class="sw" style="background:var(--band)"></span><span id="sc-bandlab"></span></span>
+          <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="4.5" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5"/></svg>plain AIM (same measurements, no fairness steps)</span>
+          <span><span class="tick" style="border-top:1.5px dotted var(--ink-3)"></span>real data</span>
+          <span id="sc-flipleg"><svg width="14" height="14" style="display:inline;vertical-align:-2px"><rect x="2.5" y="2.5" width="9" height="9" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.5"/></svg><span id="sc-fliplab"></span> (↑↓ off scale)</span></div>
+        <div class="multiples" id="multiples"></div>
+        <div class="cards" id="cards"></div>
+        <details><summary>Show as table</summary><div id="sctbl"></div></details>
+      </div>
+      <p class="note" id="sc-none" style="display:none"></p>
+    </div>
+    <div class="panel" id="tg-panel">
+      <h2>Which attributes got fairer?</h2>
+      <p class="note" id="tg-sub"></p>
+      <div class="legend"><span><span class="sw" style="background:var(--bar)"></span>plain AIM (privacy only)</span>
+        <span><span class="sw" style="background:var(--ink)"></span>AIM hybrid (privacy + fairness)</span></div>
+      <div id="tg"></div>
+      <details><summary>Show as table</summary><div id="tgtbl"></div></details>
+    </div>
+    <div class="panel" id="ax-panel">
+      <h2>Does it hold on every dataset?</h2>
+      <p class="note">The same four questions as the scorecard, for each dataset: the verdict, then plain AIM →
+        AIM hybrid. The outcome is income, except occupation for Dutch. Click a dataset to open it.</p>
+      <div class="ax" id="ax"></div>
+    </div>
+    <details class="how"><summary>How this works</summary>
+      <p>Each point is made of actual synthetic tables: the AIM hybrid refitted with repair amount τ from a
+        fold's saved private measurements (ε 3, δ 1e-5); masking and consistency rules stay on. Refits are
+        post-processing, so every τ has the same privacy. <b>Plain AIM</b> (left of the τ axis) is the same
+        measurements with no masking, repair or rules: the privacy-only baseline. A point is the mean over
+        refits within each fold, then over folds; the band is ± 1 sd across the fold means, the convention of
+        the ± in RESULTS.md. <b>Fold 0</b> shows that fold alone (the mean of its 3 refits, no band): at τ 1 these
+        are the same tables, and so the same numbers, as the AIM column of the FLIP-faithful tab. BER, A-NCB, AUC,
+        validity and impossible rows are from <code>run_adult_flip.py --score-csv</code>; the downstream fairness
+        metrics follow FLIP's own protocol (<code>aim_fair/flip_protocol.py</code>, LightGBM). The grid:
+        <code>scripts/run_tau_grid.sh</code>, <code>results/utility_tau_grid.csv</code>. Before vs after
+        shows one release (fold 0, refit 0), so its numbers differ slightly from these means.</p>
+      <p><b>The strip at the top</b> compares plain AIM with the hybrid at τ 1 in each fold (same measurements,
+        so the difference is paired): Δ is the mean of the per-fold differences, ± their sd, and the count says
+        in how many folds the hybrid moved the same way.</p>
+      <p><b>FLIP</b> (square): the values the FLIP paper reports for Adult at λ 4, ε 3 (its Fig. 3), computed by its
+        own evaluation code, so not the same way as the AIM points (e.g. its income AUC is 0.66; our scorer gives
+        0.90 on our reproduction of FLIP). FLIP does not report validity, impossible rows or its per-target means
+        (n/r). Hover a FLIP mark for our reproduction (fold 0, scored like AIM;
+        <code>results/flip_faithful_comparison.csv</code>). FLIP's ε is nominal and covers the VAE only; AIM's ε
+        covers the whole release.</p>
+      <p><b>BER</b>: balanced error of a classifier predicting the table's own sex column from its other columns (0.5 = no link).
+        <b>A-NCB</b>: the FLIP paper's cluster-balance score with its own-sex adversary (higher = groups mix in
+        the clusters). It jumps once the sex label stops being predictable, so it mostly repeats BER; RESULTS.md
+        leaves it out of the verdict.
+        <b>Income AUC</b>: an income classifier trained on the table, tested on real held-out people.
+        <b>Parity / EO gap</b>: FLIP's protocol, a LightGBM income model trained on the table and tested on real
+        held-out people: its gap between men and women in &gt;50K predictions at threshold 0.5 (all / true earners,
+        the TPR gap; FLIP does not define its EO number). <b>Eq. 14 / Eq. 15</b>: the same, with every other
+        attribute as the target in turn: the largest gap over classes in the share predicted (categorical), and the
+        distance between the sexes' predicted values over the real sd (numeric), averaged over targets.
+        <b>Validity</b>: share of rows passing rules learned from the real data. <b>Impossible rows</b>: rows with a
+        sex–category pair absent from real data (e.g. a male wife).</p>
+      <p><b>Other datasets</b> (ACS-I, Dutch): only τ 1 and plain AIM were run (<code>aim_fair/run_datasets.sh</code>,
+        <code>results/datasets_summary.csv</code>), so there is no τ curve and no FLIP mark (the FLIP paper reports no
+        results for them, and our FLIP reproduction covers Adult only). The scorecard asks four questions instead:
+        sex guessed right = 1 − BER (50% = a coin flip, ✓ at 52% or less); the outcome's parity gap and the mean
+        Eq. 14 gap over the category attributes (✓ if smaller than plain AIM's); the cost in AUC (✓ if under 0.03). The
+        downstream numbers follow FLIP's protocol (<code>aim_fair/flip_protocol.py --dataset D</code>), as on Adult, but only their means were
+        saved, so they have no ± sd; the strip's Δ is the difference of the fold means, not paired. Dutch's target is
+        occupation, so its AUC and gaps are about occupation, and it has no numeric columns (no Eq. 15). Without their
+        fold-0 data on disk only this tab is shown.</p>
+      <p><b>Which attributes got fairer</b>: FLIP's protocol attribute by attribute: each attribute in turn is predicted
+        by a LightGBM model trained on the table and tested on real held-out people, and the bar is the gap between the
+        sexes' predictions (Eq. 14 for category attributes, W1 / real sd for number attributes). Coded column names are
+        shown in words (e.g. SCHL = education); the table has the codes and the real data's gaps. Lower means the table teaches less of a sex
+        difference about that attribute. Mean of 3 refits × 3 folds; the hybrid is τ 1 (for Adult, the τ grid's τ-1 tables).
+        From <code>results/flip_protocol_targets*.csv</code>.</p>
+    </details>
+  </section>
+
+  <!-- FLIP-faithful: every source under FLIP's own protocol -->
+  <section role="tabpanel" id="p-flip" aria-labelledby="tab-flip" hidden>
+    <div class="panel">
+      <h2>FLIP-faithful comparison</h2>
+      <p class="note">UCI Adult, sex protected, ε 3, fold 0. Our two sources are scored identically, by FLIP's own
+        protocol where the paper defines one. The best value in each row is in bold.</p>
+      <p class="note" id="ff-match"></p>
+      <div id="ff-tbl" style="overflow-x:auto"></div>
+      <p class="note" id="ff-none" style="display:none"></p>
+    </div>
+    <details class="how"><summary>How this works</summary>
+      <p><b>AIM hybrid</b>: the mean of 3 refits at τ 1 from fold 0's saved ε-3 measurements: the τ grid's own tables
+        (<code>aimfinal_tau1_e3_f0</code>), so this column equals the scorecard's fold-0 point at τ 1, metric for
+        metric; the line above checks it. <b>FLIP reproduction</b>: FLIP as published, λ 4, nominal ε 3 (VAE only),
+        fold 0. <b>FLIP paper</b>: read off the paper's Fig. 3 (Adult, λ 4, ε 3), computed by its own code, so
+        indicative only; n/r = not reported.</p>
+      <p>BER, A-NCB, tstr, AUC, realism, validity and impossible rows are from <code>run_adult_flip.py --score-csv</code>.
+        The downstream rows follow FLIP Sections 5.3 and 6.5 (<code>aim_fair/flip_protocol.py</code>): LightGBM trained
+        on the table, predicting real test people. *FLIP does not define its equalized-odds number; ours is the TPR gap
+        (equal opportunity); <code>results/flip_protocol_income.csv</code> has the other candidates.
+        Epsilon-identifiability measures closeness to real rows, not leakage. From
+        <code>results/flip_faithful_comparison.csv</code> (<code>aim_fair/flip_faithful_chart.py</code>).</p>
+    </details>
+  </section>
+
+  <!-- Leakage: per-column simulation -->
+  <section role="tabpanel" id="p-leak" aria-labelledby="tab-leak" hidden>
+    <div class="panel">
+      <h2>Which columns leak <span class="sens"></span>?</h2>
+      <p class="note">Gap between the two groups' distribution of each column (TV); the second axis row is the best
+        balanced error from that column alone (0.5 = no leak). Click a row.</p>
+      <div class="legend"><span><span class="sw" style="background:var(--bar-real)"></span>real data</span>
+        <span><span class="sw" style="background:var(--bar)"></span>simulated release at ε, τ</span>
+        <span><span class="badge">PROXY</span> has levels ≥ 95% one group</span></div>
+      <svg id="rank"></svg>
+    </div>
+    <div class="panel">
+      <h2 id="htitle"></h2>
+      <p class="readout" id="hread"></p>
+      <div class="legend"><span><span class="sw" style="background:var(--g0)"></span><span class="g0"></span>, release</span>
+        <span><span class="sw" style="background:var(--g1)"></span><span class="g1"></span>, release</span>
+        <span><span class="tick"></span>real data</span>
+        <span id="cpleg" style="display:none"><span class="dash"></span>actual AIM release</span></div>
+      <svg id="hist"></svg>
+      <details><summary>Show as table</summary><div id="tbl"></div></details>
+    </div>
+    <details class="how"><summary>How this works</summary>
+      <p>The sliders drive a simulation in the browser, not a new release: each [<span class="sens"></span> × column]
+        count table gets Gaussian noise with an equal share of the zCDP budget (δ 1e-5), then each group's
+        distribution is moved τ of the way to the pooled one with the transport plans of
+        <code>aim_fair/fair_aim.py</code>. The column's overall distribution stays the same, so τ costs no
+        distortion. It covers single columns only (no model fit, masking or rules), and real AIM's noise is
+        larger. The buttons <i>AIM plain / hybrid</i> jump to ε 3 and overlay the actual releases (dashed).</p>
+      <p><span id="noise"></span> The page holds exact counts of the real training fold: it is not a DP release.</p>
+    </details>
+  </section>
+
+  <!-- Before vs after: real data vs the actual hybrid release -->
+  <section role="tabpanel" id="p-ba" aria-labelledby="tab-ba" hidden>
+    <div class="panel" id="ba">
+      <h2>Real data vs the AIM hybrid release</h2>
+      <p class="note" id="ba-sub"></p>
+      <div id="ba-body">
+        <h3>Leakage through all columns (0.5 = no leak)</h3>
+        <div id="ba-tbl"></div>
+        <h3>Per column: TV between the groups</h3>
+        <div class="legend"><span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2"/></svg>real data</span>
+          <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2" stroke-dasharray="2.5 2"/></svg>real, proxy levels merged</span>
+          <span><svg width="14" height="14" style="display:inline;vertical-align:-2px"><circle cx="7" cy="7" r="5" fill="var(--ink)"/></svg>AIM hybrid release</span></div>
+        <svg id="ba-rank"></svg>
+        <h3 id="ba-htitle"></h3>
+        <div class="legend"><span><span class="sw" style="background:var(--g0)"></span><span class="g0"></span></span>
+          <span><span class="sw" style="background:var(--g1)"></span><span class="g1"></span></span></div>
+        <div class="pair">
+          <div><p class="readout">Real data</p><svg id="ba-real"></svg></div>
+          <div><p class="readout">AIM hybrid release</p><svg id="ba-hyb"></svg></div>
+        </div>
+        <details><summary>Show as table</summary><div id="ba-htbl"></div></details>
+      </div>
+      <p class="note" id="ba-none" style="display:none"></p>
+    </div>
+    <details class="how"><summary>How this works</summary>
+      <p>Not simulated: the actual release against the real training rows it was made from; the sliders do not
+        change this tab. <b>Balanced error</b>: the scorer's classifier (<code>paper_metrics.py</code>) predicts the
+        table's own sex column from all other columns (3-fold, mean of 10 seeds). <b>Folded tstr</b>: trained on the
+        table, tested on real held-out people, folded as 0.5 − |BER − 0.5|. The middle mark in the per-column chart
+        is the real data with the levels the hybrid merged, which separates masking from repair.</p>
+    </details>
+  </section>
+
+  <!-- Model graph: the marginals AIM measured -->
+  <section role="tabpanel" id="p-graph" aria-labelledby="tab-graph" hidden>
+    <div class="panel">
+      <h2>Which column pairs AIM measured</h2>
+      <p class="note" id="g-sub"></p>
+      <div id="g-body">
+        <div class="gstep">
+          <label for="g-k" class="readout">Rounds shown: <b id="g-kv"></b></label>
+          <input id="g-k" type="range" min="1" step="1">
+          <button id="g-play" title="Step through AIM's picks in order">Play</button>
+        </div>
+        <div class="legend"><span><span class="tick" style="border-color:var(--g1)"></span>pair with <span class="sens"></span></span>
+          <span><span class="tick" style="border-color:var(--ink-3)"></span>other pair (darker = picked earlier, thicker = measured again)</span>
+          <span><span class="tick" style="border-top-width:3px"></span>latest pick shown</span></div>
+        <div class="pair">
+          <div style="flex:3 1 340px"><svg id="graph"></svg></div>
+          <div style="flex:2 1 220px"><p class="readout" id="g-read"></p><div id="g-tbl"></div></div>
+        </div>
+      </div>
+      <p class="note" id="g-none" style="display:none"></p>
+    </div>
+    <details class="how"><summary>How this works</summary>
+      <p>AIM first measures every column's 1-way counts, then in each round picks the 2-way table its current
+        model gets most wrong (exponential mechanism) and measures it with Gaussian noise. Private-PGM fits
+        its graphical model to exactly these tables, so a pair that was never measured is only linked
+        through other columns. This is one saved run (fold 0), read from its noisy measurements
+        (<code>aim_fair/run_aim.py</code>); the sliders above do not change it. Node size: number of
+        levels or bins. Pairs with <span class="sens"></span> are where the release can learn
+        <span class="sens"></span>'s link to other columns; the hybrid's repair moves these tables before the
+        final fit.</p>
+    </details>
+  </section>
+</main>
+<div id="tip"></div>
+<script>
+const DATA = {"datasets": {"adult": {"label": "UCI Adult", "sensitive": "sex", "target": "income", "groups": ["Male", "Female"], "n": 30148, "columns": [{"name": "age", "ordinal": true, "labels": ["17\u201321", "22\u201326", "27\u201331", "32\u201336", "37\u201341", "42\u201346", "47\u201351", "52\u201356", "57\u201361", "62\u201366", "67\u201371", "72\u201376", "77\u201390"], "proxy": [], "real": [[1383, 2275, 2688, 2912, 2826, 2533, 2081, 1456, 1135, 582, 269, 137, 109], [1250, 1495, 1296, 1202, 1141, 1009, 811, 588, 438, 278, 128, 82, 44]], "checkpoints": {"plain": [[1364, 2292, 2643, 2938, 2843, 2513, 2065, 1457, 1159, 606, 265, 126, 106], [1291, 1541, 1269, 1181, 1158, 981, 842, 578, 424, 255, 121, 76, 54]], "hybrid": [[1814, 2529, 2668, 2819, 2712, 2396, 1935, 1377, 1069, 561, 258, 138, 109], [840, 1252, 1334, 1298, 1274, 1155, 937, 662, 462, 295, 137, 69, 48]]}}, {"name": "fnlwgt", "ordinal": true, "labels": ["10k\u201349k", "50k\u201374k", "75k\u201399k", "100k\u2013124k", "125k\u2013149k", "150k\u2013174k", "175k\u2013199k", "200k\u2013224k", "225k\u2013249k", "250k\u2013299k", "300k\u2013349k", "350k\u2013399k", "400k\u2013499k", "500k\u20131599k"], "proxy": [], "real": [[1419, 967, 1144, 2154, 1751, 2165, 2791, 1908, 1391, 1780, 1351, 724, 605, 236], [685, 444, 652, 1028, 914, 1145, 1404, 942, 569, 790, 544, 324, 232, 89]], "checkpoints": {"plain": [[1447, 950, 1147, 2149, 1758, 2177, 2798, 1919, 1393, 1755, 1366, 719, 554, 245], [673, 429, 672, 1021, 893, 1141, 1357, 980, 545, 791, 562, 356, 257, 94]], "hybrid": [[1406, 946, 1196, 2195, 1791, 2265, 2811, 1938, 1313, 1731, 1291, 701, 582, 219], [695, 442, 607, 1008, 883, 1048, 1389, 913, 652, 825, 598, 351, 254, 98]]}}, {"name": "education-num", "ordinal": true, "labels": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"], "proxy": [], "real": [[42, 103, 232, 420, 331, 556, 720, 252, 6699, 4125, 848, 644, 3520, 1153, 433, 308], [14, 41, 75, 122, 135, 269, 374, 125, 3055, 2456, 441, 394, 1586, 525, 79, 71]], "checkpoints": {"plain": [[45, 101, 226, 439, 304, 566, 681, 233, 6675, 4171, 896, 667, 3498, 1169, 425, 281], [22, 51, 91, 145, 125, 267, 408, 137, 3040, 2396, 391, 359, 1588, 531, 107, 113]], "hybrid": [[52, 92, 199, 372, 315, 567, 750, 241, 6616, 4428, 850, 702, 3449, 1138, 350, 264], [17, 55, 110, 165, 153, 252, 351, 119, 3127, 2135, 431, 338, 1662, 559, 172, 117]]}}, {"name": "capital-gain", "ordinal": true, "labels": ["0", "1\u20132999", "3000\u20134999", "5000\u20137499", "7500\u20139999", "10000\u201314999", "15000\u201324999", "25000\u201399999"], "proxy": [], "real": [[18417, 260, 429, 418, 275, 82, 332, 173], [9228, 156, 127, 79, 55, 45, 45, 27]], "checkpoints": {"plain": [[18394, 338, 257, 524, 274, 102, 291, 197], [9211, 141, 83, 141, 57, 27, 62, 49]], "hybrid": [[18686, 328, 244, 436, 216, 77, 232, 166], [8946, 163, 99, 204, 117, 41, 109, 84]]}}, {"name": "capital-loss", "ordinal": true, "labels": ["0", "1\u20131499", "1500\u20131799", "1800\u20131999", "2000\u20132299", "2300\u20134399"], "proxy": [], "real": [[19303, 77, 233, 562, 107, 104], [9424, 57, 123, 88, 31, 39]], "checkpoints": {"plain": [[19335, 270, 48, 456, 36, 232], [9374, 148, 29, 154, 6, 60]], "hybrid": [[19435, 286, 60, 392, 26, 186], [9287, 124, 22, 209, 19, 102]]}}, {"name": "hours-per-week", "ordinal": true, "labels": ["1\u201319", "20\u201329", "30\u201334", "35\u201339", "40", "41\u201344", "45\u201349", "50\u201354", "55\u201359", "60\u201399"], "proxy": [], "real": [[596, 949, 661, 991, 9672, 437, 1899, 2388, 688, 2105], [715, 1127, 662, 1050, 4551, 157, 505, 505, 127, 363]], "checkpoints": {"plain": [[610, 1032, 663, 939, 9707, 425, 1872, 2386, 679, 2064], [696, 1068, 650, 1064, 4551, 160, 523, 486, 179, 394]], "hybrid": [[883, 1353, 865, 1378, 9588, 390, 1627, 2012, 572, 1717], [436, 747, 434, 658, 4628, 205, 774, 877, 264, 740]]}}, {"name": "income", "ordinal": false, "labels": ["\u226450K", ">50K"], "proxy": [], "real": [[14031, 6355], [8648, 1114]], "checkpoints": {"plain": [[14066, 6311], [8644, 1127]], "hybrid": [[15341, 5044], [7360, 2403]]}}, {"name": "workclass", "ordinal": false, "labels": ["Private", "Self-emp-not-inc", "Local-gov", "State-gov", "Self-emp-inc", "Federal-gov", "Without-pay"], "proxy": [], "real": [[14533, 2153, 1258, 808, 985, 640, 9], [7618, 394, 819, 515, 136, 278, 2]], "checkpoints": {"plain": [[14521, 2178, 1261, 759, 977, 658, 23], [7575, 364, 845, 549, 137, 291, 10]], "hybrid": [[15007, 1696, 1356, 912, 743, 656, 15], [7166, 845, 694, 405, 348, 296, 9]]}}, {"name": "marital-status", "ordinal": false, "labels": ["Married-civ-spouse", "Never-married", "Divorced", "Separated", "Widowed", "Married-spouse-absent", "Married-AF-spouse"], "proxy": [], "real": [[12619, 5382, 1661, 352, 163, 198, 11], [1461, 4348, 2487, 539, 717, 195, 15]], "checkpoints": {"plain": [[12627, 5376, 1686, 298, 204, 166, 20], [1427, 4372, 2473, 557, 690, 212, 40]], "hybrid": [[9434, 6567, 2998, 568, 500, 265, 53], [4448, 3158, 1462, 296, 238, 134, 27]]}}, {"name": "occupation", "ordinal": false, "labels": ["Prof-specialty", "Exec-managerial", "Craft-repair", "Sales", "Adm-clerical", "Other-service", "Machine-op-inspct", "Transport-moving", "Handlers-cleaners", "Farming-fishing", "Other"], "proxy": [], "real": [[2558, 2886, 3804, 2335, 1209, 1405, 1426, 1446, 1180, 942, 1195], [1492, 1140, 215, 1300, 2422, 1765, 529, 78, 174, 57, 590]], "checkpoints": {"plain": [[2607, 2895, 3752, 2361, 1239, 1411, 1439, 1380, 1144, 905, 1244], [1451, 1126, 251, 1254, 2392, 1755, 523, 142, 229, 104, 544]], "hybrid": [[2733, 2701, 2719, 2428, 2442, 2143, 1320, 1058, 949, 714, 1178], [1326, 1326, 1283, 1200, 1186, 1024, 637, 461, 424, 292, 604]]}}, {"name": "relationship", "ordinal": false, "labels": ["Husband", "Not-in-family", "Own-child", "Unmarried", "Wife", "Other-relative", "MASK"], "proxy": [{"level": "Husband", "group": "Male", "purity": 1.0, "support": 0.4148}, {"level": "Wife", "group": "Female", "purity": 0.9993, "support": 0.0457}], "real": [[12504, 4170, 2453, 777, 1, 481, 0], [0, 3571, 1972, 2416, 1377, 426, 0]], "checkpoints": {"plain": [[12389, 4159, 2440, 788, 130, 471, 0], [124, 3567, 1987, 2401, 1263, 429, 0]], "hybrid": [[0, 5220, 3021, 1939, 0, 709, 9496], [0, 2519, 1415, 1007, 0, 334, 4488]]}, "real_masked": [[0, 4170, 2453, 777, 0, 481, 12505], [0, 3571, 1972, 2416, 0, 426, 1377]]}, {"name": "race", "ordinal": false, "labels": ["White", "Black", "Asian-Pac-Islander", "Amer-Indian-Eskimo", "Other"], "proxy": [], "real": [[18032, 1441, 583, 172, 158], [7899, 1371, 292, 109, 91]], "checkpoints": {"plain": [[18028, 1424, 575, 184, 166], [7874, 1387, 287, 132, 91]], "hybrid": [[17510, 1904, 587, 208, 176], [8386, 907, 275, 108, 87]]}}, {"name": "native-country", "ordinal": false, "labels": ["United-States", "Mexico", "Philippines", "Germany", "Puerto-Rico", "Canada", "India", "El-Salvador", "Cuba", "England", "Other"], "proxy": [], "real": [[18596, 489, 108, 80, 67, 74, 84, 60, 53, 47, 728], [8937, 123, 78, 59, 45, 36, 12, 30, 35, 28, 379]], "checkpoints": {"plain": [[18589, 442, 124, 73, 51, 62, 41, 41, 55, 50, 849], [8896, 179, 59, 39, 23, 31, 19, 25, 29, 15, 456]], "hybrid": [[18588, 416, 130, 80, 57, 64, 43, 47, 59, 47, 854], [8898, 190, 54, 33, 23, 26, 18, 21, 24, 17, 459]]}}], "checkpoints": {"plain": {"eps": 3, "tau": 0, "file": "aimfinalplain_e3_f0_r0_synthetic.csv"}, "hybrid": {"eps": 3, "tau": 1, "file": "aimfinal_tau1_e3_f0_r0_synthetic.csv"}}, "before_after": {"file": "aimfinal_tau1_e3_f0_r0_synthetic.csv", "eps": 3, "tau": 1, "merged": {"relationship": ["Husband", "Wife"]}, "all_columns": [{"label": "Real data", "ber": 0.1389, "tstr": 0.1349}, {"label": "Real data, proxy levels merged", "ber": 0.1944, "tstr": 0.192}, {"label": "AIM hybrid release", "ber": 0.5049, "tstr": 0.4028}, {"label": "Plain AIM release (reference)", "ber": 0.1648, "tstr": 0.1388}]}, "scorecard": {"eps": 3, "rows": [{"source": "AIM hybrid", "tau": 0.0, "ber": 0.2189, "ancb": 0.0343, "auc": 0.9041, "income_parity": 0.1951, "eo_gap": 0.1599, "sp_cat": 0.1948, "w1_num": 0.1204, "validity": 0.921, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 0.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.0, "ber": 0.2161, "ancb": 0.0589, "auc": 0.897, "income_parity": 0.1968, "eo_gap": 0.1584, "sp_cat": 0.1993, "w1_num": 0.1231, "validity": 0.924, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 1.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.0, "ber": 0.216, "ancb": 0.0544, "auc": 0.9053, "income_parity": 0.1955, "eo_gap": 0.1962, "sp_cat": 0.196, "w1_num": 0.1285, "validity": 0.9294, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 2.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.0, "ber": 0.217, "ancb": 0.0492, "auc": 0.9021, "income_parity": 0.1958, "eo_gap": 0.1715, "sp_cat": 0.1967, "w1_num": 0.124, "validity": 0.9248, "impossible": 0.0, "ber_sd": 0.0016, "ancb_sd": 0.0131, "auc_sd": 0.0045, "income_parity_sd": 0.0009, "eo_gap_sd": 0.0214, "sp_cat_sd": 0.0023, "w1_num_sd": 0.0041, "validity_sd": 0.0043, "impossible_sd": 0.0, "fold": null, "folds": 3, "refits": 3, "runs": "aimfinal_tau0_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.25, "ber": 0.2792, "ancb": 0.0509, "auc": 0.904, "income_parity": 0.1729, "eo_gap": 0.1409, "sp_cat": 0.1904, "w1_num": 0.1192, "validity": 0.912, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 0.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.25_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.25, "ber": 0.2792, "ancb": 0.0811, "auc": 0.8952, "income_parity": 0.1774, "eo_gap": 0.1485, "sp_cat": 0.1935, "w1_num": 0.1203, "validity": 0.9141, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 1.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.25_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.25, "ber": 0.2782, "ancb": 0.0776, "auc": 0.9027, "income_parity": 0.1791, "eo_gap": 0.1862, "sp_cat": 0.1905, "w1_num": 0.1265, "validity": 0.9183, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 2.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.25_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.25, "ber": 0.2788, "ancb": 0.0699, "auc": 0.9006, "income_parity": 0.1765, "eo_gap": 0.1585, "sp_cat": 0.1915, "w1_num": 0.122, "validity": 0.9148, "impossible": 0.0, "ber_sd": 0.0006, "ancb_sd": 0.0165, "auc_sd": 0.0047, "income_parity_sd": 0.0032, "eo_gap_sd": 0.0243, "sp_cat_sd": 0.0017, "w1_num_sd": 0.0039, "validity_sd": 0.0032, "impossible_sd": 0.0, "fold": null, "folds": 3, "refits": 3, "runs": "aimfinal_tau0.25_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.5, "ber": 0.3472, "ancb": 0.0892, "auc": 0.9025, "income_parity": 0.1598, "eo_gap": 0.1343, "sp_cat": 0.1858, "w1_num": 0.1114, "validity": 0.9027, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 0.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.5_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.5, "ber": 0.3478, "ancb": 0.1121, "auc": 0.8939, "income_parity": 0.159, "eo_gap": 0.156, "sp_cat": 0.1918, "w1_num": 0.1195, "validity": 0.9043, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 1.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.5_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.5, "ber": 0.3474, "ancb": 0.1156, "auc": 0.8984, "income_parity": 0.1614, "eo_gap": 0.1603, "sp_cat": 0.184, "w1_num": 0.122, "validity": 0.9072, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 2.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.5_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.5, "ber": 0.3474, "ancb": 0.1056, "auc": 0.8983, "income_parity": 0.1601, "eo_gap": 0.1502, "sp_cat": 0.1872, "w1_num": 0.1176, "validity": 0.9047, "impossible": 0.0, "ber_sd": 0.0003, "ancb_sd": 0.0143, "auc_sd": 0.0043, "income_parity_sd": 0.0012, "eo_gap_sd": 0.0139, "sp_cat_sd": 0.0041, "w1_num_sd": 0.0055, "validity_sd": 0.0023, "impossible_sd": 0.0, "fold": null, "folds": 3, "refits": 3, "runs": "aimfinal_tau0.5_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.75, "ber": 0.4233, "ancb": 0.1513, "auc": 0.8988, "income_parity": 0.1394, "eo_gap": 0.1223, "sp_cat": 0.173, "w1_num": 0.1071, "validity": 0.8976, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 0.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.75_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.75, "ber": 0.4254, "ancb": 0.1672, "auc": 0.8899, "income_parity": 0.1448, "eo_gap": 0.1533, "sp_cat": 0.1805, "w1_num": 0.1135, "validity": 0.8942, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 1.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.75_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.75, "ber": 0.4262, "ancb": 0.1702, "auc": 0.8924, "income_parity": 0.1432, "eo_gap": 0.1556, "sp_cat": 0.1742, "w1_num": 0.1133, "validity": 0.898, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 2.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau0.75_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 0.75, "ber": 0.4249, "ancb": 0.1629, "auc": 0.8937, "income_parity": 0.1425, "eo_gap": 0.1437, "sp_cat": 0.1759, "w1_num": 0.1113, "validity": 0.8966, "impossible": 0.0, "ber_sd": 0.0015, "ancb_sd": 0.0102, "auc_sd": 0.0046, "income_parity_sd": 0.0028, "eo_gap_sd": 0.0186, "sp_cat_sd": 0.004, "w1_num_sd": 0.0037, "validity_sd": 0.0021, "impossible_sd": 0.0, "fold": null, "folds": 3, "refits": 3, "runs": "aimfinal_tau0.75_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 1.0, "ber": 0.5052, "ancb": 0.9014, "auc": 0.8964, "income_parity": 0.1235, "eo_gap": 0.0938, "sp_cat": 0.1635, "w1_num": 0.1014, "validity": 0.8891, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 0.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau1_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 1.0, "ber": 0.5012, "ancb": 0.9244, "auc": 0.88, "income_parity": 0.1233, "eo_gap": 0.1326, "sp_cat": 0.1672, "w1_num": 0.1122, "validity": 0.8854, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 1.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau1_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 1.0, "ber": 0.5065, "ancb": 0.9192, "auc": 0.8848, "income_parity": 0.1213, "eo_gap": 0.144, "sp_cat": 0.1613, "w1_num": 0.1091, "validity": 0.8912, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 2.0, "folds": 1, "refits": 3, "runs": "aimfinal_tau1_e3_f{f}_r{r}"}, {"source": "AIM hybrid", "tau": 1.0, "ber": 0.5043, "ancb": 0.915, "auc": 0.8871, "income_parity": 0.1227, "eo_gap": 0.1235, "sp_cat": 0.164, "w1_num": 0.1075, "validity": 0.8886, "impossible": 0.0, "ber_sd": 0.0027, "ancb_sd": 0.012, "auc_sd": 0.0084, "income_parity_sd": 0.0012, "eo_gap_sd": 0.0263, "sp_cat_sd": 0.003, "w1_num_sd": 0.0055, "validity_sd": 0.0029, "impossible_sd": 0.0, "fold": null, "folds": 3, "refits": 3, "runs": "aimfinal_tau1_e3_f{f}_r{r}"}, {"source": "Plain AIM", "tau": null, "ber": 0.1652, "ancb": 0.0938, "auc": 0.9061, "income_parity": 0.1878, "eo_gap": 0.1392, "sp_cat": 0.2057, "w1_num": 0.1373, "validity": 0.8955, "impossible": 0.0085, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 0.0, "folds": 1, "refits": 3, "runs": "aimfinalplain_e3_f{f}_r{r}"}, {"source": "Plain AIM", "tau": null, "ber": 0.1608, "ancb": 0.1111, "auc": 0.8965, "income_parity": 0.1996, "eo_gap": 0.1734, "sp_cat": 0.2116, "w1_num": 0.1399, "validity": 0.9009, "impossible": 0.0079, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 1.0, "folds": 1, "refits": 3, "runs": "aimfinalplain_e3_f{f}_r{r}"}, {"source": "Plain AIM", "tau": null, "ber": 0.1594, "ancb": 0.1115, "auc": 0.9059, "income_parity": 0.1953, "eo_gap": 0.1809, "sp_cat": 0.2111, "w1_num": 0.1445, "validity": 0.9081, "impossible": 0.0071, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 2.0, "folds": 1, "refits": 3, "runs": "aimfinalplain_e3_f{f}_r{r}"}, {"source": "Plain AIM", "tau": null, "ber": 0.1618, "ancb": 0.1055, "auc": 0.9028, "income_parity": 0.1942, "eo_gap": 0.1645, "sp_cat": 0.2095, "w1_num": 0.1406, "validity": 0.9015, "impossible": 0.0078, "ber_sd": 0.003, "ancb_sd": 0.0101, "auc_sd": 0.0055, "income_parity_sd": 0.006, "eo_gap_sd": 0.0222, "sp_cat_sd": 0.0033, "w1_num_sd": 0.0037, "validity_sd": 0.0064, "impossible_sd": 0.0007, "fold": null, "folds": 3, "refits": 3, "runs": "aimfinalplain_e3_f{f}_r{r}"}, {"source": "Real data", "tau": null, "ber": 0.139, "ancb": 0.1911, "auc": 0.9273, "income_parity": 0.1789, "eo_gap": 0.0543, "sp_cat": 0.2145, "w1_num": 0.1551, "validity": 0.9822, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 0.0, "folds": 1, "refits": 1, "runs": "fold{f}_train"}, {"source": "Real data", "tau": null, "ber": 0.1409, "ancb": 0.1575, "auc": 0.9234, "income_parity": 0.1877, "eo_gap": 0.0989, "sp_cat": 0.2106, "w1_num": 0.1573, "validity": 0.9826, "impossible": 0.0, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 1.0, "folds": 1, "refits": 1, "runs": "fold{f}_train"}, {"source": "Real data", "tau": null, "ber": 0.1423, "ancb": 0.1938, "auc": 0.9267, "income_parity": 0.1854, "eo_gap": 0.0871, "sp_cat": 0.2031, "w1_num": 0.1593, "validity": 0.9833, "impossible": 0.0001, "ber_sd": null, "ancb_sd": null, "auc_sd": null, "income_parity_sd": null, "eo_gap_sd": null, "sp_cat_sd": null, "w1_num_sd": null, "validity_sd": null, "impossible_sd": null, "fold": 2.0, "folds": 1, "refits": 1, "runs": "fold{f}_train"}, {"source": "Real data", "tau": null, "ber": 0.1407, "ancb": 0.1808, "auc": 0.9258, "income_parity": 0.184, "eo_gap": 0.0801, "sp_cat": 0.2094, "w1_num": 0.1572, "validity": 0.9827, "impossible": 0.0, "ber_sd": 0.0017, "ancb_sd": 0.0203, "auc_sd": 0.0021, "income_parity_sd": 0.0045, "eo_gap_sd": 0.0231, "sp_cat_sd": 0.0058, "w1_num_sd": 0.0021, "validity_sd": 0.0006, "impossible_sd": 0.0, "fold": null, "folds": 3, "refits": 1, "runs": "fold{f}_train"}], "baseline": {"label": "FLIP paper", "note": "\u03bb 4, nominal \u03b5 3, Fig. 3", "values": {"ber": 0.49, "ancb": 0.91, "auc": 0.66, "alpha": 0.4, "impossible": null, "income_parity": 0.12, "eo_gap": 0.26, "sp_cat": null, "w1_num": null, "validity": null, "tstr": null, "beta": 0.21, "eps_id": 0.09}, "repro": {"ber": 0.1615, "ancb": 0.2707, "auc": 0.902, "alpha": 0.8998, "impossible": 0.425103, "income_parity": 0.2305, "eo_gap": 0.0728, "sp_cat": 0.2184, "w1_num": 0.1469, "validity": 0.5589, "tstr": 0.1683, "beta": 0.1862, "eps_id": 0.136}}, "faithful": {"rows": [{"key": "ber", "label": "Sex-inference BER (0.5 = sex unrecoverable)", "better": "higher", "paper": 0.49, "repro": 0.1615, "aim": 0.5052}, {"key": "ancb", "label": "A-NCB, paper's version (1 = full independence)", "better": "higher", "paper": 0.91, "repro": 0.2707, "aim": 0.9014}, {"key": "auc", "label": "Income AUC on real people (utility)", "better": "higher", "paper": 0.66, "repro": 0.902, "aim": 0.8964}, {"key": "alpha", "label": "Alpha-precision (realism)", "better": "higher", "paper": 0.4, "repro": 0.8998, "aim": 0.9827}, {"key": "impossible", "label": "Impossible rows (%) (e.g. male wives)", "better": "lower", "paper": null, "repro": 0.425103, "aim": 0.0}, {"key": "income_parity", "label": "Income parity (threshold 0.5)", "better": "lower", "paper": 0.12, "repro": 0.2305, "aim": 0.1235}, {"key": "eo_gap", "label": "Income EO gap* (threshold 0.5)", "better": "lower", "paper": 0.26, "repro": 0.0728, "aim": 0.0938}, {"key": "sp_cat", "label": "Mean parity, all categorical targets (FLIP Eq. 14)", "better": "lower", "paper": null, "repro": 0.2184, "aim": 0.1636}, {"key": "w1_num", "label": "Mean W1/sd, all numeric targets (FLIP Eq. 15)", "better": "lower", "paper": null, "repro": 0.1469, "aim": 0.1014}, {"key": "validity", "label": "Validity (rule-consistent rows)", "better": "higher", "paper": null, "repro": 0.5589, "aim": 0.8891}, {"key": "tstr", "label": "tstr sex BER (folded; 0.5 best)", "better": "higher", "paper": null, "repro": 0.1683, "aim": 0.3845}, {"key": "beta", "label": "Beta-recall", "better": "higher", "paper": 0.21, "repro": 0.1862, "aim": 0.3864}, {"key": "eps_id", "label": "Epsilon-identifiability", "better": "lower", "paper": 0.09, "repro": 0.136, "aim": 0.3535}], "check": [{"key": "ber", "faithful": 0.5052, "scorecard": 0.5052, "ok": true}, {"key": "ancb", "faithful": 0.9014, "scorecard": 0.9014, "ok": true}, {"key": "auc", "faithful": 0.8964, "scorecard": 0.8964, "ok": true}, {"key": "impossible", "faithful": 0.0, "scorecard": 0.0, "ok": true}, {"key": "income_parity", "faithful": 0.1235, "scorecard": 0.1235, "ok": true}, {"key": "eo_gap", "faithful": 0.0938, "scorecard": 0.0938, "ok": true}, {"key": "sp_cat", "faithful": 0.1636, "scorecard": 0.1635, "ok": true}, {"key": "w1_num", "faithful": 0.1014, "scorecard": 0.1014, "ok": true}, {"key": "validity", "faithful": 0.8891, "scorecard": 0.8891, "ok": true}]}, "targets": [{"target": "age", "metric": "W1", "Real data": 0.2325, "Plain AIM": 0.2079, "AIM hybrid": 0.2313}, {"target": "fnlwgt", "metric": "W1", "Real data": 0.0234, "Plain AIM": 0.0181, "AIM hybrid": 0.0294}, {"target": "education-num", "metric": "W1", "Real data": 0.0815, "Plain AIM": 0.0798, "AIM hybrid": 0.0467}, {"target": "capital-gain", "metric": "W1", "Real data": 0.1089, "Plain AIM": 0.0901, "AIM hybrid": 0.0758}, {"target": "capital-loss", "metric": "W1", "Real data": 0.0857, "Plain AIM": 0.0667, "AIM hybrid": 0.0472}, {"target": "hours-per-week", "metric": "W1", "Real data": 0.4114, "Plain AIM": 0.3807, "AIM hybrid": 0.2149}, {"target": "income", "metric": "SP", "Real data": 0.184, "Plain AIM": 0.1942, "AIM hybrid": 0.1227}, {"target": "workclass", "metric": "SP", "Real data": 0.0391, "Plain AIM": 0.0283, "AIM hybrid": 0.0105}, {"target": "marital-status", "metric": "SP", "Real data": 0.4675, "Plain AIM": 0.4654, "AIM hybrid": 0.4558}, {"target": "occupation", "metric": "SP", "Real data": 0.2383, "Plain AIM": 0.2812, "AIM hybrid": 0.1324}, {"target": "relationship", "metric": "SP", "Real data": 0.4926, "Plain AIM": 0.478, "AIM hybrid": 0.4192}, {"target": "race", "metric": "SP", "Real data": 0.0255, "Plain AIM": 0.0119, "AIM hybrid": 0.0029}, {"target": "native-country", "metric": "SP", "Real data": 0.0188, "Plain AIM": 0.0075, "AIM hybrid": 0.0046}]}, "model_graph": {"file": "aimfinal_e3_f0_measurements.pkl", "nodes": [{"name": "age", "size": 13, "sigma": 24.169103055933}, {"name": "fnlwgt", "size": 14, "sigma": 24.169103055933}, {"name": "education-num", "size": 16, "sigma": 24.169103055933}, {"name": "capital-gain", "size": 9, "sigma": 24.169103055933}, {"name": "capital-loss", "size": 6, "sigma": 24.169103055933}, {"name": "hours-per-week", "size": 19, "sigma": 24.169103055933}, {"name": "sex", "size": 2, "sigma": 24.169103055933}, {"name": "income", "size": 2, "sigma": 24.169103055933}, {"name": "workclass", "size": 7, "sigma": 24.169103055933}, {"name": "marital-status", "size": 7, "sigma": 24.169103055933}, {"name": "occupation", "size": 14, "sigma": 24.169103055933}, {"name": "relationship", "size": 6, "sigma": 24.169103055933}, {"name": "race", "size": 5, "sigma": 24.169103055933}, {"name": "native-country", "size": 40, "sigma": 24.169103055933}], "edges": [{"a": "marital-status", "b": "relationship", "rounds": [1], "sigma": 24.169103055933, "cells": 42}, {"a": "relationship", "b": "sex", "rounds": [2], "sigma": 24.169103055933, "cells": 12}, {"a": "age", "b": "marital-status", "rounds": [3], "sigma": 24.169103055933, "cells": 91}, {"a": "income", "b": "relationship", "rounds": [4], "sigma": 24.169103055933, "cells": 12}, {"a": "education-num", "b": "occupation", "rounds": [5, 44], "sigma": 6.04227576398325, "cells": 224}, {"a": "occupation", "b": "sex", "rounds": [6], "sigma": 24.169103055933, "cells": 28}, {"a": "education-num", "b": "income", "rounds": [7], "sigma": 24.169103055933, "cells": 32}, {"a": "occupation", "b": "workclass", "rounds": [8], "sigma": 24.169103055933, "cells": 98}, {"a": "hours-per-week", "b": "relationship", "rounds": [9, 45], "sigma": 6.04227576398325, "cells": 114}, {"a": "hours-per-week", "b": "occupation", "rounds": [10, 43], "sigma": 12.0845515279665, "cells": 266}, {"a": "age", "b": "relationship", "rounds": [11], "sigma": 24.169103055933, "cells": 78}, {"a": "capital-gain", "b": "income", "rounds": [12], "sigma": 24.169103055933, "cells": 18}, {"a": "age", "b": "workclass", "rounds": [13], "sigma": 24.169103055933, "cells": 91}, {"a": "age", "b": "income", "rounds": [14], "sigma": 24.169103055933, "cells": 26}, {"a": "education-num", "b": "relationship", "rounds": [15], "sigma": 24.169103055933, "cells": 96}, {"a": "income", "b": "occupation", "rounds": [16], "sigma": 24.169103055933, "cells": 28}, {"a": "race", "b": "sex", "rounds": [17], "sigma": 24.169103055933, "cells": 10}, {"a": "hours-per-week", "b": "income", "rounds": [18], "sigma": 24.169103055933, "cells": 38}, {"a": "sex", "b": "workclass", "rounds": [19], "sigma": 24.169103055933, "cells": 14}, {"a": "race", "b": "relationship", "rounds": [20], "sigma": 24.169103055933, "cells": 30}, {"a": "capital-loss", "b": "income", "rounds": [21], "sigma": 24.169103055933, "cells": 12}, {"a": "age", "b": "education-num", "rounds": [22, 39], "sigma": 12.0845515279665, "cells": 208}, {"a": "occupation", "b": "relationship", "rounds": [23, 49], "sigma": 6.04227576398325, "cells": 84}, {"a": "fnlwgt", "b": "race", "rounds": [24], "sigma": 24.169103055933, "cells": 70}, {"a": "marital-status", "b": "sex", "rounds": [25], "sigma": 24.169103055933, "cells": 14}, {"a": "hours-per-week", "b": "workclass", "rounds": [26, 51], "sigma": 4.313161395892379, "cells": 133}, {"a": "hours-per-week", "b": "sex", "rounds": [27], "sigma": 24.169103055933, "cells": 38}, {"a": "occupation", "b": "race", "rounds": [28], "sigma": 24.169103055933, "cells": 70}, {"a": "fnlwgt", "b": "sex", "rounds": [29], "sigma": 24.169103055933, "cells": 28}, {"a": "age", "b": "sex", "rounds": [30], "sigma": 24.169103055933, "cells": 26}, {"a": "income", "b": "workclass", "rounds": [31], "sigma": 24.169103055933, "cells": 14}, {"a": "income", "b": "sex", "rounds": [32], "sigma": 24.169103055933, "cells": 4}, {"a": "fnlwgt", "b": "income", "rounds": [33], "sigma": 24.169103055933, "cells": 28}, {"a": "marital-status", "b": "race", "rounds": [34], "sigma": 24.169103055933, "cells": 35}, {"a": "capital-gain", "b": "sex", "rounds": [35], "sigma": 24.169103055933, "cells": 18}, {"a": "age", "b": "hours-per-week", "rounds": [36], "sigma": 12.0845515279665, "cells": 247}, {"a": "age", "b": "occupation", "rounds": [37], "sigma": 12.0845515279665, "cells": 182}, {"a": "native-country", "b": "race", "rounds": [38], "sigma": 12.0845515279665, "cells": 200}, {"a": "age", "b": "fnlwgt", "rounds": [40], "sigma": 12.0845515279665, "cells": 182}, {"a": "education-num", "b": "marital-status", "rounds": [41], "sigma": 12.0845515279665, "cells": 112}, {"a": "hours-per-week", "b": "race", "rounds": [42], "sigma": 12.0845515279665, "cells": 95}, {"a": "fnlwgt", "b": "occupation", "rounds": [46], "sigma": 6.04227576398325, "cells": 196}, {"a": "fnlwgt", "b": "relationship", "rounds": [47], "sigma": 6.04227576398325, "cells": 84}, {"a": "education-num", "b": "hours-per-week", "rounds": [48], "sigma": 6.04227576398325, "cells": 304}, {"a": "education-num", "b": "workclass", "rounds": [50], "sigma": 6.04227576398325, "cells": 112}], "n_rounds": 51, "rho_total": 0.2242491682463453}}, "acs_al": {"label": "ACS-I Alabama", "sensitive": "SEX", "target": "income", "scorecard_only": true, "scorecard": {"eps": 3, "rows": [{"source": "Real data", "folds": 3, "income_parity": 0.1467, "income_parity_sd": null, "eo_gap": 0.0731, "eo_gap_sd": null, "ber": 0.2291, "ber_sd": 0.0003, "ancb": 0.8793, "ancb_sd": 0.0513, "auc": 0.8785, "auc_sd": 0.0015, "alpha": 1.0, "alpha_sd": 0.0, "beta": 0.9846, "beta_sd": 0.0062, "eps_id": 0.935, "eps_id_sd": 0.0013, "validity": 0.9901, "validity_sd": 0.0003, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.2283, "tstr_sd": 0.001, "num_w1": 0.0, "num_w1_sd": 0.0, "sp_cat": 0.0732125, "sp_cat_sd": null, "w1_num": 0.154, "w1_num_sd": null, "tau": null, "fold": null, "refits": 1}, {"source": "Plain AIM", "folds": 3, "income_parity": 0.1358, "income_parity_sd": null, "eo_gap": 0.0785, "eo_gap_sd": null, "ber": 0.2602, "ber_sd": 0.0029, "ancb": 0.786, "ancb_sd": 0.1337, "auc": 0.8635, "auc_sd": 0.0022, "alpha": 0.9873, "alpha_sd": 0.0025, "beta": 0.4625, "beta_sd": 0.001, "eps_id": 0.4347, "eps_id_sd": 0.0028, "validity": 0.9545, "validity_sd": 0.0013, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.2473, "tstr_sd": 0.0021, "num_w1": 0.0146, "num_w1_sd": 0.0024, "sp_cat": 0.0755875, "sp_cat_sd": null, "w1_num": 0.14225, "w1_num_sd": null, "tau": null, "fold": null, "refits": 3}, {"source": "AIM hybrid", "folds": 3, "income_parity": 0.1061, "income_parity_sd": null, "eo_gap": 0.0553, "eo_gap_sd": null, "ber": 0.5358, "ber_sd": 0.002, "ancb": 0.8947, "ancb_sd": 0.0313, "auc": 0.8474, "auc_sd": 0.0041, "alpha": 0.9862, "alpha_sd": 0.0005, "beta": 0.3895, "beta_sd": 0.0036, "eps_id": 0.3726, "eps_id_sd": 0.0011, "validity": 0.9351, "validity_sd": 0.0019, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.4518, "tstr_sd": 0.0186, "num_w1": 0.0116, "num_w1_sd": 0.0023, "sp_cat": 0.046975, "sp_cat_sd": null, "w1_num": 0.08705, "w1_num_sd": null, "tau": 1.0, "fold": null, "refits": 3}], "baseline": null, "faithful": null, "targets": [{"target": "AGEP", "metric": "W1", "Real data": 0.0533, "Plain AIM": 0.0435, "AIM hybrid": 0.0391}, {"target": "WKHP", "metric": "W1", "Real data": 0.2547, "Plain AIM": 0.241, "AIM hybrid": 0.135}, {"target": "income", "metric": "SP", "Real data": 0.1467, "Plain AIM": 0.1358, "AIM hybrid": 0.1061}, {"target": "COW", "metric": "SP", "Real data": 0.0465, "Plain AIM": 0.0562, "AIM hybrid": 0.0297}, {"target": "SCHL", "metric": "SP", "Real data": 0.1243, "Plain AIM": 0.1488, "AIM hybrid": 0.0854}, {"target": "MAR", "metric": "SP", "Real data": 0.037, "Plain AIM": 0.0304, "AIM hybrid": 0.0156}, {"target": "OCCP", "metric": "SP", "Real data": 0.0887, "Plain AIM": 0.095, "AIM hybrid": 0.0859}, {"target": "POBP", "metric": "SP", "Real data": 0.0091, "Plain AIM": 0.0026, "AIM hybrid": 0.0025}, {"target": "RELP", "metric": "SP", "Real data": 0.1038, "Plain AIM": 0.1272, "AIM hybrid": 0.0463}, {"target": "RAC1P", "metric": "SP", "Real data": 0.0296, "Plain AIM": 0.0087, "AIM hybrid": 0.0043}], "protocol": true}}, "acs_ut": {"label": "ACS-I Utah", "sensitive": "SEX", "target": "income", "scorecard_only": true, "scorecard": {"eps": 3, "rows": [{"source": "Real data", "folds": 3, "income_parity": 0.2475, "income_parity_sd": null, "eo_gap": 0.1321, "eo_gap_sd": null, "ber": 0.2445, "ber_sd": 0.0023, "ancb": 0.8172, "ancb_sd": 0.0203, "auc": 0.9051, "auc_sd": 0.0021, "alpha": 0.9999, "alpha_sd": 0.0, "beta": 0.9825, "beta_sd": 0.0025, "eps_id": 0.9317, "eps_id_sd": 0.0003, "validity": 0.9873, "validity_sd": 0.0014, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.2391, "tstr_sd": 0.0036, "num_w1": 0.0, "num_w1_sd": 0.0, "sp_cat": 0.08738749999999999, "sp_cat_sd": null, "w1_num": 0.2371, "w1_num_sd": null, "tau": null, "fold": null, "refits": 1}, {"source": "Plain AIM", "folds": 3, "income_parity": 0.2425, "income_parity_sd": null, "eo_gap": 0.1241, "eo_gap_sd": null, "ber": 0.2754, "ber_sd": 0.0054, "ancb": 0.6751, "ancb_sd": 0.1041, "auc": 0.8939, "auc_sd": 0.0001, "alpha": 0.9913, "alpha_sd": 0.0025, "beta": 0.4422, "beta_sd": 0.0062, "eps_id": 0.4209, "eps_id_sd": 0.0028, "validity": 0.9586, "validity_sd": 0.0039, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.2587, "tstr_sd": 0.0061, "num_w1": 0.0138, "num_w1_sd": 0.0006, "sp_cat": 0.0859125, "sp_cat_sd": null, "w1_num": 0.21845, "w1_num_sd": null, "tau": null, "fold": null, "refits": 3}, {"source": "AIM hybrid", "folds": 3, "income_parity": 0.1762, "income_parity_sd": null, "eo_gap": 0.0682, "eo_gap_sd": null, "ber": 0.5368, "ber_sd": 0.0078, "ancb": 0.8135, "ancb_sd": 0.0409, "auc": 0.8748, "auc_sd": 0.0026, "alpha": 0.9842, "alpha_sd": 0.0021, "beta": 0.3727, "beta_sd": 0.0056, "eps_id": 0.3649, "eps_id_sd": 0.0041, "validity": 0.9373, "validity_sd": 0.0054, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.4467, "tstr_sd": 0.02, "num_w1": 0.0124, "num_w1_sd": 0.0024, "sp_cat": 0.060425000000000006, "sp_cat_sd": null, "w1_num": 0.1445, "w1_num_sd": null, "tau": 1.0, "fold": null, "refits": 3}], "baseline": null, "faithful": null, "targets": [{"target": "AGEP", "metric": "W1", "Real data": 0.0916, "Plain AIM": 0.0851, "AIM hybrid": 0.0778}, {"target": "WKHP", "metric": "W1", "Real data": 0.3826, "Plain AIM": 0.3518, "AIM hybrid": 0.2112}, {"target": "income", "metric": "SP", "Real data": 0.2475, "Plain AIM": 0.2425, "AIM hybrid": 0.1762}, {"target": "COW", "metric": "SP", "Real data": 0.0596, "Plain AIM": 0.0665, "AIM hybrid": 0.0231}, {"target": "SCHL", "metric": "SP", "Real data": 0.0906, "Plain AIM": 0.0683, "AIM hybrid": 0.0494}, {"target": "MAR", "metric": "SP", "Real data": 0.0219, "Plain AIM": 0.0301, "AIM hybrid": 0.0223}, {"target": "OCCP", "metric": "SP", "Real data": 0.1628, "Plain AIM": 0.1193, "AIM hybrid": 0.122}, {"target": "POBP", "metric": "SP", "Real data": 0.0089, "Plain AIM": 0.0068, "AIM hybrid": 0.0068}, {"target": "RELP", "metric": "SP", "Real data": 0.0965, "Plain AIM": 0.1469, "AIM hybrid": 0.0767}, {"target": "RAC1P", "metric": "SP", "Real data": 0.0113, "Plain AIM": 0.0069, "AIM hybrid": 0.0069}], "protocol": true}}, "dutch": {"label": "Dutch census", "sensitive": "sex", "target": "occupation", "scorecard_only": true, "scorecard": {"eps": 3, "rows": [{"source": "Real data", "folds": 3, "income_parity": 0.0761, "income_parity_sd": null, "eo_gap": 0.0301, "eo_gap_sd": null, "ber": 0.3961, "ber_sd": 0.0018, "ancb": 0.9207, "ancb_sd": 0.0302, "auc": 0.8286, "auc_sd": 0.0038, "alpha": 0.9999, "alpha_sd": 0.0, "beta": 0.9999, "beta_sd": 0.0, "eps_id": 1.0, "eps_id_sd": 0.0, "validity": 0.9933, "validity_sd": 0.0005, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.3786, "tstr_sd": 0.0037, "num_w1": null, "num_w1_sd": null, "sp_cat": 0.040818181818181816, "sp_cat_sd": null, "w1_num": null, "w1_num_sd": null, "tau": null, "fold": null, "refits": 1}, {"source": "Plain AIM", "folds": 3, "income_parity": 0.0791, "income_parity_sd": null, "eo_gap": 0.0202, "eo_gap_sd": null, "ber": 0.3983, "ber_sd": 0.0029, "ancb": 0.8424, "ancb_sd": 0.0644, "auc": 0.815, "auc_sd": 0.0063, "alpha": 0.9925, "alpha_sd": 0.0013, "beta": 0.9579, "beta_sd": 0.002, "eps_id": 0.3762, "eps_id_sd": 0.0031, "validity": 0.9765, "validity_sd": 0.002, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.3843, "tstr_sd": 0.0058, "num_w1": null, "num_w1_sd": null, "sp_cat": 0.0433, "sp_cat_sd": null, "w1_num": null, "w1_num_sd": null, "tau": null, "fold": null, "refits": 3}, {"source": "AIM hybrid", "folds": 3, "income_parity": 0.0712, "income_parity_sd": null, "eo_gap": 0.0255, "eo_gap_sd": null, "ber": 0.5354, "ber_sd": 0.0094, "ancb": 0.9658, "ancb_sd": 0.0059, "auc": 0.7971, "auc_sd": 0.0045, "alpha": 0.9889, "alpha_sd": 0.0017, "beta": 0.9434, "beta_sd": 0.0016, "eps_id": 0.3399, "eps_id_sd": 0.0047, "validity": 0.9262, "validity_sd": 0.0041, "impossible": 0.0, "impossible_sd": 0.0, "tstr": 0.4882, "tstr_sd": 0.0085, "num_w1": null, "num_w1_sd": null, "sp_cat": 0.038081818181818175, "sp_cat_sd": null, "w1_num": null, "w1_num_sd": null, "tau": 1.0, "fold": null, "refits": 3}], "baseline": null, "faithful": null, "targets": [{"target": "occupation", "metric": "SP", "Real data": 0.0761, "Plain AIM": 0.0791, "AIM hybrid": 0.0712}, {"target": "age", "metric": "SP", "Real data": 0.0296, "Plain AIM": 0.0348, "AIM hybrid": 0.0313}, {"target": "household_position", "metric": "SP", "Real data": 0.053, "Plain AIM": 0.0537, "AIM hybrid": 0.0495}, {"target": "household_size", "metric": "SP", "Real data": 0.0519, "Plain AIM": 0.0634, "AIM hybrid": 0.0579}, {"target": "prev_residence_place", "metric": "SP", "Real data": 0.002, "Plain AIM": 0.0014, "AIM hybrid": 0.0007}, {"target": "citizenship", "metric": "SP", "Real data": 0.0027, "Plain AIM": 0.006, "AIM hybrid": 0.0056}, {"target": "country_birth", "metric": "SP", "Real data": 0.0036, "Plain AIM": 0.0056, "AIM hybrid": 0.0054}, {"target": "edu_level", "metric": "SP", "Real data": 0.0663, "Plain AIM": 0.0758, "AIM hybrid": 0.0729}, {"target": "economic_status", "metric": "SP", "Real data": 0.0512, "Plain AIM": 0.0433, "AIM hybrid": 0.0305}, {"target": "cur_eco_activity", "metric": "SP", "Real data": 0.0399, "Plain AIM": 0.041, "AIM hybrid": 0.0353}, {"target": "marital_status", "metric": "SP", "Real data": 0.0727, "Plain AIM": 0.0722, "AIM hybrid": 0.0586}], "protocol": true}}}};
+const DELTA = 1e-5, EPS_MIN = 0.1, EPS_MAX = 20;
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+
+// --- privacy accounting: port of aim_fair/vendor/cdp2adp.py ---------------
+function cdpDelta(rho, eps) {
+  if (rho === 0) return 0;
+  let amin = 1.01, amax = (eps + 1) / (2 * rho) + 2, alpha = amin;
+  for (let i = 0; i < 200; i++) {
+    alpha = (amin + amax) / 2;
+    const d = (2 * alpha - 1) * rho - eps + Math.log1p(-1 / alpha);
+    if (d < 0) amin = alpha; else amax = alpha;
+  }
+  const delta = Math.exp((alpha - 1) * (alpha * rho - eps) + alpha * Math.log1p(-1 / alpha)) / (alpha - 1);
+  return Math.min(delta, 1);
+}
+function cdpRho(eps, delta) {
+  let lo = 0, hi = eps + 1;
+  for (let i = 0; i < 200; i++) {
+    const rho = (lo + hi) / 2;
+    if (cdpDelta(rho, eps) <= delta) lo = rho; else hi = rho;
+  }
+  return lo;
+}
+
+// --- repair: port of coupling / repair_plans in aim_fair/fair_aim.py -------
+function norm(v) { const c = v.map(x => Math.max(x, 0)); const s = c.reduce((a, b) => a + b, 0) || 1; return c.map(x => x / s); }
+function coupling(p, q, ordinal) {
+  p = norm(p); q = norm(q);
+  const k = p.length, mass = p.map(() => new Array(k).fill(0));
+  if (ordinal) {   // monotone (north-west corner) coupling = 1-D optimal transport
+    let cp = 0;
+    for (let i = 0; i < k; i++) {
+      cp += p[i]; let cq = 0;
+      for (let j = 0; j < k; j++) {
+        cq += q[j];
+        mass[i][j] = Math.max(0, Math.min(cp, cq) - Math.max(cp - p[i], cq - q[j]));
+      }
+    }
+  } else {         // 0-1 cost: keep min(p, q), move the surplus to the deficits
+    const keep = p.map((x, i) => Math.min(x, q[i]));
+    const r = p.map((x, i) => x - keep[i]), d = q.map((x, i) => x - keep[i]);
+    const ds = d.reduce((a, b) => a + b, 0);
+    for (let i = 0; i < k; i++) {
+      mass[i][i] = keep[i];
+      if (ds > 1e-12) for (let j = 0; j < k; j++) mass[i][j] += r[i] * d[j] / ds;
+    }
+  }
+  return mass.map((row, i) => p[i] > 1e-12 ? row.map(m => m / p[i]) : row.map((_, j) => +(i === j)));
+}
+// returns {cond: [2][k] released P(x | group), pooled: [k] released P(x)}
+function release(noisy, ordinal, tau) {
+  const pj = noisy.map(r => r.map(x => Math.max(x, 0)));
+  const tot = pj.flat().reduce((a, b) => a + b, 0) || 1;
+  const target = pj[0].map((_, j) => (pj[0][j] + pj[1][j]) / tot);
+  const w = pj.map(r => r.reduce((a, b) => a + b, 0) / tot);
+  const cond = pj.map(r => norm(r)).map(c => {
+    const T = coupling(c, target, ordinal);
+    return c.map((_, j) => c.reduce((s, ci, i) => s + ci * ((1 - tau) * (i === j) + tau * T[i][j]), 0));
+  });
+  return { cond, pooled: target.map((_, j) => w[0] * cond[0][j] + w[1] * cond[1][j]) };
+}
+const tv = (a, b) => 0.5 * a.reduce((s, x, i) => s + Math.abs(x - b[i]), 0);
+
+// --- seeded noise -----------------------------------------------------------
+function rng(seed) {
+  return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function normals(seed) {
+  const u = rng(seed);
+  const z = () => Math.sqrt(-2 * Math.log(1 - u())) * Math.cos(2 * Math.PI * u());
+  return cur().columns.map(c => c.real.map(r => r.map(z)));
+}
+
+// --- state ------------------------------------------------------------------
+const S = { ds: null, eps: 3, tau: 1, seed: 1, sel: null, z: null, tab: 'score', gk: null, ghi: null, scFold: null };
+const cur = () => DATA.datasets[S.ds];
+const epsFromSlider = v => Math.exp(Math.log(EPS_MIN) + v / 1000 * (Math.log(EPS_MAX) - Math.log(EPS_MIN)));
+const sliderFromEps = e => Math.round(1000 * (Math.log(e) - Math.log(EPS_MIN)) / (Math.log(EPS_MAX) - Math.log(EPS_MIN)));
+const fmtEps = e => e < 1 ? e.toFixed(2) : e < 10 ? e.toFixed(1) : e.toFixed(0);
+const pct = x => (100 * x).toFixed(1) + '%';
+function activeCheckpoint() {
+  for (const [k, cp] of Object.entries(cur().checkpoints))
+    if (Math.abs(S.eps - cp.eps) < 0.05 && Math.abs(S.tau - cp.tau) < 1e-9) return k;
+  return null;
+}
+
+function compute() {
+  const D = cur(), rho = cdpRho(S.eps, DELTA), K = D.columns.length;
+  const sigma = Math.sqrt(K / (2 * rho));
+  const cols = D.columns.map((c, ci) => {
+    const realCond = c.real.map(r => norm(r));
+    const noisy = c.real.map((r, s) => r.map((x, j) => x + sigma * S.z[ci][s][j]));
+    const rel = release(noisy, c.ordinal, S.tau);
+    const realPooled = norm(c.real[0].map((x, j) => x + c.real[1][j]));
+    // most group-skewed real level with >= 1% of rows
+    let skew = null;
+    c.labels.forEach((l, j) => {
+      const n = c.real[0][j] + c.real[1][j];
+      if (n < 0.01 * D.n) return;
+      const pm = c.real[0][j] / n, m = Math.max(pm, 1 - pm);
+      if (!skew || m > skew.m) skew = { l, m, who: D.groups[pm >= 0.5 ? 0 : 1] };
+    });
+    return { ...c, realCond, rel, tvReal: tv(realCond[0], realCond[1]),
+      tvRel: tv(rel.cond[0], rel.cond[1]), distortion: tv(rel.pooled, realPooled), skew };
+  });
+  return { rho, sigma, cols };
+}
+
+// --- drawing helpers --------------------------------------------------------
+function el(tag, attrs, parent, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text != null) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+// bar with 4px rounded data-end, square at the baseline
+function vbar(x, y0, w, h) {
+  const r = Math.min(4, w / 2, h);
+  return `M${x},${y0}V${y0 - h + r}Q${x},${y0 - h} ${x + r},${y0 - h}H${x + w - r}Q${x + w},${y0 - h} ${x + w},${y0 - h + r}V${y0}Z`;
+}
+function hbar(x0, y, w, h) {
+  const r = Math.min(4, h / 2, w);
+  return `M${x0},${y}H${x0 + w - r}Q${x0 + w},${y} ${x0 + w},${y + r}V${y + h - r}Q${x0 + w},${y + h} ${x0 + w - r},${y + h}H${x0}Z`;
+}
+const tip = $('tip');
+function showTip(ev, html) {
+  tip.innerHTML = html; tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+// axis maximum and tick step: 3-5 ticks, covering every value
+function niceAxis(m) {
+  const step = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25].find(s => m / s <= 5) || 0.25;
+  return { max: Math.max(step, Math.ceil(m / step - 1e-9) * step), step };
+}
+
+// --- scorecard: actual releases along τ -------------------------------------
+const METRICS = [   // key, title, better, format
+  ['ber', 'BER, sex from other columns', '0.5 best', v => v.toFixed(3)],
+  ['ancb', "A-NCB, paper's version", 'higher', v => v.toFixed(3)],
+  ['auc', 'Income AUC on real people', 'higher', v => v.toFixed(3)],
+  ['income_parity', 'Income parity gap', 'lower', v => v.toFixed(3)],
+  ['eo_gap', 'Equal-opportunity (TPR) gap', 'lower', v => v.toFixed(3)],
+  ['sp_cat', 'Mean parity, all categorical targets (Eq. 14)', 'lower', v => v.toFixed(3)],
+  ['w1_num', 'Mean W1 / sd, all numeric targets (Eq. 15)', 'lower', v => v.toFixed(3)],
+  ['validity', 'Validity', 'higher', v => v.toFixed(3)],
+  ['impossible', 'Impossible rows', 'lower', v => pct(v)],
+  // datasets_summary.csv only (the other datasets' scorecard)
+  ['tstr', 'Release teaches real sex, folded tstr', '0.5 best', v => v.toFixed(3)],
+  ['alpha', 'Alpha-precision', 'higher', v => v.toFixed(3)],
+  ['beta', 'Beta-recall', 'higher', v => v.toFixed(3)],
+  ['eps_id', 'Epsilon-identifiability', 'lower', v => v.toFixed(3)],
+];
+// the metrics a dataset's scorecard has (the other datasets: no Eq. 14 / 15)
+const metricsOf = SC => METRICS.filter(([k]) => SC.rows.some(r => r[k] != null));
+// value range and 3-4 ticks for one metric, not anchored at 0
+function rangeAxis(vals) {
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const span = Math.max(hi - lo, 0.01);
+  const step = [0.002, 0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2].find(s => span / s <= 4) || 0.2;
+  lo = Math.max(0, Math.floor(lo / step + 1e-9) * step); hi = Math.ceil(hi / step + 1e-9) * step;
+  if (hi - lo < 2 * step) hi = lo + 2 * step;
+  return { lo, hi, step };
+}
+function nearestPoint(pts) {
+  return pts.reduce((a, b) => Math.abs(b.tau - S.tau) < Math.abs(a.tau - S.tau) ? b : a);
+}
+
+// tooltip line for FLIP: the paper's value and our reproduction
+function flipTip(B, k, f) {
+  const v = B.values[k];
+  return `${B.label}: ${v == null ? 'not reported' : f(v)}` +
+    `<br><span style="color:var(--ink-2)">our reproduction (fold 0, scored like AIM): ${f(B.repro[k])}</span>`;
+}
+
+// mean ± sd of one metric; the sd is null when the grid has a single run
+const sdOf = (r, k) => r[k + '_sd'] ?? null;
+const fmtSd = (r, k, f) => f(r[k]) + (sdOf(r, k) != null ? ' ± ' + f(sdOf(r, k)) : '');
+const runsText = r => r.folds > 1 ? `${r.refits} refit${r.refits > 1 ? 's' : ''} × ${r.folds} folds` :
+  r.refits > 1 ? `${r.refits} refits of one fold` : 'one run';
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const spread = (r, k) => [clamp01(r[k] - (sdOf(r, k) ?? 0)), clamp01(r[k] + (sdOf(r, k) ?? 0))];
+// the summary rows of the grid (fold null), or one fold's rows
+function scoreRows(SC, fold = null) {
+  const agg = SC.rows.filter(r => (r.fold ?? null) === fold);
+  return { pts: agg.filter(r => r.source === 'AIM hybrid').sort((a, b) => a.tau - b.tau),
+    real: agg.find(r => r.source === 'Real data'), plain: agg.find(r => r.source === 'Plain AIM') };
+}
+
+// metric titles name the dataset's target (Dutch: occupation)
+const tl = t => t.replace('Income', cur().target[0].toUpperCase() + cur().target.slice(1));
+
+function drawScorecard() {
+  const SC = cur().scorecard;
+  $('sc-body').style.display = SC ? '' : 'none';
+  $('sc-none').style.display = SC ? 'none' : '';
+  if (!SC) {
+    $('sc-sub').textContent = '';
+    $('sc-none').textContent = `No scorecard for ${cur().label}: run scripts/run_tau_grid.sh, then rebuild this page.`;
+    return;
+  }
+  // fold 0 alone: only where the grid has per-fold rows
+  const hasF0 = SC.rows.some(r => r.fold === 0);
+  if (!hasF0) S.scFold = null;
+  $('sc-folds').style.display = hasF0 ? '' : 'none';
+  $('sc-all').setAttribute('aria-pressed', String(S.scFold == null));
+  $('sc-f0').setAttribute('aria-pressed', String(S.scFold === 0));
+  $('sc-match').textContent = matchText(SC);
+  const METRICS = metricsOf(SC);
+  const { pts, real, plain } = scoreRows(SC, S.scFold);
+  const B = SC.baseline, at = nearestPoint(pts);
+  const banded = pts.some(p => METRICS.some(([k]) => sdOf(p, k) != null));
+  $('sc-flipleg').style.display = B ? '' : 'none';
+  if (B) $('sc-fliplab').textContent = `${B.label} (${B.note})`;
+  $('sc-bandleg').style.display = banded ? '' : 'none';
+  $('sc-bandlab').textContent = `± 1 sd across ${at.folds > 1 ? 'folds' : 'refits'}`;
+  $('sc-tau').textContent = at.tau;
+  $('sc-sub').textContent = `Actual releases at ε = ${SC.eps}: ` + (at.folds > 1 || at.refits > 1 ?
+    `each point is the mean of ${runsText(at)}` : 'one refit of fold 0 per τ, so no error bars ' +
+    '(refit noise is about 0.01–0.02)') + (pts.length > 1 ?
+    `. τ snaps to the computed grid (now ${at.tau}); the ε slider does not apply here.` :
+    `. Only τ ${at.tau} was run for this dataset (aim_fair/run_datasets.sh); the τ grid is Adult only.`);
+  // one τ (the other datasets): a dumbbell row per metric instead of τ charts
+  const single = pts.length === 1;
+  $('sc-legend').style.display = single ? 'none' : '';
+  $('multiples').style.display = single ? 'none' : '';
+  $('cards').style.display = single ? '' : 'none';
+  if (single) $('sc-sub').textContent = `What the fairness steps change: plain AIM (privacy only) against the AIM hybrid ` +
+    `(privacy + fairness), both from the same ε ${SC.eps} private measurements, averaged over ${runsText(at)}. ` +
+    'The full list of metrics is in the table below.';
+  // small multiples along τ: [plain | τ 0 … 1 | FLIP]
+  const box = $('multiples'); box.innerHTML = ''; $('cards').innerHTML = '';
+  if (single) drawCards(plain, at, real, SC.targets);
+  for (const [k, t0, better, f] of single ? [] : METRICS) {
+    const t = tl(t0), cell = document.createElement('div');
+    cell.id = 'm-' + k;
+    const s = sdOf(at, k);
+    cell.innerHTML = `<h3>${t} <span>(${better})</span></h3><p class="now"><b>${f(at[k])}</b>` +
+      (s != null ? `<span class="pm"> ± ${f(s)}</span>` : ` at τ ${at.tau}`) +
+      ` · real ${real ? f(real[k]) : '–'}` + (B ? ` · FLIP ${B.values[k] == null ? 'n/r' : f(B.values[k])}` : '') + '</p>';
+    box.appendChild(cell);
+    const svg = el('svg', {}, cell);
+    const W = svg.clientWidth || 300, mL = 46, mR = 34, top = 8, plotH = 110, H = top + plotH + 24;
+    // the τ axis runs x0 .. xR; plain AIM sits in a slot left of it, FLIP in one right of it
+    const slotL = plain ? 48 : 0, slotR = B ? 44 : 0, x0 = mL + slotL, xR = W - mR - slotR;
+    // the scale fits the AIM bands, plain AIM and the real data; FLIP is pinned to the edge when off it
+    const vals = [...pts.flatMap(p => spread(p, k)), ...(real ? [real[k]] : []), ...(plain ? spread(plain, k) : [])];
+    const { lo, hi, step } = rangeAxis(vals);
+    const sx = v => x0 + (xR - x0) * v, sy = v => top + plotH * (1 - (v - lo) / (hi - lo));
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+    for (let v = lo; v <= hi + 1e-9; v += step) {
+      el('line', { x1: mL, x2: W - mR, y1: sy(v), y2: sy(v), stroke: 'var(--grid)' }, svg);
+      el('text', { x: mL - 6, y: sy(v) + 4, 'text-anchor': 'end' }, svg, k === 'impossible' ? pct(v) : v.toFixed(Math.round(step * 1000) % 10 ? 3 : 2));
+    }
+    for (const x of [0, 0.25, 0.5, 0.75, 1])
+      el('text', { x: sx(x), y: top + plotH + 16, 'text-anchor': 'middle' }, svg, x ? String(x) : 'τ 0');
+    if (pts.length === 1 && sdOf(pts[0], k) != null) {   // one τ: its sd as a short band
+      const [pl, ph] = spread(pts[0], k);
+      el('rect', { x: sx(pts[0].tau) - 6, y: sy(ph), width: 12, height: Math.max(0, sy(pl) - sy(ph)), rx: 2,
+        fill: 'var(--band)' }, svg);
+    } else if (pts.every(p => sdOf(p, k) != null)) {   // ± 1 sd band along τ
+      const up = pts.map(p => `${sx(p.tau)},${sy(spread(p, k)[1])}`);
+      const dn = pts.map(p => `${sx(p.tau)},${sy(spread(p, k)[0])}`).reverse();
+      el('path', { d: `M${up.join('L')}L${dn.join('L')}Z`, fill: 'var(--band)' }, svg);
+    }
+    if (plain) {   // the plain slot: a separator, its label, its sd as a short band, the point
+      const px = mL + (slotL - 10) / 2, [pl, ph] = spread(plain, k);
+      el('line', { x1: x0 - 10, x2: x0 - 10, y1: top, y2: top + plotH, stroke: 'var(--grid)' }, svg);
+      el('text', { x: px, y: top + plotH + 16, 'text-anchor': 'middle' }, svg, 'plain');
+      if (sdOf(plain, k) != null)
+        el('rect', { x: px - 6, y: sy(ph), width: 12, height: Math.max(0, sy(pl) - sy(ph)), rx: 2, fill: 'var(--band)' }, svg);
+      el('circle', { cx: px, cy: sy(plain[k]), r: 4.5, fill: 'var(--panel)', stroke: 'var(--ink)', 'stroke-width': 1.5 }, svg);
+      const hit = el('circle', { cx: px, cy: sy(plain[k]), r: 12, fill: 'transparent' }, svg);
+      hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}, plain AIM</div>` +
+        `${fmtSd(plain, k, f)} <span style="color:var(--ink-2)">(${runsText(plain)})</span>` +
+        `<br>same measurements, no masking, repair or rules` + (real ? `<br>real data ${f(real[k])}` : '')));
+      hit.addEventListener('mouseleave', hideTip);
+    }
+    if (B) {   // the FLIP slot: a separator, its tick and the paper's value
+      const fx = xR + slotR / 2 + 6, fv = B.values[k];
+      el('line', { x1: xR + 10, x2: xR + 10, y1: top, y2: top + plotH, stroke: 'var(--grid)' }, svg);
+      el('text', { x: fx, y: top + plotH + 16, 'text-anchor': 'middle' }, svg, 'FLIP');
+      let hy = top + plotH / 2;
+      if (fv == null) {
+        el('text', { x: fx, y: hy + 4, 'text-anchor': 'middle', style: 'fill:var(--ink-3)' }, svg, 'n/r');
+      } else if (fv < lo || fv > hi) {   // off this scale: arrow at the edge, value beside it
+        const up = fv > hi; hy = up ? top + 6 : top + plotH - 6;
+        el('text', { x: fx, y: hy + 4, 'text-anchor': 'middle' }, svg, up ? '↑' : '↓');
+        el('text', { x: fx, y: up ? hy + 18 : hy - 10, 'text-anchor': 'middle', style: 'font-size:11px' }, svg, f(fv));
+      } else {
+        hy = sy(fv);
+        el('rect', { x: fx - 4.5, y: hy - 4.5, width: 9, height: 9, fill: 'var(--panel)', stroke: 'var(--ink)',
+          'stroke-width': 1.5 }, svg);
+      }
+      const hit = el('circle', { cx: fx, cy: hy, r: 14, fill: 'transparent' }, svg);
+      hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}</div>` + flipTip(B, k, f) +
+        `<br>AIM hybrid at τ ${at.tau}: ${fmtSd(at, k, f)}` + (real ? `<br>real data ${f(real[k])}` : '')));
+      hit.addEventListener('mouseleave', hideTip);
+    }
+    if (real) {   // across all three slots, so plain and FLIP read against it too
+      el('line', { x1: mL, x2: W - mR, y1: sy(real[k]), y2: sy(real[k]), stroke: 'var(--ink-3)', 'stroke-width': 1.5,
+        'stroke-dasharray': '1 3', 'stroke-linecap': 'round' }, svg);
+      el('text', { x: W - mR + 4, y: sy(real[k]) + 4, style: 'fill:var(--ink-3)' }, svg, 'real');
+    }
+    el('line', { x1: sx(at.tau), x2: sx(at.tau), y1: top, y2: top + plotH, stroke: 'var(--ink-3)' }, svg);
+    el('path', { d: pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p.tau)},${sy(p[k])}`).join(''),
+      fill: 'none', stroke: 'var(--ink)', 'stroke-width': 2 }, svg);
+    for (const p of pts) {
+      const on = p === at;
+      el('circle', { cx: sx(p.tau), cy: sy(p[k]), r: on ? 5.5 : 3.5, fill: 'var(--ink)',
+        stroke: 'var(--panel)', 'stroke-width': 2 }, svg);
+      const hit = el('circle', { cx: sx(p.tau), cy: sy(p[k]), r: 12, fill: 'transparent', style: 'cursor:pointer' }, svg);
+      hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${t}, τ = ${p.tau}</div>` +
+        `AIM hybrid ${fmtSd(p, k, f)} <span style="color:var(--ink-2)">(${runsText(p)})</span>` +
+        (plain ? `<br>plain AIM ${fmtSd(plain, k, f)}` : '') + (real ? `<br>real data ${f(real[k])}` : '')));
+      hit.addEventListener('mouseleave', hideTip);
+      hit.addEventListener('click', () => { S.tau = p.tau; $('tau').value = p.tau; render(); });
+    }
+  }
+  const rows = [...pts.map(p => [`AIM hybrid, τ ${p.tau}`, p]), ...(plain ? [['Plain AIM', plain]] : []),
+    ...(B ? [[`${B.label} (${B.note})`, B.values], ['FLIP, our reproduction', B.repro]] : []),
+    ...(real ? [['Real data', real]] : [])];
+  $('sctbl').innerHTML = '<table><tr><th></th>' + METRICS.map(m => `<th>${tl(m[1])}</th>`).join('') + '</tr>' +
+    rows.map(([n, r]) => `<tr><td>${n}</td>` + METRICS.map(([k, , , f]) =>
+      `<td>${r[k] == null ? 'n/r' : fmtSd(r, k, f)}</td>`).join('') + '</tr>').join('') + '</table>';
+}
+
+// --- question cards (one τ only): plain AIM vs AIM hybrid in plain words -------
+// what "selected" means for the dataset's outcome
+const OUTCOME = { income: 'predicted to earn over $50K', occupation: 'predicted a high-level occupation' };
+const pts_ = v => (100 * v).toFixed(1) + ' pts';
+// the cards' four questions, shared with the across-datasets table so both give
+// the same verdicts: val turns a scorecard row into the number shown
+const QUESTIONS = [
+  { k: 'ber', q: 'Can a model guess sex from the other columns?', val: r => 1 - r.ber, fmt: pct,
+    ok: (P, H) => 1 - H.ber <= 0.52, yes: 'No', no: 'Still partly' },
+  { k: 'income_parity', q: 'Gap between men and women in the outcome', val: r => r.income_parity, fmt: pts_,
+    ok: (P, H) => H.income_parity < P.income_parity, yes: 'Closer', no: 'Not closer' },
+  { k: 'sp_cat', q: 'Average gap over category attributes', val: r => r.sp_cat, fmt: pts_,
+    ok: (P, H) => H.sp_cat < P.sp_cat, yes: 'Fairer', no: 'Not fairer' },
+  { k: 'auc', q: 'What it costs: prediction quality (AUC)', val: r => r.auc, fmt: v => v.toFixed(3),
+    ok: (P, H) => Math.abs(H.auc - P.auc) < 0.03, yes: 'Little', no: 'Noticeable' },
+];
+const QN = Object.fromEntries(QUESTIONS.map(x => [x.k, x]));
+const verdict = (x, P, H) => x.ok(P, H) ? `✓ ${x.yes}` : `✗ ${x.no}`;
+
+// three bars (real, plain, hybrid) on 0 .. max, with an optional reference line
+function cardBars(svg, rows, max, fmt, ref) {
+  const W = svg.clientWidth || 300, labW = 74, valW = 58, rowH = 22, top = ref ? 14 : 2;
+  const H = top + rows.length * rowH;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const sx = v => labW + (W - labW - valW) * Math.min(1, Math.max(0, v / max));
+  rows.forEach(([label, v, fill, bold], i) => {
+    const y = top + i * rowH;
+    el('text', { x: 0, y: y + 15, style: bold ? 'fill:var(--ink);font-weight:600' : '' }, svg, label);
+    el('path', { d: hbar(labW, y + 5, Math.max(1, sx(v) - labW), 12), fill }, svg);
+    el('text', { x: W, y: y + 15, 'text-anchor': 'end', style: bold ? 'fill:var(--ink);font-weight:600' : '' }, svg, fmt(v));
+  });
+  if (ref) {
+    el('line', { x1: sx(ref[0]), x2: sx(ref[0]), y1: top - 4, y2: H, stroke: 'var(--ink-2)', 'stroke-dasharray': '3 3' }, svg);
+    el('text', { x: sx(ref[0]), y: 9, 'text-anchor': 'middle', style: 'font-size:11px;fill:var(--ink-2)' }, svg, ref[1]);
+  }
+}
+
+function drawCards(P, H, R, targets) {
+  const box = $('cards'), out = OUTCOME[cur().target] || `predicted ${cur().target} = 1`;
+  const card = (id, q, verdict, sub, bars, max, fmt, note, ref) => {
+    const c = document.createElement('div'); c.className = 'card'; c.id = id;
+    c.innerHTML = `<h3>${q}</h3><p class="vd">${verdict} <span>${sub}</span></p><svg></svg><p class="cn">${note}</p>`;
+    box.appendChild(c);
+    cardBars(c.querySelector('svg'), bars, max, fmt, ref);
+  };
+  const three = k => [['Real data', R[k], 'var(--bar-real)'], ['Plain AIM', P[k], 'var(--bar)'],
+    ['AIM hybrid', H[k], 'var(--ink)', true]];
+  // 1. sex from the other columns: guessing accuracy = 1 - BER, 50% = a coin flip
+  const acc = r => ({ ...r, acc: 1 - r.ber });
+  const [aR, aP, aH] = [acc(R), acc(P), acc(H)];
+  card('m-ber', 'Can a model guess someone\'s sex from the other columns?',
+    verdict(QN.ber, P, H), QN.ber.ok(P, H) ? '— no better than a coin flip (just under 50% is noise)' : '',
+    [['Real data', aR.acc, 'var(--bar-real)'], ['Plain AIM', aP.acc, 'var(--bar)'], ['AIM hybrid', aH.acc, 'var(--ink)', true]],
+    1, pct, `Share of people whose sex a classifier guesses right from the table (balanced). ` +
+    `Plain AIM keeps the real data's link (${pct(aP.acc)}); the hybrid removes it.`, [0.5, 'coin flip']);
+  // 2. the outcome: the gap between men and women in the share selected
+  const dP = H.income_parity - P.income_parity;
+  card('m-income_parity', `Are men and women equally likely to be ${out}?`,
+    verdict(QN.income_parity, P, H), `— gap ${dP < 0 ? 'down' : 'up'} ${pts_(Math.abs(dP))}`, three('income_parity'),
+    niceAxis(Math.max(R.income_parity, P.income_parity, H.income_parity)).max, pts_,
+    `A model trained on each table, tested on real people: the difference between men and women in the share ` +
+    `${out}. Smaller is fairer.`);
+  // 3. every attribute as the target in turn
+  if (H.sp_cat != null) {
+    const n = targets ? targets.filter(t => t.metric === 'SP').length : 0;
+    const fewer = targets ? targets.filter(t => t.metric === 'SP' && t['AIM hybrid'] < t['Plain AIM']).length : 0;
+    card('m-sp_cat', 'And across all category attributes, outcome included?',
+      verdict(QN.sp_cat, P, H), n ? `— smaller gap on ${fewer} of ${n} attributes` : '',
+      three('sp_cat'), niceAxis(Math.max(R.sp_cat, P.sp_cat, H.sp_cat)).max, pts_,
+      'Each attribute in turn is predicted from the others; the bar is the average gap between men and women. ' +
+      'The panel below lists them one by one.');
+  }
+  // 4. the cost: prediction quality and valid rows
+  const dA = H.auc - P.auc, dV = H.validity - P.validity;
+  card('m-auc', 'What does it cost?', verdict(QN.auc, P, H),
+    `— AUC ${dA < 0 ? '−' : '+'}${Math.abs(dA).toFixed(3)}`, three('auc'), 1, v => v.toFixed(3),
+    `Prediction quality (AUC) of a model trained on the table and tested on real people; 1 = perfect, 0.5 = guessing. ` +
+    `Rows that pass the real data's consistency rules: ${pct(P.validity)} → ${pct(H.validity)}` +
+    ` (${dV < 0 ? '−' : '+'}${(100 * Math.abs(dV)).toFixed(1)} pts).`, [0.5, 'guessing']);
+}
+
+// --- which attributes got fairer: plain AIM vs hybrid, attribute by attribute ---
+// readable names for the coded columns (ACS-I PUMS codes, Dutch, Adult)
+const ATTR_NAMES = { AGEP: 'age', WKHP: 'hours worked per week', COW: 'class of worker', SCHL: 'education',
+  MAR: 'marital status', OCCP: 'occupation', POBP: 'place of birth', RELP: 'relationship to householder',
+  RAC1P: 'race', edu_level: 'education level', cur_eco_activity: 'current economic activity',
+  prev_residence_place: 'previous residence', country_birth: 'country of birth', fnlwgt: 'census weight',
+  'education-num': 'years of education' };
+const attrName = t => ATTR_NAMES[t] || t.replace(/[_-]/g, ' ');
+const TG_GROUPS = [   // metric, heading, format
+  ['SP', 'Category attributes: gap in the share predicted for each category', pts_],
+  ['W1', 'Number attributes: gap in the predicted value, as % of the attribute\'s spread', pct]];
+const PROTO_SRC = ['Real data', 'Plain AIM', 'AIM hybrid'];
+
+// two bars, plain AIM (grey) over the hybrid (ink), on 0 .. max
+function pairBars(svg, p, h, max) {
+  const W = svg.clientWidth || 300, H = 24;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const w = v => Math.max(1, W * Math.min(1, v / max));
+  el('path', { d: hbar(0, 2, w(p), 9), fill: 'var(--bar)' }, svg);
+  el('path', { d: hbar(0, 13, w(h), 9), fill: 'var(--ink)' }, svg);
+}
+
+function drawTargets() {
+  const T = cur().scorecard && cur().scorecard.targets;
+  $('tg-panel').hidden = !T;
+  if (!T) return;
+  const box = $('tg'); box.innerHTML = '';
+  const fewer = T.filter(r => r['AIM hybrid'] < r['Plain AIM']).length;
+  $('tg-sub').innerHTML = `A model predicts each attribute from the rest of the table: how differently does it treat ` +
+    `men and women? Shorter is fairer. <b>The hybrid's gap is smaller on ${fewer} of ${T.length} attributes.</b>`;
+  for (const [m, head, fmt] of TG_GROUPS) {
+    const rows = T.filter(r => r.metric === m).sort((a, b) => b['Plain AIM'] - a['Plain AIM']);
+    if (!rows.length) continue;
+    const h = document.createElement('div'); h.className = 'dbg'; h.textContent = head; box.appendChild(h);
+    const { max } = niceAxis(Math.max(...rows.flatMap(r => [r['Plain AIM'], r['AIM hybrid']])));
+    for (const r of rows) {
+      const name = attrName(r.target) + (r.target === cur().target ? ' <span>(the outcome)</span>' : '');
+      const p = r['Plain AIM'], hy = r['AIM hybrid'];
+      const row = document.createElement('div'); row.className = 'dbr';
+      row.innerHTML = `<div class="l">${name}</div><svg></svg><div class="v">${fmt(p)} → <b>${fmt(hy)}</b> ` +
+        `${hy < p ? '✓' : '✗'}</div>`;
+      box.appendChild(row);
+      pairBars(row.querySelector('svg'), p, hy, max);
+      row.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${name}</div>plain AIM: ${fmt(p)}` +
+        `<br>AIM hybrid: ${fmt(hy)}<br>real data: ${fmt(r['Real data'])}` +
+        `<br><span style="color:var(--ink-3)">column ${r.target}</span>`));
+      row.addEventListener('mouseleave', hideTip);
+    }
+  }
+  const f = v => v.toFixed(3);
+  $('tgtbl').innerHTML = '<table><tr><th>Attribute</th><th>column</th><th>metric</th>' +
+    PROTO_SRC.map(s => `<th>${s}</th>`).join('') + '</tr>' +
+    T.map(r => `<tr><td>${attrName(r.target)}</td><td>${r.target}</td><td>${r.metric === 'W1' ? 'W1 / sd (Eq. 15)' :
+      'SP (Eq. 14)'}</td>` + PROTO_SRC.map(s => `<td>${f(r[s])}</td>`).join('') + '</tr>').join('') + '</table>';
+}
+
+// --- across datasets: the cards' four questions for every dataset ---------------
+function drawAcross() {
+  const sets = Object.entries(DATA.datasets).map(([n, D]) => {
+    const R = D.scorecard && scoreRows(D.scorecard), H = R && R.pts.find(p => p.tau === 1);
+    return H && R.plain ? { n, D, H, P: R.plain } : null;
+  }).filter(Boolean);
+  $('ax-panel').hidden = sets.length < 2;
+  if (sets.length < 2) return;
+  const cell = (s, x) => {
+    if (s.H[x.k] == null || s.P[x.k] == null) return '<td>n/a</td>';
+    return `<td${s.n === S.ds ? ' class="cur"' : ''}><div class="axv">${verdict(x, s.P, s.H)}</div>` +
+      `${x.fmt(x.val(s.P))} → <b>${x.fmt(x.val(s.H))}</b></td>`;
+  };
+  $('ax').innerHTML = '<table><tr><th></th>' + sets.map(s => `<th><button data-ds="${s.n}"` +
+    (s.n === S.ds ? ' aria-pressed="true"' : '') + `>${s.D.label}</button></th>`).join('') + '</tr>' +
+    QUESTIONS.map(x => `<tr><td>${x.q}</td>` + sets.map(s => cell(s, x)).join('') + '</tr>').join('') + '</table>';
+  $('ax').querySelectorAll('button[data-ds]').forEach(b => b.addEventListener('click', () => {
+    $('ds').value = b.dataset.ds; setDataset(b.dataset.ds);
+  }));
+}
+
+// the build's check: FLIP-faithful AIM column vs the scorecard's fold 0 at τ 1
+function matchText(SC) {
+  const C = SC.faithful && SC.faithful.check;
+  if (!C) return '';
+  const bad = C.filter(c => !c.ok);
+  if (bad.length) return `⚠ Fold 0 at τ 1 differs from the FLIP-faithful AIM column in ${bad.map(c => c.key).join(', ')}: ` +
+    'rebuild after scripts/run_tau_grid.sh and aim_fair/flip_faithful_chart.py.';
+  return S.scFold === 0 ? `✓ τ 1 here is the FLIP-faithful tab's AIM column: all ${C.length} shared metrics match.` :
+    'Fold 0 shows the same tables as the FLIP-faithful tab (its τ 1 point is that tab\'s AIM column).';
+}
+
+// --- FLIP-faithful: FLIP paper vs FLIP reproduction vs AIM hybrid, FLIP's protocol
+const FF_GROUPS = [   // heading, keys (in this order)
+  ['Data level (FLIP\'s primary criteria)', ['ber', 'ancb', 'tstr']],
+  ['Utility and realism', ['auc', 'alpha', 'beta', 'validity', 'impossible']],
+  ['Downstream (FLIP Sections 5.3 and 6.5, LightGBM)', ['income_parity', 'eo_gap', 'sp_cat', 'w1_num']],
+  ['Closeness to real rows (not a DP measure)', ['eps_id']],
+];
+const FF_COLS = [['paper', 'FLIP paper, reported'], ['repro', 'FLIP reproduction'], ['aim', 'AIM hybrid']];
+function drawFaithful() {
+  const F = cur().scorecard && cur().scorecard.faithful;
+  $('ff-tbl').style.display = F ? '' : 'none';
+  $('ff-none').style.display = F ? 'none' : '';
+  if (!F) {
+    $('ff-match').textContent = '';
+    $('ff-none').textContent = 'No FLIP-faithful comparison: run python aim_fair/flip_faithful_chart.py, then rebuild.';
+    return;
+  }
+  const C = Object.fromEntries((F.check || []).map(c => [c.key, c]));
+  const n = Object.keys(C).length, bad = Object.values(C).filter(c => !c.ok).length;
+  $('ff-match').textContent = !n ? '' : bad ? `⚠ ${bad} of ${n} metrics differ from the scorecard's fold-0 point at τ 1.` :
+    `✓ The AIM column equals the scorecard's fold-0 point at τ 1 in all ${n} metrics they share (marked ✓).`;
+  const byKey = Object.fromEntries(F.rows.map(r => [r.key, r]));
+  const fmt = (k, v) => v == null ? '<span style="color:var(--ink-3)">n/r</span>' :
+    k === 'impossible' ? pct(v) : v.toFixed(3);
+  let html = '<table><tr><th>Metric</th><th>better</th>' + FF_COLS.map(([, h]) => `<th>${h}</th>`).join('') + '<th></th></tr>';
+  for (const [head, keys] of FF_GROUPS) {
+    const rows = keys.map(k => byKey[k]).filter(Boolean);
+    if (!rows.length) continue;
+    html += `<tr><td colspan="6" style="padding-top:10px;font-weight:600">${head}</td></tr>`;
+    for (const r of rows) {
+      // bold only between our two scored columns: the paper's numbers come from its own code
+      const ber = r.key === 'ber', score = v => ber ? -Math.abs(v - 0.5) : r.better === 'lower' ? -v : v;
+      const vals = ['repro', 'aim'].map(c => r[c]).filter(v => v != null);
+      const best = vals.reduce((a, b) => score(b) > score(a) ? b : a, vals[0]);
+      const c = C[r.key];
+      html += `<tr><td>${r.label}</td><td style="color:var(--ink-2)">${ber ? '0.5 best' : r.better}</td>` +
+        FF_COLS.map(([col]) => col === 'paper' ? `<td style="color:var(--ink-3)">${fmt(r.key, r[col])}</td>` :
+          `<td>${r[col] != null && r[col] === best && vals.length > 1 ? '<b>' + fmt(r.key, r[col]) + '</b>' :
+          fmt(r.key, r[col])}</td>`).join('') +
+        `<td title="${c ? `scorecard fold 0, τ 1: ${fmt(r.key, c.scorecard)}` : 'not on the scorecard'}">${c ? (c.ok ? '✓' : '⚠') : ''}</td></tr>`;
+    }
+  }
+  $('ff-tbl').innerHTML = html + '</table>';
+}
+
+// --- headline findings: plain AIM → hybrid at τ 1, paired within folds ------
+// hybrid τ 1 minus plain AIM in each fold (same measurements): mean, sd, signs
+function pairedDiff(SC, k) {
+  const per = keep => Object.fromEntries(SC.rows.filter(r => r.fold != null && keep(r)).map(r => [r.fold, r[k]]));
+  const h = per(r => r.source === 'AIM hybrid' && r.tau === 1), p = per(r => r.source === 'Plain AIM');
+  const d = Object.keys(h).filter(f => f in p).map(f => h[f] - p[f]);
+  if (!d.length) return null;
+  const m = d.reduce((a, b) => a + b, 0) / d.length;
+  const sd = d.length > 1 ? Math.sqrt(d.reduce((s, x) => s + (x - m) ** 2, 0) / (d.length - 1)) : null;
+  return { m, sd, n: d.length, same: d.filter(x => Math.sign(x) === Math.sign(m)).length };
+}
+function deltaNote(D) {
+  if (!D) return '';
+  const s = (D.m < 0 ? '−' : '+') + Math.abs(D.m).toFixed(3);
+  if (D.unpaired) return `Δ ${s} · of the fold means, no per-fold pairing`;
+  if (D.sd == null) return `Δ ${s} · one fold, no error bar`;
+  return `Δ ${s} ± ${D.sd.toFixed(3)} · ${D.same}/${D.n} folds ${D.m < 0 ? 'lower' : 'higher'}`;
+}
+const FINDINGS = [   // key, label, note (plain, hybrid τ 1, real, paired difference)
+  ['ber', 'Sex leakage (BER)', (P, H, R) => `0.5 = chance · real data ${R.ber.toFixed(3)}`],
+  ['auc', 'Income AUC on real people', (P, H, R, D) => deltaNote(D)],
+  ['income_parity', 'Income parity gap', (P, H, R, D) => deltaNote(D)],
+  ['eo_gap', 'Equal-opportunity (TPR) gap', (P, H, R) => R.eo_gap > 0 && H.eo_gap > 1.5 * R.eo_gap ?
+    `${(H.eo_gap / R.eo_gap).toFixed(1)}× real data (${R.eo_gap.toFixed(3)})` : `real data ${R.eo_gap.toFixed(3)}`],
+];
+
+function drawFindings() {
+  const SC = cur().scorecard, R = SC && scoreRows(SC), H = R && R.pts.find(p => p.tau === 1);
+  // one τ only: the scorecard's question cards say the same, so no strip
+  $('findings').hidden = !(H && R.plain && R.real && R.pts.length > 1);
+  if ($('findings').hidden) return;
+  $('fd-head').textContent = `Plain AIM → AIM hybrid at τ 1, from the same ε ${SC.eps} measurements · ` +
+    `${cur().label}, ${runsText(H)}`;
+  // without per-fold rows (datasets_summary.csv) the difference of the means, unpaired
+  const diff = k => pairedDiff(SC, k) ?? { m: H[k] - R.plain[k], unpaired: true };
+  $('fgrid').innerHTML = FINDINGS.map(([k, label, note]) =>
+    `<button class="fd" data-k="${k}" title="Show on the scorecard"><span class="fl">${tl(label)}</span>` +
+    `<span class="fv">${R.plain[k].toFixed(3)}<span class="ar">→</span><b>${H[k].toFixed(3)}</b></span>` +
+    `<span class="fn">${note(R.plain, H, R.real, diff(k))}</span></button>`).join('');
+}
+
+// --- leakage ranking ----------------------------------------------------------
+const proxyText = c => c.proxy.map(p => `${p.level} → ${p.group} (${pct(p.purity)})`).join(', ');
+
+function drawRank(R) {
+  const svg = $('rank'); svg.innerHTML = '';
+  const W = svg.clientWidth || 900, rowH = 28, valW = 92;
+  // room for the longest name and its badge (~6.5 px per character at 12px)
+  const labW = Math.min(W * 0.42, Math.max(...R.cols.map(c => c.name.length * 6.5 + (c.proxy.length ? 48 : 0))) + 14);
+  const order = [...R.cols].sort((a, b) => b.tvReal - a.tvReal);   // fixed: by real leakage
+  const { max, step } = niceAxis(Math.max(...R.cols.flatMap(c => [c.tvReal, c.tvRel])));
+  const x0 = labW, plotW = W - labW - valW, sx = v => x0 + plotW * v / max;
+  const H = order.length * rowH + 34, dec = step < 0.1 ? 2 : 1;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  for (let i = 0; i * step <= max + 1e-9; i++) {
+    const t = i * step;
+    el('line', { x1: sx(t), x2: sx(t), y1: 0, y2: order.length * rowH + 2, stroke: 'var(--grid)' }, svg);
+    el('text', { x: sx(t), y: order.length * rowH + 16, 'text-anchor': 'middle' }, svg, t.toFixed(dec));
+    el('text', { x: sx(t), y: order.length * rowH + 30, 'text-anchor': 'middle',
+      style: 'fill:var(--ink-3)' }, svg, ((1 - t) / 2).toFixed(dec + 1));
+  }
+  el('text', { x: x0 - 20, y: order.length * rowH + 16, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg, 'TV');
+  el('text', { x: x0 - 20, y: order.length * rowH + 30, 'text-anchor': 'end', style: 'fill:var(--ink-3)' }, svg, 'balanced error');
+  order.forEach((c, i) => {
+    const y = i * rowH, g = el('g', { class: 'row' }, svg);
+    el('rect', { class: 'bg', x: 0, y, width: W, height: rowH, rx: 6,
+      fill: c.name === S.sel ? 'var(--sel)' : 'transparent' }, g);
+    const t = el('text', { x: labW - 10, y: y + rowH / 2 + 4, 'text-anchor': 'end',
+      style: c.name === S.sel ? 'fill:var(--ink);font-weight:600' : '' }, g);
+    if (c.proxy.length) el('tspan', { class: 'badge' }, t, 'PROXY');
+    el('tspan', c.proxy.length ? { dx: 6 } : {}, t, c.name);
+    if (c.tvReal > 0.0005) el('path', { d: hbar(x0, y + 5, sx(c.tvReal) - x0, rowH - 10), fill: 'var(--bar-real)' }, g);
+    if (c.tvRel > 0.0005) el('path', { d: hbar(x0, y + 10, sx(c.tvRel) - x0, rowH - 20), fill: 'var(--bar)' }, g);
+    el('text', { x: W - 4, y: y + rowH / 2 + 4, 'text-anchor': 'end' }, g,
+      `${c.tvReal.toFixed(2)} → ${c.tvRel.toFixed(2)}`);
+    g.addEventListener('click', () => { S.sel = c.name; render(); });
+    g.addEventListener('mousemove', ev => showTip(ev,
+      `<div class="h">${c.name}</div>TV real ${c.tvReal.toFixed(3)} → release ${c.tvRel.toFixed(3)}<br>` +
+      `Balanced error from this column alone: ${((1 - c.tvReal) / 2).toFixed(3)} → ${((1 - c.tvRel) / 2).toFixed(3)}` +
+      (c.skew ? `<br>Most skewed level: <b>${c.skew.l}</b>, ${pct(c.skew.m)} ${c.skew.who}` : '') +
+      (c.proxy.length ? `<br><b>Proxy levels:</b> ${proxyText(c)}` : '')));
+    g.addEventListener('mouseleave', hideTip);
+  });
+}
+
+// --- histogram ------------------------------------------------------------------
+function drawHist(R) {
+  const D = cur(), G = D.groups;
+  const c = R.cols.find(x => x.name === S.sel), cpKey = activeCheckpoint();
+  const cp = cpKey && c.checkpoints[cpKey] ? c.checkpoints[cpKey].map(r => norm(r)) : null;
+  $('cpleg').style.display = cp ? '' : 'none';
+  $('htitle').textContent = `${c.name}: share of each ${D.sensitive} group in each ${c.ordinal ? 'bin' : 'level'}`;
+  $('hread').textContent = `TV ${c.tvReal.toFixed(3)} → ${c.tvRel.toFixed(3)} · distortion ${c.distortion.toFixed(3)}` +
+    (c.proxy.length ? ` · proxy: ${proxyText(c)}` : '') +
+    (cp ? ` · dashed: actual AIM ${cpKey} release` : '');
+  const svg = $('hist'); svg.innerHTML = '';
+  const W = svg.clientWidth || 900, k = c.labels.length;
+  const rotate = k > 8 || W < 600, mL = 44, mB = rotate ? 84 : 28, plotH = 260, H = plotH + mB + 10;
+  const plotW = W - mL - 4, gw = plotW / k, bw = Math.min(28, (gw - 8) / 2);
+  const all = [...c.realCond.flat(), ...c.rel.cond.flat(), ...(cp ? cp.flat() : [])];
+  const top = Math.max(0.05, Math.ceil(Math.max(...all) * 20) / 20), sy = v => 10 + plotH * (1 - v / top);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const step = top > 0.5 ? 0.2 : top > 0.2 ? 0.1 : 0.05;
+  for (let t = 0; t <= top + 1e-9; t += step) {
+    el('line', { x1: mL, x2: W, y1: sy(t), y2: sy(t), stroke: 'var(--grid)' }, svg);
+    el('text', { x: mL - 6, y: sy(t) + 4, 'text-anchor': 'end' }, svg, Math.round(t * 100) + '%');
+  }
+  const y0 = sy(0), colors = ['var(--g0)', 'var(--g1)'];
+  c.labels.forEach((l, j) => {
+    const gx = mL + j * gw, cx = gx + gw / 2, g = el('g', {}, svg);
+    [0, 1].forEach(s => {
+      const x = cx + (s === 0 ? -bw - 1 : 1), v = c.rel.cond[s][j];
+      if (sy(v) < y0 - 0.5) el('path', { d: vbar(x, y0, bw, y0 - sy(v)), fill: colors[s] }, g);
+      if (cp) el('rect', { x: x + 1, y: sy(cp[s][j]), width: bw - 2, height: Math.max(0, y0 - sy(cp[s][j])),
+        fill: 'none', stroke: 'var(--ink)', 'stroke-width': 1.5, 'stroke-dasharray': '3 2' }, g);
+      el('line', { x1: x - 2, x2: x + bw + 2, y1: sy(c.realCond[s][j]), y2: sy(c.realCond[s][j]),
+        stroke: 'var(--ink)', 'stroke-width': 2, 'stroke-linecap': 'round' }, g);
+    });
+    const px = c.proxy.find(p => p.level === l);
+    if (px) {   // label the proxy level above its tallest mark
+      const vmax = Math.max(c.rel.cond[0][j], c.rel.cond[1][j], c.realCond[0][j], c.realCond[1][j],
+        ...(cp ? [cp[0][j], cp[1][j]] : []));
+      el('text', { x: cx, y: sy(vmax) - 6, 'text-anchor': 'middle', class: 'badge' }, g, 'PROXY');
+    }
+    const lab = l.length > 18 ? l.slice(0, 17) + '…' : l;
+    el('text', rotate ? { x: cx, y: y0 + 14, 'text-anchor': 'end', transform: `rotate(-40 ${cx} ${y0 + 14})` }
+      : { x: cx, y: y0 + 18, 'text-anchor': 'middle' }, svg, lab);
+    const hit = el('rect', { x: gx, y: 0, width: gw, height: y0 + 4, fill: 'transparent' }, g);
+    hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${c.name} = ${l}</div>` +
+      G.map((who, s) => `${who}: release ${pct(c.rel.cond[s][j])}, real ${pct(c.realCond[s][j])}` +
+        (cp ? `, AIM ${pct(cp[s][j])}` : '')).join('<br>') +
+      (px ? `<br><b>Proxy:</b> ${pct(px.purity)} of these rows are ${px.group} (real data)` : '')));
+    hit.addEventListener('mouseleave', hideTip);
+  });
+  el('line', { x1: mL, x2: W, y1: y0, y2: y0, stroke: 'var(--ink-3)' }, svg);
+  $('tbl').innerHTML = '<table><tr><th>' + c.name + `</th><th>${G[0]}, real</th><th>${G[0]}, release</th>` +
+    `<th>${G[1]}, real</th><th>${G[1]}, release</th>` + (cp ? `<th>${G[0]}, AIM</th><th>${G[1]}, AIM</th>` : '') + '</tr>' +
+    c.labels.map((l, j) => `<tr><td>${l}${c.proxy.some(p => p.level === l) ? ' (proxy)' : ''}</td><td>${pct(c.realCond[0][j])}</td><td>${pct(c.rel.cond[0][j])}</td>` +
+      `<td>${pct(c.realCond[1][j])}</td><td>${pct(c.rel.cond[1][j])}</td>` +
+      (cp ? `<td>${pct(cp[0][j])}</td><td>${pct(cp[1][j])}</td>` : '') + '</tr>').join('') + '</table>';
+}
+
+// --- before vs after: the actual hybrid release (not simulated) -------------
+function baTV(t) { const n = t.map(r => norm(r)); return tv(n[0], n[1]); }
+
+function groupBars(svg, c, cond, top, other) {
+  svg.innerHTML = '';
+  const D = cur(), G = D.groups, W = svg.clientWidth || 440, k = c.labels.length;
+  const rotate = k > 6 || W < 420, mL = 40, mB = rotate ? 84 : 28, plotH = 180, H = plotH + mB + 10;
+  const gw = (W - mL - 4) / k, bw = Math.max(2, Math.min(22, (gw - 6) / 2 - 1));
+  const sy = v => 10 + plotH * (1 - v / top), y0 = sy(0);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const step = top > 0.5 ? 0.2 : top > 0.2 ? 0.1 : 0.05;
+  for (let t = 0; t <= top + 1e-9; t += step) {
+    el('line', { x1: mL, x2: W, y1: sy(t), y2: sy(t), stroke: 'var(--grid)' }, svg);
+    el('text', { x: mL - 6, y: sy(t) + 4, 'text-anchor': 'end' }, svg, Math.round(t * 100) + '%');
+  }
+  c.labels.forEach((l, j) => {
+    const gx = mL + j * gw, cx = gx + gw / 2, g = el('g', {}, svg);
+    [0, 1].forEach(s => {   // 2px surface gap between a level's two bars
+      const x = cx + (s === 0 ? -bw - 1 : 1), v = cond[s][j];
+      if (sy(v) < y0 - 0.5) el('path', { d: vbar(x, y0, bw, y0 - sy(v)), fill: `var(--g${s})` }, g);
+    });
+    const lab = l.length > 14 ? l.slice(0, 13) + '…' : l;
+    el('text', rotate ? { x: cx, y: y0 + 14, 'text-anchor': 'end', transform: `rotate(-40 ${cx} ${y0 + 14})` }
+      : { x: cx, y: y0 + 18, 'text-anchor': 'middle' }, svg, lab);
+    const hit = el('rect', { x: gx, y: 0, width: gw, height: y0 + 4, fill: 'transparent' }, g);
+    hit.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${c.name} = ${l}</div>` +
+      G.map((who, s) => `${who}: ${pct(cond[s][j])} (${other.name} ${pct(other.cond[s][j])})`).join('<br>')));
+    hit.addEventListener('mouseleave', hideTip);
+  });
+  el('line', { x1: mL, x2: W, y1: y0, y2: y0, stroke: 'var(--ink-3)' }, svg);
+}
+
+function drawBeforeAfter() {
+  const D = cur(), BA = D.before_after;
+  $('ba-body').style.display = BA ? '' : 'none';
+  $('ba-none').style.display = BA ? 'none' : '';
+  if (!BA) {
+    $('ba-sub').textContent = '';
+    $('ba-none').textContent = `No AIM hybrid release of ${D.label} on disk (fold 0, refit 0 in aim_fair/out/). ` +
+      'Run aim_fair/run_datasets.sh (or run_final.sh for Adult), then rebuild this page.';
+    return;
+  }
+  const merged = Object.entries(BA.merged);
+  $('ba-sub').textContent = `Actual release, ε ${BA.eps}, τ ${BA.tau} (fold 0, refit 0)` +
+    (merged.length ? `; merged into MASK: ${merged.map(([c, l]) => `${c} ${l.join(' + ')}`).join('; ')}.` : '.');
+  // all-columns table
+  const A = BA.all_columns;
+  $('ba-tbl').innerHTML = !A ? '<p class="note">Not computed: needs the fold 0 test split and the main (torch) environment.</p>' :
+    '<table><tr><th>Table</th><th>balanced error</th><th>folded tstr</th></tr>' +
+    A.map(r => `<tr class="${r.label.startsWith('AIM hybrid') || r.label === 'Real data' ? 'hi' : ''}"><td>${r.label}</td>` +
+      `<td>${r.ber.toFixed(3)}</td><td>${r.tstr.toFixed(3)}</td></tr>`).join('') + '</table>';
+  // per-column dumbbells
+  const rows = D.columns.map(c => ({ c, real: baTV(c.real), masked: c.real_masked ? baTV(c.real_masked) : null,
+    hyb: baTV(c.checkpoints.hybrid) })).sort((a, b) => b.real - a.real);
+  const svg = $('ba-rank'); svg.innerHTML = '';
+  const W = svg.clientWidth || 900, rowH = 26, valW = 128;
+  const labW = Math.min(W * 0.42, Math.max(...rows.map(r => r.c.name.length * 6.5)) + 14);
+  const { max, step } = niceAxis(Math.max(...rows.flatMap(r => [r.real, r.hyb, r.masked ?? 0])));
+  const x0 = labW, sx = v => x0 + (W - labW - valW) * v / max, H = rows.length * rowH + 22;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const dec = step < 0.1 ? 2 : 1;
+  for (let i = 0; i * step <= max + 1e-9; i++) {
+    el('line', { x1: sx(i * step), x2: sx(i * step), y1: 0, y2: rows.length * rowH, stroke: 'var(--grid)' }, svg);
+    el('text', { x: sx(i * step), y: H - 4, 'text-anchor': 'middle' }, svg, (i * step).toFixed(dec));
+  }
+  rows.forEach((r, i) => {
+    const y = i * rowH, cy = y + rowH / 2, g = el('g', { class: 'row' }, svg);
+    el('rect', { class: 'bg', x: 0, y, width: W, height: rowH, rx: 6,
+      fill: r.c.name === S.sel ? 'var(--sel)' : 'transparent' }, g);
+    el('text', { x: labW - 10, y: cy + 4, 'text-anchor': 'end',
+      style: r.c.name === S.sel ? 'fill:var(--ink);font-weight:600' : '' }, g, r.c.name);
+    el('line', { x1: sx(r.real), x2: sx(r.hyb), y1: cy, y2: cy, stroke: 'var(--ink-3)', 'stroke-width': 1.5 }, g);
+    el('circle', { cx: sx(r.real), cy, r: 5, fill: 'var(--panel)', stroke: 'var(--ink-2)', 'stroke-width': 2 }, g);
+    if (r.masked !== null) el('circle', { cx: sx(r.masked), cy, r: 5, fill: 'var(--panel)', stroke: 'var(--ink-2)',
+      'stroke-width': 2, 'stroke-dasharray': '2.5 2' }, g);
+    el('circle', { cx: sx(r.hyb), cy, r: 5, fill: 'var(--ink)', stroke: 'var(--panel)', 'stroke-width': 2 }, g);
+    el('text', { x: W - 4, y: cy + 4, 'text-anchor': 'end' }, g,
+      `${r.real.toFixed(3)} → ${r.masked !== null ? r.masked.toFixed(3) + ' → ' : ''}${r.hyb.toFixed(3)}`);
+    g.addEventListener('click', () => { S.sel = r.c.name; render(); });
+    g.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${r.c.name}</div>` +
+      `TV real ${r.real.toFixed(3)}` + (r.masked !== null ? `, with proxy levels merged ${r.masked.toFixed(3)}` : '') +
+      `<br>AIM hybrid release ${r.hyb.toFixed(3)}<br>Balanced error from this column alone: ` +
+      `${((1 - r.real) / 2).toFixed(3)} → ${((1 - r.hyb) / 2).toFixed(3)}`));
+    g.addEventListener('mouseleave', hideTip);
+  });
+  // side-by-side histograms of the selected column, one y-axis for both
+  const c = D.columns.find(x => x.name === S.sel);
+  const real = c.real.map(r => norm(r)), hyb = c.checkpoints.hybrid.map(r => norm(r));
+  const top = Math.max(0.05, Math.ceil(Math.max(...real.flat(), ...hyb.flat()) * 20) / 20);
+  $('ba-htitle').textContent = `${c.name}: share of each ${D.sensitive} group in each ${c.ordinal ? 'bin' : 'level'}` +
+    ` (TV ${baTV(c.real).toFixed(3)} → ${baTV(c.checkpoints.hybrid).toFixed(3)})`;
+  groupBars($('ba-real'), c, real, top, { name: 'release', cond: hyb });
+  groupBars($('ba-hyb'), c, hyb, top, { name: 'real', cond: real });
+  const G = D.groups;
+  $('ba-htbl').innerHTML = `<table><tr><th>${c.name}</th><th>${G[0]}, real</th><th>${G[0]}, release</th>` +
+    `<th>${G[1]}, real</th><th>${G[1]}, release</th></tr>` +
+    c.labels.map((l, j) => `<tr><td>${l}</td><td>${pct(real[0][j])}</td><td>${pct(hyb[0][j])}</td>` +
+      `<td>${pct(real[1][j])}</td><td>${pct(hyb[1][j])}</td></tr>`).join('') + '</table>';
+}
+
+// --- model graph: the marginals AIM measured -------------------------------------
+function drawGraph() {
+  const D = cur(), G = D.model_graph, sens = D.sensitive;
+  $('g-body').style.display = G ? '' : 'none';
+  $('g-none').style.display = G ? 'none' : '';
+  if (!G) {
+    $('g-sub').textContent = '';
+    $('g-none').textContent = `No saved AIM measurements of ${D.label} (fold 0 in aim_fair/out/). ` +
+      'Run aim_fair/run_aim.py (or run_datasets.sh), then rebuild this page.';
+    return;
+  }
+  const n = G.n_rounds, k = S.gk == null ? n : Math.min(S.gk, n);
+  $('g-k').max = n; $('g-k').value = k; $('g-k').disabled = n < 2; $('g-play').disabled = n < 2;
+  $('g-kv').textContent = `${k} of ${n}`;
+  const shown = G.edges.map(e => ({ ...e, r: e.rounds.filter(x => x <= k) })).filter(e => e.r.length);
+  const withS = e => e.a === sens || e.b === sens;
+  $('g-sub').textContent = `${G.edges.length} distinct 2-way tables in ${n} rounds over ${G.nodes.length} columns; ` +
+    `${G.edges.filter(withS).length} include ${sens}. Fold 0, ${G.file}` +
+    (G.rho_total != null ? `, zCDP ρ ${G.rho_total.toFixed(4)} in all.` : '.');
+
+  // nodes on a circle, the protected column at the top
+  const nodes = [...G.nodes].sort((a, b) => (b.name === sens) - (a.name === sens));
+  const svg = $('graph'); svg.innerHTML = '';
+  // room for the longest side label (~6.5 px per character at 12px) and its node
+  const W = svg.clientWidth || 560, pad = Math.max(...nodes.map(v => v.name.length)) * 6.5 + 22;
+  const R = Math.max(50, Math.min(W / 2 - pad, 230));
+  const H = 2 * R + 2 * 34, cx = W / 2, cy = H / 2;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
+  const maxSize = Math.max(2, ...nodes.map(v => v.size || 2));
+  const pos = {};
+  nodes.forEach((v, i) => {
+    const a = -Math.PI / 2 + 2 * Math.PI * i / nodes.length;
+    pos[v.name] = { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a), a,
+      r: 4 + 7 * Math.sqrt((v.size || 2) / maxSize) };
+  });
+  const gE = el('g', {}, svg), gN = el('g', {}, svg), edgeEls = [], nodeEls = [];
+  // earliest picks drawn last, so they sit on top
+  for (const e of [...shown].sort((a, b) => b.r[0] - a.r[0])) {
+    const p = pos[e.a], q = pos[e.b];
+    const mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2, f = 0.55;   // bend toward the centre
+    const d = `M${p.x},${p.y}Q${mx + (cx - mx) * f},${my + (cy - my) * f} ${q.x},${q.y}`;
+    const latest = k < n && e.r.includes(k);
+    const op = latest ? 1 : 0.95 - 0.6 * (e.r[0] - 1) / Math.max(1, n - 1);
+    const path = el('path', { d, fill: 'none', stroke: latest ? 'var(--ink)' : withS(e) ? 'var(--g1)' : 'var(--ink-3)',
+      'stroke-width': latest ? 3 : 1.25 + 1.25 * (e.r.length - 1), 'stroke-opacity': op,
+      'stroke-linecap': 'round' }, gE);
+    edgeEls.push({ e, path, op });
+    const hit = el('path', { d, fill: 'none', stroke: 'transparent', 'stroke-width': 10 }, gE);
+    hit.addEventListener('mousemove', ev => showTip(ev,
+      `<div class="h">${e.a} × ${e.b}</div>Picked in round${e.r.length > 1 ? 's' : ''} ${e.r.join(', ')} of ${n}<br>` +
+      `${e.cells.toLocaleString()} cells, noise σ ${e.sigma.toFixed(1)} rows per cell` +
+      (withS(e) ? `<br>Links ${sens} to ${e.a === sens ? e.b : e.a}` : '')));
+    hit.addEventListener('mouseleave', hideTip);
+  }
+  const nbrs = c => shown.filter(e => e.a === c || e.b === c).map(e => e.a === c ? e.b : e.a);
+  for (const v of nodes) {
+    const p = pos[v.name], isS = v.name === sens, deg = nbrs(v.name).length;
+    const g = el('g', { class: 'gnode', tabindex: 0, role: 'button',
+      'aria-label': `${v.name}: ${deg} measured pairs` }, gN);
+    const circle = el('circle', { cx: p.x, cy: p.y, r: p.r,
+      fill: isS ? 'var(--g1)' : deg ? 'var(--ink-2)' : 'var(--panel)',
+      stroke: isS ? 'var(--g1)' : 'var(--ink-2)', 'stroke-width': 1.5 }, g);
+    const c = Math.cos(p.a), lx = p.x + (p.r + 6) * c, ly = p.y + (p.r + 6) * Math.sin(p.a);
+    const text = el('text', { x: lx, y: ly + 4, 'text-anchor': Math.abs(c) < 0.2 ? 'middle' : c > 0 ? 'start' : 'end',
+      style: isS ? 'fill:var(--ink);font-weight:600' : '' }, g, v.name);
+    nodeEls.push({ v, circle, text });
+    g.addEventListener('mouseenter', () => highlight(v.name));
+    g.addEventListener('focus', () => highlight(v.name));
+    g.addEventListener('mousemove', ev => showTip(ev, `<div class="h">${v.name}</div>` +
+      (v.size != null ? `${v.size} levels, 1-way noise σ ${v.sigma.toFixed(1)}<br>` : '') +
+      `Measured with: ${nbrs(v.name).join(', ') || 'nothing yet'}`));
+    g.addEventListener('mouseleave', () => { hideTip(); highlight(null); });
+    g.addEventListener('blur', () => highlight(null));
+  }
+
+  // per-column table
+  const rows = nodes.map(v => ({ c: v.name, d: nbrs(v.name).length,
+    s: v.name === sens ? null : nbrs(v.name).includes(sens) }))
+    .sort((a, b) => b.d - a.d || a.c.localeCompare(b.c));
+  const sRow = rows.find(r => r.c === sens);
+  $('g-read').textContent = `After ${k} round${k > 1 ? 's' : ''}: ${shown.length} tables, ` +
+    `${sRow ? sRow.d : 0} of them with ${sens}.`;
+  const table = h => {
+    $('g-tbl').innerHTML = `<table><tr><th>Column</th><th>Pairs measured</th><th>With ${sens}</th></tr>` +
+      rows.map(r => `<tr${r.c === h || (h == null && r.c === sens) ? ' class="hi"' : ''}><td>${r.c}</td>` +
+        `<td>${r.d}</td><td>${r.s ? '✓' : ''}</td></tr>`).join('') + '</table>';
+  };
+  // a hovered or focused column: its pairs at full strength, the rest dimmed
+  function highlight(h) {
+    S.ghi = h;
+    const near = h == null ? null : new Set([h, ...nbrs(h)]);
+    for (const { e, path, op } of edgeEls)
+      path.setAttribute('stroke-opacity', h == null || e.a === h || e.b === h ? op : 0.06);
+    for (const { v, circle, text } of nodeEls) {
+      const dim = near != null && !near.has(v.name);
+      circle.setAttribute('opacity', dim ? 0.3 : 1);
+      text.style.opacity = dim ? 0.4 : '';
+      text.style.fontWeight = v.name === h || v.name === sens ? 600 : '';
+      text.style.fill = v.name === h || v.name === sens ? 'var(--ink)' : '';
+    }
+    table(h);
+  }
+  highlight(S.ghi);
+}
+let gTimer = null;
+function stopPlay() { clearInterval(gTimer); gTimer = null; $('g-play').textContent = 'Play'; }
+function togglePlay() {
+  if (gTimer) return stopPlay();
+  const n = cur().model_graph.n_rounds;
+  if (S.gk == null || S.gk >= n) S.gk = 0;
+  $('g-play').textContent = 'Pause';
+  gTimer = setInterval(() => {
+    S.gk = Math.min(n, (S.gk || 0) + 1); drawGraph();
+    if (S.gk >= n) stopPlay();
+  }, 350);
+}
+
+// --- tabs and rendering ---------------------------------------------------------
+const TABS = ['score', 'flip', 'leak', 'ba', 'graph'];
+function setTab(t) {
+  S.tab = t;
+  for (const x of TABS) {
+    $('tab-' + x).setAttribute('aria-selected', String(x === t));
+    $('p-' + x).hidden = x !== t;
+  }
+  try { localStorage.setItem('leakage-explorer-tab', t); } catch (e) { /* storage blocked */ }
+  render();
+}
+
+function render() {
+  $('epsv').textContent = fmtEps(S.eps);
+  $('tauv').textContent = S.tau.toFixed(2);
+  // the scorecard and before/after are actual releases: ε does not apply there
+  $('eps').disabled = S.tab !== 'leak';
+  $('leakchips').style.display = S.tab === 'leak' ? '' : 'none';
+  $('epsh').textContent = S.tab !== 'leak' ? '(simulation only: Leakage tab)' :
+    S.eps < 1 ? '(more private, more noise)' : S.eps > 8 ? '(less private)' : '';
+  $('tauh').textContent = S.tab === 'ba' || S.tab === 'flip' ? '(not used here: τ 1 release)' :
+    S.tab === 'graph' ? '(not used here: one saved AIM run)' :
+    S.tau === 0 ? '(no repair)' : S.tau === 1 ? '(full repair)' : '';
+  if (S.tab === 'score') { drawScorecard(); drawTargets(); drawAcross(); }
+  if (S.tab === 'flip') drawFaithful();
+  if (S.tab === 'leak') {
+    const R = compute();
+    $('noise').textContent = `At ε ${fmtEps(S.eps)}: zCDP ρ = ${R.rho.toFixed(4)}, noise σ = ${R.sigma.toFixed(1)} rows ` +
+      `per cell over ${R.cols.length} tables (${cur().n.toLocaleString()} rows); seed ${S.seed}.`;
+    drawRank(R); drawHist(R);
+  }
+  if (S.tab === 'ba') drawBeforeAfter();
+  if (S.tab === 'graph') drawGraph();
+}
+
+// switch dataset: keep ε, τ and the seed; select the leakiest real column
+function setDataset(name) {
+  S.ds = name; const D = cur();
+  S.gk = null; S.ghi = null; if (gTimer) stopPlay();
+  // only the scorecard when the dataset's fold-0 data is not on disk
+  for (const x of TABS.slice(1)) $('tab-' + x).hidden = !!D.scorecard_only;
+  // ε and τ drive nothing on a scorecard of one τ: hide them there
+  for (const x of ['eps', 'tau']) $(x).closest('.ctl').style.display = D.scorecard_only ? 'none' : '';
+  // FLIP-faithful: Adult only, where its csv exists
+  $('tab-flip').hidden = !(D.scorecard && D.scorecard.faithful);
+  if (S.tab === 'flip' && $('tab-flip').hidden) { setTab('score'); }
+  $('tab-score').title = D.scorecard_only ? `Only the scorecard for ${D.label}: its fold-0 data is not ` +
+    'on disk (python aim_fair/export_folds.py --dataset D, then rebuild)' : '';
+  $('dslabel').textContent = D.label;
+  $('target').textContent = D.target;
+  document.querySelectorAll('.sens').forEach(e => { e.textContent = D.sensitive; });
+  if (D.scorecard_only) {
+    S.sel = null; $('cpchips').innerHTML = '';
+    drawFindings();
+    if (S.tab !== 'score') setTab('score'); else render();
+    return;
+  }
+  S.z = normals(S.seed);
+  const tvReal = c => tv(norm(c.real[0]), norm(c.real[1]));
+  S.sel = D.columns.reduce((a, b) => tvReal(b) > tvReal(a) ? b : a).name;
+  document.querySelectorAll('.sens').forEach(e => { e.textContent = D.sensitive; });
+  document.querySelectorAll('.g0').forEach(e => { e.textContent = D.groups[0]; });
+  document.querySelectorAll('.g1').forEach(e => { e.textContent = D.groups[1]; });
+  $('dslabel').textContent = D.label;
+  $('target').textContent = D.target;
+  $('cpchips').innerHTML = '';
+  for (const [k, cp] of Object.entries(D.checkpoints)) {
+    const b = document.createElement('button');
+    b.textContent = `AIM ${k}: ε ${cp.eps}, τ ${cp.tau}`;
+    b.title = `Jump to the setting of an actual AIM release (${cp.file}) and overlay it`;
+    b.addEventListener('click', () => { S.eps = cp.eps; S.tau = cp.tau;
+      $('eps').value = sliderFromEps(cp.eps); $('tau').value = cp.tau; render(); });
+    $('cpchips').appendChild(b);
+  }
+  drawFindings();
+  render();
+}
+
+if (!DATA) { $('err').style.display = 'block'; } else {
+  const names = Object.keys(DATA.datasets), sel = $('ds');
+  for (const n of names) {
+    const o = document.createElement('option');
+    o.value = n; o.textContent = DATA.datasets[n].label; sel.appendChild(o);
+  }
+  sel.disabled = names.length < 2;
+  sel.title = names.length < 2 ? 'Other datasets appear once their folds are on disk ' +
+    '(python aim_fair/export_folds.py --dataset D), then rebuild' : '';
+  sel.addEventListener('change', e => setDataset(e.target.value));
+  $('eps').value = sliderFromEps(S.eps); $('tau').value = S.tau;
+  $('eps').addEventListener('input', e => { S.eps = epsFromSlider(+e.target.value); render(); });
+  $('tau').addEventListener('input', e => { S.tau = +e.target.value; render(); });
+  $('reseed').addEventListener('click', () => { S.seed++; S.z = normals(S.seed); render(); });
+  $('g-k').addEventListener('input', e => { if (gTimer) stopPlay(); S.gk = +e.target.value; drawGraph(); });
+  $('g-play').addEventListener('click', togglePlay);
+  for (const t of TABS) $('tab-' + t).addEventListener('click', () => setTab(t));
+  $('sc-all').addEventListener('click', () => { S.scFold = null; render(); });
+  $('sc-f0').addEventListener('click', () => { S.scFold = 0; render(); });
+  $('fgrid').addEventListener('click', e => {   // a finding: its chart on the scorecard, flashed
+    const b = e.target.closest('.fd'); if (!b) return;
+    setTab('score');
+    const c = $('m-' + b.dataset.k);
+    c.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    c.classList.add('flash');
+    setTimeout(() => c.classList.remove('flash'), 450);   // then fades out with the scroll done
+  });
+  try { const t = localStorage.getItem('leakage-explorer-tab'); if (TABS.includes(t)) S.tab = t; }
+  catch (e) { /* storage blocked */ }
+  for (const x of TABS) {
+    $('tab-' + x).setAttribute('aria-selected', String(x === S.tab));
+    $('p-' + x).hidden = x !== S.tab;
+  }
+  let t; addEventListener('resize', () => { clearTimeout(t); t = setTimeout(render, 100); });
+  setDataset(names[0]);
+}
+</script>
+</body>
+</html>

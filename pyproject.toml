@@ -1,0 +1,23 @@
+[project]
+name = "synthetic-data-bootcamp"
+version = "0.1.0"
+description = "FLIP / fair-AIM synthetic data experiments: VAE, scoring, charts, leakage explorer"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "lightgbm>=4.7.0",
+    "matplotlib>=3.8",
+    "opacus>=1.5",
+    "pandas>=2.0",
+    "scikit-learn>=1.4",
+    "scipy>=1.11",
+    "torch>=2.2",
+    "tqdm>=4.66",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# Scripts, not an installable package.
+package = false

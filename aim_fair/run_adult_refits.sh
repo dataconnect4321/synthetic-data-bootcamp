@@ -7,8 +7,10 @@
 cd "$(dirname "$0")/.."
 export PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8
 export XLA_FLAGS=${XLA_FLAGS:-"--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=2"}
-PY=${PY:-python}
-AIMPY=${AIMPY:-aim_fair/.venv/Scripts/python.exe}
+PY=${PY:-$(command -v python || command -v python3)}   # main environment
+# mbi + JAX environment: the venv's python on macOS / Linux, or on Windows
+[ -x aim_fair/.venv/bin/python ] && V=aim_fair/.venv/bin/python || V=aim_fair/.venv/Scripts/python.exe
+AIMPY=${AIMPY:-$V}
 AIMPY=$(cd "$(dirname "$AIMPY")" && pwd)/$(basename "$AIMPY")
 MEAS=${MEAS:-aimfinal}; T=${T:-aimre}
 FOLDS=${FOLDS:-"0 1 2"}; R=${R:-"0 1 2"}

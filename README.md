@@ -128,24 +128,33 @@ public-bin variant.
 
 ## Setup
 
+Two [uv](https://docs.astral.sh/uv/) projects, each with its own lockfile
+and Python 3.13 venv:
+
 ```bash
-# main environment (torch): VAE, scoring, charts, tests
-pip install torch opacus scikit-learn pandas scipy tqdm matplotlib
+# main environment (torch): VAE, scoring, charts, tests -> .venv
+uv sync
+source .venv/bin/activate
 python -m pytest -q tests
 
-# AIM environment (mbi needs Python >= 3.11 and JAX)
-python3.13 -m venv aim_fair/.venv
-aim_fair/.venv/Scripts/python -m pip install "git+https://github.com/ryan112358/mbi.git" pandas scikit-learn scipy
-aim_fair/.venv/Scripts/python aim_fair/test_aim_fair.py
-
-# LightGBM environment for FLIP's evaluation protocol (flip_protocol.py)
-python3.12 -m venv aim_fair/.venv-aif360
-aim_fair/.venv-aif360/Scripts/python -m pip install lightgbm pandas scipy joblib scikit-learn
+# AIM environment (mbi needs Python >= 3.11 and JAX) -> aim_fair/.venv
+(cd aim_fair && uv sync)
+aim_fair/.venv/bin/python aim_fair/test_aim_fair.py
 ```
 
+On Windows the interpreters are `.venv/Scripts/python` and
+`aim_fair/.venv/Scripts/python`. The main environment includes LightGBM for
+FLIP's evaluation protocol (`aim_fair/flip_protocol.py`). Activate the main environment before
+running any script: `python` is often only a shell alias, which bash
+scripts do not see.
+
+The shell scripts find either layout (`aim_fair/.venv/bin/python` first)
+and take the main interpreter from `PY` or the active environment. Torch
+runs on the CPU when there is no CUDA.
+
 UCI Adult goes in `Data/adult.data` and `Data/adult.test`. Outputs go to
-`adult_results/` (not committed). If pip's git clone fails with an SSL
-error on Windows, prefix the install with `GIT_CONFIG_COUNT=1
+`adult_results/` (not committed). If the mbi git clone fails with an SSL
+error on Windows, prefix `uv sync` with `GIT_CONFIG_COUNT=1
 GIT_CONFIG_KEY_0=http.sslBackend GIT_CONFIG_VALUE_0=schannel`.
 
 ## Run
@@ -168,15 +177,48 @@ python run_adult_flip.py --score-csv adult_results/hm_e3_lam4_argmax_synthetic.c
 python aim_fair/final_chart.py
 python aim_fair/task_auc.py
 
-# FLIP's own evaluation protocol (LightGBM, every attribute as a target):
-# fresh refits from the saved measurements, then the protocol and its chart
-bash aim_fair/run_adult_refits.sh
-aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py
+# FLIP's own evaluation protocol (LightGBM, every attribute as a target) on
+# the tau grid's tau-1 and plain AIM tables (run scripts/run_tau_grid.sh first),
+# then the FLIP-faithful comparison and its chart
+python aim_fair/flip_protocol.py
 python aim_fair/flip_faithful_chart.py
 # the same protocol on ACS-I Alabama / Utah and Dutch, and the 4-dataset table
-for d in acs_al acs_ut dutch; do aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py --dataset $d; done
+for d in acs_al acs_ut dutch; do python aim_fair/flip_protocol.py --dataset $d; done
 python aim_fair/flip_datasets_table.py
+
+# interactive dashboard (every dataset whose fold-0 split is on disk); main
+# environment. The scorecard tab needs the tau grid first: refits and scoring
+# from run_final.sh's saved measurements, 3 folds x 3 refits per tau (a fold
+# without measurements is measured first, about 1.5 h):
+bash scripts/run_tau_grid.sh        # writes results/utility_tau_grid.csv
+python leakage_explorer.py          # writes results/leakage_explorer.html
 ```
+
+To view it, open `results/leakage_explorer.html` in a browser (macOS: `open
+results/leakage_explorer.html`; Windows: `start results\leakage_explorer.html`).
+It is one self-contained file: no server or internet needed.
+
+What the committed page contains (tabs: Scorecard, FLIP-faithful, Leakage,
+Before vs after, Model graph; ε is the privacy setting, τ the fairness setting):
+
+| | |
+|---|---|
+| Dataset | UCI Adult only (ACS-I and Dutch appear once their folds are on disk); protected `sex`, target `income` |
+| Split | fold 0 of the 3-fold CV (`run_adult_flip.prepare`, seed 42) |
+| Real data | the 30,148 training rows; every "real" number and histogram |
+| Held-out data | the 15,074 test rows; used only for folded tstr |
+| Releases | `aim_fair/out/aimfinal_tau1_e3_f0_r0_synthetic.csv` (hybrid: eps 3, delta 1e-5, private bins, tau 1, masking + rules) and `aimfinalplain_e3_f0_r0_synthetic.csv` (plain AIM, tau 0, same measurements); 30,148 rows each, fold 0 refit 0 of the tau grid, refitted from `run_final.sh`'s measurements (the earlier `lk_*` run is the fallback) |
+| Headline strip | plain AIM -> hybrid at tau 1 for BER, income AUC, parity and EO gap, from the scorecard grid. AUC and parity carry the paired per-fold difference (mean ± sd, and in how many folds it has the same sign); EO is set against the real data's gap. Click one to jump to its chart |
+| Scorecard | the hybrid at tau 0, 0.25, 0.5, 0.75, 1 refitted from each fold's eps-3 measurements (post-processing, same privacy), plus plain AIM from the same measurements (its own slot left of the tau axis). Each point is the mean over refits, then folds; the band is ± 1 sd across folds (the RESULTS.md convention). The committed csv is `run_final.sh`'s measurements (`aimfinal_e3_f0..2`), 3 refits × 3 folds, from `scripts/run_tau_grid.sh`. BER, A-NCB (as in RESULTS.md), income AUC, validity and impossible rows from `run_adult_flip.py --score-csv`; income parity, EO gap (TPR gap, threshold 0.5) and the Eq. 14 / Eq. 15 means over all targets from FLIP's own protocol (`aim_fair/flip_protocol.py`, LightGBM, real test people; computed by `tau_grid_summary.py`, cached in `adult_results/flipproto/`), for the real data too. Values in `results/utility_tau_grid.csv`. A toggle shows fold 0 alone: its tau-1 point is the same tables as the FLIP-faithful tab's AIM column. Baseline: FLIP at lambda 4, eps 3, as reported in its paper (Fig. 3; its own evaluation code, not computed like the AIM points; no validity, impossible rows or per-target means, shown n/r). The tooltips add our reproduction of FLIP (fold 0, scored like AIM). Both from `results/flip_faithful_comparison.csv` |
+| FLIP-faithful | `results/flip_faithful_comparison.csv` as a table: FLIP paper vs FLIP reproduction vs AIM hybrid (fold 0, 3 refits at tau 1 of the tau grid), every metric of RESULTS.md's FLIP-faithful section. The page build checks that the AIM column equals the scorecard's fold-0 point at tau 1 in the 9 metrics both have, and marks them |
+| All-columns leakage | the scorer's classifier (`paper_metrics.py`): BER on the table itself (3-fold, mean of 10 seeds) and folded tstr (trained on the table, tested on the held-out rows, masked like the table). Equal to `run_adult_flip.py --score-csv --mask-proxies` on the same file (hybrid: BER 0.5086, tstr 0.4018; the 3-fold x 10-refit means are 0.505 / 0.434) |
+
+Notes:
+
+- The page embeds **exact, non-private** per-sex counts of the real training fold (and the all-columns scores). It holds no row-level data, but it is not a DP release: do not share it as one.
+- The Leakage tab's epsilon / tau histograms are a marginal-level simulation in the browser: Gaussian noise on each [sex x column] table, then `fair_aim.py`'s repair. There is no Private-PGM fit, masking or rules. The Scorecard and Before vs after tabs use actual releases (eps 3 only).
+- Numeric columns are shown in the public bins (`adult_domain.EDGES`), including for the release made with private bins; `native-country` shows its 10 most common levels plus "Other".
+- Proxy levels are flagged on the real training fold with `detect_proxy_classes`' rule. The hybrid detects them from its noisy measurements and merged the same levels (relationship: Husband, Wife).
 
 ### The FLIP paper's other datasets
 
@@ -207,7 +249,8 @@ bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
 | `aim_fair/adult_domain.py` | public bins and categories; encoding and decoding |
 | `aim_fair/run_aim.py`, `run_final.sh` | measure a fold and write refits; the 3-fold final run |
 | `aim_fair/final_chart.py`, `task_auc.py` | results tables and chart; task independence |
-| `aim_fair/flip_protocol.py`, `flip_faithful_chart.py`, `flip_datasets_table.py`, `run_adult_refits.sh` | FLIP's own evaluation protocol (LightGBM, Eqs. 14 and 15, every attribute a target; `--dataset` for ACS-I / Dutch), the FLIP-faithful comparison chart and the 4-dataset table |
+| `scripts/run_tau_grid.sh`, `aim_fair/tau_grid_summary.py` | tau grid of hybrid refits from each fold's private measurements, scored, mean ± sd across folds (plus per-fold rows); the dashboard's scorecard and headline strip |
+| `aim_fair/flip_protocol.py`, `flip_faithful_chart.py`, `flip_datasets_table.py` | FLIP's own evaluation protocol (LightGBM, Eqs. 14 and 15, every attribute a target; per table for the tau grid; `--dataset` for ACS-I / Dutch), the FLIP-faithful comparison chart and the 4-dataset table. `run_adult_refits.sh` makes standalone refits (aimre), no longer used by them |
 | `aim_fair/check_schema.py` | how well public vs private bins reproduce the real numeric values |
 | `aim_fair/export_folds.py` | the same 3-fold splits as `run_adult_flip.py` |
 | `datasets.py`, `aim_fair/run_datasets.sh`, `aim_fair/datasets_summary.py` | ACS-I Alabama / Utah and Dutch census: loaders, the 3-dataset run, its summary table |
@@ -216,6 +259,7 @@ bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
 | `run_flip_demo.py`, `run_flip_full_pipeline.py` | VAE training (FLIP phases) and latent diffusion |
 | `calibrate_dp.py` | Eq. 13 noise multipliers for a target epsilon |
 | `paper_heatmap_compare.py` | FLIP-as-published heatmaps against the paper's Fig. 3 |
+| `leakage_explorer.py`, `leakage_explorer_template.html` | interactive dashboard (`results/leakage_explorer.html`): metrics scorecard along tau, which columns leak the protected attribute (simulated epsilon / tau), real data vs the AIM hybrid release |
 | `tabsyn-main/` | the parts of TabSyn used (Apache 2.0), with the FLIP terms in `tabsyn/vae/` |
 | `scripts/` | VAE run scripts |
 | `tests/` | unit tests (`aim_fair/test_aim_fair.py` for the AIM side) |

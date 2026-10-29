@@ -17,18 +17,21 @@ matched selection (the share the real-data model selects): the TPR gap
 (equal opportunity), the FPR gap, their max (fairlearn's equalized odds
 difference) and their mean (average odds).
 
-Sources: real training fold; plain AIM and AIM hybrid (3 folds x 3 refits,
-run_adult_refits.sh); FLIP faithful reproduction (lambda 4, nominal eps 3;
-fold 0 only, the table that exists). Rows marked fold0 restrict every source
-to fold 0 for the like-for-like FLIP row.
+Sources: real training fold; plain AIM and AIM hybrid at tau 1 (3 folds x
+3 refits: the tau grid's tables, scripts/run_tau_grid.sh, so the dashboard's
+scorecard scores the same tables); FLIP faithful reproduction (lambda 4,
+nominal eps 3; fold 0 only, the table that exists). Rows marked fold0
+restrict every source to fold 0 for the like-for-like FLIP row. A source
+whose tables are not on disk keeps its rows from the existing csvs (printed),
+so the FLIP reproduction survives on a machine without its table.
 
 --dataset acs_al / acs_ut / dutch scores the FLIP paper's other datasets
 (run_datasets.sh tables: real, plain AIM, AIM hybrid; 3 folds x 3 refits)
 the same way. Their outcome is the dataset's target (income for ACS-I,
 high-level occupation for Dutch) in place of Adult's income.
 
-    aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py   # lightgbm
-    aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py --dataset dutch
+    python aim_fair/flip_protocol.py      # main environment (lightgbm)
+    python aim_fair/flip_protocol.py --dataset dutch
 Writes results/flip_protocol_targets.csv, results/flip_protocol_income.csv
 (Adult) or results/flip_protocol_{targets,outcome}_{dataset}.csv.
 """
@@ -51,9 +54,9 @@ CAT = ['income', 'workclass', 'marital-status', 'occupation', 'relationship',
 SEX, MASK, TARGET = 'sex', 'MASK', 'income'
 SOURCES = [   # name, path pattern, refits, folds
     ('Real data', 'aim_fair/data/fold{f}_train.csv', [None], [0, 1, 2]),
-    ('Plain AIM', 'aim_fair/out/aimreplain_e3_f{f}_r{r}_synthetic.csv',
+    ('Plain AIM', 'aim_fair/out/aimfinalplain_e3_f{f}_r{r}_synthetic.csv',
      [0, 1, 2], [0, 1, 2]),
-    ('AIM hybrid', 'aim_fair/out/aimre_e3_f{f}_r{r}_synthetic.csv',
+    ('AIM hybrid', 'aim_fair/out/aimfinal_tau1_e3_f{f}_r{r}_synthetic.csv',
      [0, 1, 2], [0, 1, 2]),
     ('FLIP reproduction (lambda 4, nominal eps 3)',
      'adult_results/flipfaithful_e3_f0_lam4_synthetic.csv', [None], [0]),
@@ -145,7 +148,54 @@ def income(train, test, male, k):
     return out, (p > 0.5).mean()
 
 
-def fold_job(f, dataset):
+def table_scores(path, f):
+    """One table (path relative to the repo root) under the protocol, against
+    fold f's real test people: income parity and EO (TPR gap) at threshold
+    0.5, and the means over targets of Eq. 14 (categorical) and W1 / sd
+    (numeric), as flip_faithful_chart.py reports them."""
+    test = read(f'aim_fair/data/fold{f}_test.csv')
+    real = read(f'aim_fair/data/fold{f}_train.csv')
+    male = (test[SEX] == 'Male').to_numpy()
+    tr = read(path)[test.columns]
+    t = [one(tr, test, c, male, real[c].std() if c in NUM else None)
+         for c in NUM + CAT]
+    res, _ = income(tr, test, male, None)
+    return {'parity': res['0.5']['parity'], 'eo_gap': res['0.5']['EO = TPR gap'],
+            'sp_cat': np.mean([r['value_sd'] for r in t if r['metric'] != 'W1']),
+            'w1_num': np.mean([r['value_sd'] for r in t if r['metric'] == 'W1'])}
+
+
+def run_scores(runs, n_jobs=4):
+    """{tag: table_scores} for runs [(tag, table path, fold)], cached per tag
+    in adult_results/flipproto/<tag>.json, as the scorer caches its jsons (a
+    cached tag is not rescored). Used by tau_grid_summary.py for the
+    scorecard."""
+    import json
+
+    def cache(tag):
+        return os.path.join(ROOT, 'adult_results', 'flipproto', f'{tag}.json')
+
+    os.makedirs(os.path.dirname(cache('x')), exist_ok=True)
+    todo = [r for r in runs if not os.path.exists(cache(r[0]))]
+    done = Parallel(n_jobs=n_jobs)(delayed(table_scores)(p, f)
+                                   for _, p, f in todo)
+    for (tag, p, f), s in zip(todo, done):
+        with open(cache(tag), 'w') as fh:
+            json.dump({'table': p, 'fold': f,
+                       **{k: float(v) for k, v in s.items()}}, fh, indent=1)
+    out = {}
+    for tag, _, _ in runs:
+        with open(cache(tag)) as fh:
+            out[tag] = json.load(fh)
+    return out
+
+
+def on_disk(pat, refits, folds):
+    return all(os.path.exists(os.path.join(ROOT, pat.format(f=f, r=r)))
+               for f in folds for r in refits)
+
+
+def fold_job(f, dataset, skip=()):
     if dataset != 'adult':
         use_dataset(dataset)    # joblib workers start without the globals
     pre = '' if dataset == 'adult' else dataset + '_'
@@ -155,7 +205,7 @@ def fold_job(f, dataset):
     sd = {c: real[c].std() for c in NUM}
     t_rows, i_rows, k = [], [], None
     for name, pat, refits, folds in SOURCES:
-        if f not in folds:
+        if f not in folds or name in skip:
             continue
         for r in refits:
             tr = read(pat.format(f=f, r=r))[test.columns]
@@ -190,7 +240,22 @@ def main():
     a = ap.parse_args()
     if a.dataset != 'adult':
         use_dataset(a.dataset)
-    parts = Parallel(n_jobs=3)(delayed(fold_job)(f, a.dataset)
+    suf = '' if a.dataset == 'adult' else '_' + a.dataset
+    paths = {'targets': os.path.join(ROOT, 'results',
+                                     f'flip_protocol_targets{suf}.csv'),
+             'income': os.path.join(ROOT, 'results',
+                                    'flip_protocol_income.csv' if a.dataset == 'adult'
+                                    else f'flip_protocol_outcome{suf}.csv')}
+    skip = [s for s, p, r, f in SOURCES if not on_disk(p, r, f)]
+    kept = {}
+    for k, p in paths.items():   # rows of the missing sources, as committed
+        old = pd.read_csv(p) if skip and os.path.exists(p) else None
+        kept[k] = None if old is None else old[old.source.isin(skip)]
+    for s in skip:
+        if kept['targets'] is None or s not in set(kept['targets'].source):
+            raise SystemExit(f'{s}: tables missing and no rows in {paths["targets"]}')
+        print(f'{s}: tables not on disk, rows kept from the existing csvs')
+    parts = Parallel(n_jobs=3)(delayed(fold_job)(f, a.dataset, skip)
                                for f in range(3))
     targets = pd.concat([p[0] for p in parts])
     inc = pd.concat([p[1] for p in parts])
@@ -200,6 +265,8 @@ def main():
     for scope in ('fold0', 'all'):
         t = summarize(targets, ['source', 'target', 'metric'], scope)
         t['scope'] = scope
+        if kept['targets'] is not None:
+            t = pd.concat([t, kept['targets'][kept['targets'].scope == scope]])
         out_t.append(t)
         piv = t.pivot(index='target', columns='source', values='value_sd')
         piv = piv[[s for s, *_ in SOURCES if s in piv]]
@@ -212,15 +279,13 @@ def main():
         print(piv.round(3).to_string())
         i = summarize(inc, ['source', 'threshold'], scope)
         i['scope'] = scope
+        if kept['income'] is not None:
+            i = pd.concat([i, kept['income'][kept['income'].scope == scope]])
         out_i.append(i)
         print(f'\n== {TARGET}: parity and EO candidates, scope {scope}')
         print(i.round(3).to_string(index=False))
-    suf = '' if a.dataset == 'adult' else '_' + a.dataset
-    pd.concat(out_t).round(4).to_csv(os.path.join(
-        ROOT, 'results', f'flip_protocol_targets{suf}.csv'), index=False)
-    pd.concat(out_i).round(4).to_csv(os.path.join(
-        ROOT, 'results', 'flip_protocol_income.csv' if a.dataset == 'adult'
-        else f'flip_protocol_outcome{suf}.csv'), index=False)
+    pd.concat(out_t).round(4).to_csv(paths['targets'], index=False)
+    pd.concat(out_i).round(4).to_csv(paths['income'], index=False)
 
 
 if __name__ == '__main__':
