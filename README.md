@@ -182,6 +182,9 @@ python aim_fair/task_auc.py
 # then the FLIP-faithful comparison and its chart
 python aim_fair/flip_protocol.py
 python aim_fair/flip_faithful_chart.py
+# the same protocol on ACS-I Alabama / Utah and Dutch, and the 4-dataset table
+for d in acs_al acs_ut dutch; do python aim_fair/flip_protocol.py --dataset $d; done
+python aim_fair/flip_datasets_table.py
 
 # interactive dashboard (every dataset whose fold-0 split is on disk); main
 # environment. The scorecard tab needs the tau grid first: refits and scoring
@@ -247,7 +250,7 @@ bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
 | `aim_fair/run_aim.py`, `run_final.sh` | measure a fold and write refits; the 3-fold final run |
 | `aim_fair/final_chart.py`, `task_auc.py` | results tables and chart; task independence |
 | `scripts/run_tau_grid.sh`, `aim_fair/tau_grid_summary.py` | tau grid of hybrid refits from each fold's private measurements, scored, mean ± sd across folds (plus per-fold rows); the dashboard's scorecard and headline strip |
-| `aim_fair/flip_protocol.py`, `flip_faithful_chart.py` | FLIP's own evaluation protocol (LightGBM, Eqs. 14 and 15, every attribute a target; per table for the tau grid) and the FLIP-faithful comparison chart. `run_adult_refits.sh` makes standalone refits (aimre), no longer used by them |
+| `aim_fair/flip_protocol.py`, `flip_faithful_chart.py`, `flip_datasets_table.py` | FLIP's own evaluation protocol (LightGBM, Eqs. 14 and 15, every attribute a target; per table for the tau grid; `--dataset` for ACS-I / Dutch), the FLIP-faithful comparison chart and the 4-dataset table. `run_adult_refits.sh` makes standalone refits (aimre), no longer used by them |
 | `aim_fair/check_schema.py` | how well public vs private bins reproduce the real numeric values |
 | `aim_fair/export_folds.py` | the same 3-fold splits as `run_adult_flip.py` |
 | `datasets.py`, `aim_fair/run_datasets.sh`, `aim_fair/datasets_summary.py` | ACS-I Alabama / Utah and Dutch census: loaders, the 3-dataset run, its summary table |

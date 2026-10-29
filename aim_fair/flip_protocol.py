@@ -25,10 +25,19 @@ restrict every source to fold 0 for the like-for-like FLIP row. A source
 whose tables are not on disk keeps its rows from the existing csvs (printed),
 so the FLIP reproduction survives on a machine without its table.
 
+--dataset acs_al / acs_ut / dutch scores the FLIP paper's other datasets
+(run_datasets.sh tables: real, plain AIM, AIM hybrid; 3 folds x 3 refits)
+the same way. Their outcome is the dataset's target (income for ACS-I,
+high-level occupation for Dutch) in place of Adult's income.
+
     python aim_fair/flip_protocol.py      # main environment (lightgbm)
-Writes results/flip_protocol_targets.csv, results/flip_protocol_income.csv.
+    python aim_fair/flip_protocol.py --dataset dutch
+Writes results/flip_protocol_targets.csv, results/flip_protocol_income.csv
+(Adult) or results/flip_protocol_{targets,outcome}_{dataset}.csv.
 """
+import argparse
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -42,7 +51,7 @@ NUM = ['age', 'fnlwgt', 'education-num', 'capital-gain', 'capital-loss',
        'hours-per-week']
 CAT = ['income', 'workclass', 'marital-status', 'occupation', 'relationship',
        'race', 'native-country']
-SEX, MASK = 'sex', 'MASK'
+SEX, MASK, TARGET = 'sex', 'MASK', 'income'
 SOURCES = [   # name, path pattern, refits, folds
     ('Real data', 'aim_fair/data/fold{f}_train.csv', [None], [0, 1, 2]),
     ('Plain AIM', 'aim_fair/out/aimfinalplain_e3_f{f}_r{r}_synthetic.csv',
@@ -52,6 +61,24 @@ SOURCES = [   # name, path pattern, refits, folds
     ('FLIP reproduction (lambda 4, nominal eps 3)',
      'adult_results/flipfaithful_e3_f0_lam4_synthetic.csv', [None], [0]),
 ]
+
+
+def use_dataset(name):
+    """Point this module at another FLIP-paper dataset (datasets.py)."""
+    global NUM, CAT, SEX, TARGET, SOURCES
+    sys.path.insert(0, ROOT)
+    from datasets import CONFIG
+    c = CONFIG[name]
+    NUM, SEX, TARGET = c['numeric'], c['sensitive'], c['target']
+    CAT = [x for x in c['categorical'] if x != SEX]
+    SOURCES = [
+        ('Real data', f'aim_fair/data/{name}_fold{{f}}_train.csv', [None],
+         [0, 1, 2]),
+        ('Plain AIM', f'aim_fair/out/{name}_aimplain_e3_f{{f}}_r{{r}}'
+         '_synthetic.csv', [0, 1, 2], [0, 1, 2]),
+        ('AIM hybrid', f'aim_fair/out/{name}_aim_e3_f{{f}}_r{{r}}'
+         '_synthetic.csv', [0, 1, 2], [0, 1, 2]),
+    ]
 
 
 def read(p):
@@ -98,11 +125,11 @@ def one(train, test, target, male, sd):
 
 
 def income(train, test, male, k):
-    xtr, xte = design(train, test, 'income')
+    xtr, xte = design(train, test, TARGET)
     m = LGBMClassifier(verbose=-1, n_jobs=2, random_state=0).fit(
-        xtr, (train['income'] == '1').astype(int))
+        xtr, (train[TARGET] == '1').astype(int))
     p = m.predict_proba(xte)[:, 1]
-    y = (test['income'] == '1').to_numpy()
+    y = (test[TARGET] == '1').to_numpy()
     if k is None:            # the real-data model: matched = its own share
         k = (p > 0.5).mean()
     out = {}
@@ -168,10 +195,13 @@ def on_disk(pat, refits, folds):
                for f in folds for r in refits)
 
 
-def fold_job(f, skip=()):
-    test = read(f'aim_fair/data/fold{f}_test.csv')
-    real = read(f'aim_fair/data/fold{f}_train.csv')
-    male = (test[SEX] == 'Male').to_numpy()
+def fold_job(f, dataset, skip=()):
+    if dataset != 'adult':
+        use_dataset(dataset)    # joblib workers start without the globals
+    pre = '' if dataset == 'adult' else dataset + '_'
+    test = read(f'aim_fair/data/{pre}fold{f}_test.csv')
+    real = read(f'aim_fair/data/{pre}fold{f}_train.csv')
+    male = (test[SEX].str.lower() == 'male').to_numpy()
     sd = {c: real[c].std() for c in NUM}
     t_rows, i_rows, k = [], [], None
     for name, pat, refits, folds in SOURCES:
@@ -204,9 +234,19 @@ def summarize(df, keys, scope):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--dataset', default='adult',
+                    choices=['adult', 'acs_al', 'acs_ut', 'dutch'])
+    a = ap.parse_args()
+    if a.dataset != 'adult':
+        use_dataset(a.dataset)
+    suf = '' if a.dataset == 'adult' else '_' + a.dataset
+    paths = {'targets': os.path.join(ROOT, 'results',
+                                     f'flip_protocol_targets{suf}.csv'),
+             'income': os.path.join(ROOT, 'results',
+                                    'flip_protocol_income.csv' if a.dataset == 'adult'
+                                    else f'flip_protocol_outcome{suf}.csv')}
     skip = [s for s, p, r, f in SOURCES if not on_disk(p, r, f)]
-    paths = {k: os.path.join(ROOT, 'results', f'flip_protocol_{k}.csv')
-             for k in ('targets', 'income')}
     kept = {}
     for k, p in paths.items():   # rows of the missing sources, as committed
         old = pd.read_csv(p) if skip and os.path.exists(p) else None
@@ -215,7 +255,8 @@ def main():
         if kept['targets'] is None or s not in set(kept['targets'].source):
             raise SystemExit(f'{s}: tables missing and no rows in {paths["targets"]}')
         print(f'{s}: tables not on disk, rows kept from the existing csvs')
-    parts = Parallel(n_jobs=3)(delayed(fold_job)(f, skip) for f in range(3))
+    parts = Parallel(n_jobs=3)(delayed(fold_job)(f, a.dataset, skip)
+                               for f in range(3))
     targets = pd.concat([p[0] for p in parts])
     inc = pd.concat([p[1] for p in parts])
     pd.set_option('display.width', 250)
@@ -231,8 +272,9 @@ def main():
         piv = piv[[s for s, *_ in SOURCES if s in piv]]
         piv.loc['MEAN, categorical (SP)'] = piv.loc[CAT].mean()
         piv.loc['WORST, categorical (SP)'] = piv.loc[CAT].max()
-        piv.loc['MEAN, numeric (W1 / sd)'] = piv.loc[NUM].mean()
-        piv.loc['WORST, numeric (W1 / sd)'] = piv.loc[NUM].max()
+        if NUM:
+            piv.loc['MEAN, numeric (W1 / sd)'] = piv.loc[NUM].mean()
+            piv.loc['WORST, numeric (W1 / sd)'] = piv.loc[NUM].max()
         print(f'\n== FLIP Eq. 14 / 15 per target, scope {scope}')
         print(piv.round(3).to_string())
         i = summarize(inc, ['source', 'threshold'], scope)
@@ -240,7 +282,7 @@ def main():
         if kept['income'] is not None:
             i = pd.concat([i, kept['income'][kept['income'].scope == scope]])
         out_i.append(i)
-        print(f'\n== income: parity and EO candidates, scope {scope}')
+        print(f'\n== {TARGET}: parity and EO candidates, scope {scope}')
         print(i.round(3).to_string(index=False))
     pd.concat(out_t).round(4).to_csv(paths['targets'], index=False)
     pd.concat(out_i).round(4).to_csv(paths['income'], index=False)
