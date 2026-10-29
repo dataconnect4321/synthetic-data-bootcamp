@@ -25,7 +25,9 @@ to fold 0 for the like-for-like FLIP row.
 --dataset acs_al / acs_ut / dutch scores the FLIP paper's other datasets
 (run_datasets.sh tables: real, plain AIM, AIM hybrid; 3 folds x 3 refits)
 the same way. Their outcome is the dataset's target (income for ACS-I,
-high-level occupation for Dutch) in place of Adult's income.
+high-level occupation for Dutch) in place of Adult's income. acs_ut_wti
+scores wti_benchmark.py's 5 seed splits (60 / 20 / 20; the real test split)
+and its refit r0 per seed.
 
     aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py   # lightgbm
     aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py --dataset dutch
@@ -49,6 +51,7 @@ NUM = ['age', 'fnlwgt', 'education-num', 'capital-gain', 'capital-loss',
 CAT = ['income', 'workclass', 'marital-status', 'occupation', 'relationship',
        'race', 'native-country']
 SEX, MASK, TARGET = 'sex', 'MASK', 'income'
+FOLDS = [0, 1, 2]
 SOURCES = [   # name, path pattern, refits, folds
     ('Real data', 'aim_fair/data/fold{f}_train.csv', [None], [0, 1, 2]),
     ('Plain AIM', 'aim_fair/out/aimreplain_e3_f{f}_r{r}_synthetic.csv',
@@ -62,7 +65,7 @@ SOURCES = [   # name, path pattern, refits, folds
 
 def use_dataset(name):
     """Point this module at another FLIP-paper dataset (datasets.py)."""
-    global NUM, CAT, SEX, TARGET, SOURCES
+    global NUM, CAT, SEX, TARGET, SOURCES, FOLDS
     sys.path.insert(0, ROOT)
     from datasets import CONFIG
     c = CONFIG[name]
@@ -76,6 +79,15 @@ def use_dataset(name):
         ('AIM hybrid', f'aim_fair/out/{name}_aim_e3_f{{f}}_r{{r}}'
          '_synthetic.csv', [0, 1, 2], [0, 1, 2]),
     ]
+    if name == 'acs_ut_wti':      # wti_benchmark.py: seeds, one refit each
+        FOLDS = [0, 1, 2, 3, 4]
+        SOURCES = [
+            ('Real data', f'aim_fair/data/{name}_fold{{f}}_train.csv', [None],
+             FOLDS),
+            ('Plain AIM', f'aim_fair/out/{name}_aimplain_e3_s{{f}}_r{{r}}'
+             '_synthetic.csv', [0], FOLDS),
+            ('AIM hybrid', f'aim_fair/out/{name}_aim_e3_s{{f}}_r{{r}}'
+             '_synthetic.csv', [0], FOLDS)]
 
 
 def read(p):
@@ -186,12 +198,13 @@ def summarize(df, keys, scope):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dataset', default='adult',
-                    choices=['adult', 'acs_al', 'acs_ut', 'dutch'])
+                    choices=['adult', 'acs_al', 'acs_ut', 'dutch',
+                             'acs_ut_wti'])
     a = ap.parse_args()
     if a.dataset != 'adult':
         use_dataset(a.dataset)
-    parts = Parallel(n_jobs=3)(delayed(fold_job)(f, a.dataset)
-                               for f in range(3))
+    parts = Parallel(n_jobs=len(FOLDS))(delayed(fold_job)(f, a.dataset)
+                                        for f in FOLDS)
     targets = pd.concat([p[0] for p in parts])
     inc = pd.concat([p[1] for p in parts])
     pd.set_option('display.width', 250)

@@ -129,9 +129,10 @@ def use_dataset(name):
     read_adult = lambda: D.load(name)  # noqa: E731
 
 
-def prepare(df, fold, n_folds, seed):
+def prepare(df, fold, n_folds, seed, split=None):
     """Fold split + encoding. Numeric stats come from the training fold only;
-    category codes are shared across folds."""
+    category codes are shared across folds. split = (train_idx, test_idx)
+    replaces the KFold split (--split-csvs)."""
     enc = {}
     codes = {}
     for c in CATEGORICAL:
@@ -141,8 +142,8 @@ def prepare(df, fold, n_folds, seed):
         codes[c] = np.searchsorted(uniques, df[c].astype(str).values)
     cat = np.stack([codes[c] for c in CATEGORICAL], axis=1).astype(np.int64)
     raw_num = df[NUMERIC].values.astype(np.float64)
-    tr_idx, te_idx = list(KFold(n_folds, shuffle=True,
-                                random_state=seed).split(df))[fold]
+    tr_idx, te_idx = split or list(KFold(n_folds, shuffle=True,
+                                         random_state=seed).split(df))[fold]
     means = pd.Series(raw_num[tr_idx].mean(axis=0), index=NUMERIC)
     stds = pd.Series(raw_num[tr_idx].std(axis=0), index=NUMERIC).replace(0, 1)
     num = ((raw_num - means.values) / stds.values).astype(np.float32)
@@ -240,6 +241,8 @@ def real_ref_cache(args, version='famd2_v1'):
     same numbers. Returns get(name, fn): the cached value, or fn() computed
     and stored. Writes are atomic and merge with concurrent writers."""
     ds = '' if args.dataset == 'adult' else args.dataset + '_'
+    if args.split_csvs:
+        ds += 'files_'
     key = (f'real_ref_{ds}f{args.fold}of{args.folds}_ss{args.split_seed}_'
            f'{"mask" if args.mask_proxies else "raw"}_{version}')
     cache_dir = os.path.join(OUT_DIR, 'cache')
@@ -276,7 +279,7 @@ def main():
                          'paper plus the joint decoded-output stage, mean gap '
                          'and KL guard (best VAE process)')
     ap.add_argument('--dataset', default='adult',
-                    choices=['adult', 'acs_al', 'acs_ut', 'dutch'],
+                    choices=['adult', 'acs_al', 'acs_ut', 'dutch', 'acs_ut_wti'],
                     help='UCI Adult, or another FLIP-paper dataset '
                          '(datasets.py; sex protected in all)')
     ap.add_argument('--lam', type=float, default=4.0, help='LAMBDA_FAIR')
@@ -290,6 +293,12 @@ def main():
     ap.add_argument('--split-seed', type=int, default=42,
                     help='seed for the fold split (fixed across --seed values '
                          'so seed sweeps vary only training, not data)')
+    ap.add_argument('--split-csvs', nargs=2, default=None,
+                    metavar=('TRAIN', 'TEST'),
+                    help='score against this train / test split (raw CSVs of '
+                         'the dataset) instead of the KFold one, e.g. the '
+                         'seed splits of aim_fair/wti_benchmark.py; --fold '
+                         'then only names the reference cache')
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--phase1-epochs', type=int, default=3000)
     ap.add_argument('--phase2-epochs', type=int, default=100)
@@ -353,7 +362,15 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    data = prepare(read_adult(), args.fold, args.folds, args.split_seed)
+    if args.split_csvs:
+        tr_df, te_df = (pd.read_csv(p)[NUMERIC + CATEGORICAL]
+                        for p in args.split_csvs)
+        data = prepare(pd.concat([tr_df, te_df], ignore_index=True),
+                       args.fold, args.folds, args.split_seed,
+                       split=(np.arange(len(tr_df)),
+                              np.arange(len(tr_df), len(tr_df) + len(te_df))))
+    else:
+        data = prepare(read_adult(), args.fold, args.folds, args.split_seed)
     enc = data['encoders']
     s_idx, t_idx = CATEGORICAL.index(SENSITIVE), CATEGORICAL.index(TARGET)
     detected = detect_proxy_classes(data['train_cat'], s_idx,

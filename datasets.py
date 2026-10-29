@@ -12,6 +12,14 @@ as the protected attribute, for the AIM hybrid and the shared scorer.
   dutch           Dutch census 2001 (Van der Laan 2000), all categorical;
                   target occupation (1 = high-level). Exact duplicate rows
                   are dropped, which reproduces the paper's 18,440 rows.
+  acs_ut_wti      ACS-I Utah as preprocessed in "Where to Intervene?" (their
+                  repository, example/utils/download-acsincome.py and
+                  DPF_DataGeneration-ACSIncome.py): the same folktables
+                  filter and 16,337 rows, target PINCP above its median,
+                  OCCP in 6 Census major groups, POBP as raw codes, RAC1P
+                  White alone / other. AGEP and WKHP stay numeric (the
+                  paper's SmartNoise run treats them as ordinal /
+                  categorical integers; the AIM hybrid bins them privately).
 
 Files (not committed): Data/acs/psam_p01.csv (AL), Data/acs/psam_p49.csv
 (UT), Data/dutch/dutch.csv. Every loader returns raw values with the
@@ -39,6 +47,10 @@ CONFIG = {
                                'economic_status', 'cur_eco_activity',
                                'marital_status'],
                   sensitive='sex', target='occupation'),
+    'acs_ut_wti': dict(numeric=['AGEP', 'WKHP'],
+                       categorical=['SEX', 'income', 'COW', 'SCHL', 'MAR',
+                                    'OCCP', 'POBP', 'RELP', 'RAC1P'],
+                       sensitive='SEX', target='income'),
 }
 
 # 2018 Census occupation codes: lower bounds of the major groups
@@ -53,6 +65,11 @@ OCCP_GROUPS = [(10, 'MGR'), (500, 'BUS'), (800, 'FIN'), (1005, 'CMM'),
 POBP_GROUPS = [(1, 'US'), (60, 'US-territory'), (100, 'Europe'),
                (200, 'Asia'), (300, 'Americas'), (400, 'Africa'),
                (500, 'Oceania')]
+
+
+# "Where to Intervene?" Groups.py: the 6 Census major occupation groups
+OCCP_WTI = [(10, '0'), (3601, '1'), (4700, '2'), (6005, '3'), (7700, '5'),
+            (9800, '6')]
 
 
 def _group(codes, groups):
@@ -77,6 +94,22 @@ def _acs(state_file):
     return df
 
 
+def _acs_wti(state_file):
+    cols = ['AGEP', 'COW', 'SCHL', 'MAR', 'OCCP', 'POBP', 'RELP', 'WKHP',
+            'SEX', 'RAC1P', 'PINCP', 'PWGTP']
+    a = pd.read_csv(os.path.join(DATA_DIR, 'acs', state_file), usecols=cols)
+    a = a[(a.AGEP > 16) & (a.PINCP > 100) & (a.WKHP > 0) & (a.PWGTP >= 1)]
+    a = a.dropna(subset=cols).reset_index(drop=True)
+    df = pd.DataFrame({'AGEP': a.AGEP.astype(int), 'WKHP': a.WKHP.astype(int)})
+    df['SEX'] = a.SEX.map({1: 'Male', 2: 'Female'})
+    df['income'] = (a.PINCP > a.PINCP.median()).astype(int).astype(str)
+    for c in ('COW', 'SCHL', 'MAR', 'POBP', 'RELP'):
+        df[c] = a[c].astype(int).astype(str)
+    df['OCCP'] = _group(a.OCCP, OCCP_WTI)
+    df['RAC1P'] = np.where(a.RAC1P == 1, '1', '0')
+    return df
+
+
 def _dutch():
     d = pd.read_csv(os.path.join(DATA_DIR, 'dutch', 'dutch.csv'))
     d = d.drop_duplicates().reset_index(drop=True)
@@ -85,7 +118,8 @@ def _dutch():
 
 LOADERS = {'acs_al': lambda: _acs('psam_p01.csv'),
            'acs_ut': lambda: _acs('psam_p49.csv'),
-           'dutch': _dutch}
+           'dutch': _dutch,
+           'acs_ut_wti': lambda: _acs_wti('psam_p49.csv')}
 
 
 def load(name):
