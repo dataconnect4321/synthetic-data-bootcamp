@@ -379,6 +379,56 @@ what FLIP's numbers mean.
   vs 21% for real data. At matched selection, income parity is 0.196 for
   the hybrid vs 0.174 for the reproduction, and EO is 0.138 vs 0.044.
 
+### All four FLIP datasets under FLIP's protocol
+
+The same protocol on the FLIP paper's other datasets, sex protected in all,
+3 folds x 3 refits for every source (refits averaged within a fold, then
+folds). The outcome is income for Adult and ACS-I and high-level occupation
+for Dutch. The hybrid tables are the run_datasets.sh / run_adult_refits.sh
+releases, re-scored here. Every Dutch column is categorical, so Dutch has no
+Eq. 15 numbers.
+
+| Dataset | Source | BER (0.5 best) | A-NCB ↑ | tstr (0.5 best) | Outcome parity ↓ | Outcome EO ↓ | Mean SP, Eq. 14 ↓ | Mean W1/sd, Eq. 15 ↓ | Outcome AUC ↑ | Validity ↑ | Impossible ↓ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **UCI Adult** | Real data | 0.138 | 0.165 | 0.136 | 0.184 | 0.080 | 0.209 | 0.157 | 0.926 | 0.98 | 0% |
+| | Plain AIM | 0.157 | 0.112 | 0.140 | 0.192 | 0.148 | 0.211 | 0.141 | 0.904 | 0.91 | 0.7% |
+| | **AIM hybrid** | **0.504** | **0.903** | **0.449** | **0.130** | 0.133 | **0.164** | **0.105** | 0.891 | 0.89 | **0%** |
+| | FLIP reproduction (fold 0) | 0.162 | 0.271 | 0.168 | 0.230 | **0.073** | 0.218 | 0.147 | 0.902 | 0.56 | 42.5% |
+| | FLIP paper (reported) | 0.49 | 0.91 | — | 0.12 | 0.26 | — | — | 0.66 | — | — |
+| **ACS-I Alabama** | Real data | 0.229 | 0.879 | 0.228 | 0.147 | 0.073 | 0.073 | 0.154 | 0.878 | 0.99 | 0% |
+| | Plain AIM | 0.260 | 0.786 | 0.247 | 0.136 | 0.078 | 0.076 | 0.142 | 0.863 | 0.95 | 0% |
+| | **AIM hybrid** | **0.536** | **0.895** | **0.452** | **0.106** | **0.055** | **0.047** | **0.087** | 0.847 | 0.94 | 0% |
+| **ACS-I Utah** | Real data | 0.244 | 0.817 | 0.239 | 0.248 | 0.132 | 0.087 | 0.237 | 0.905 | 0.99 | 0% |
+| | Plain AIM | 0.275 | 0.675 | 0.259 | 0.242 | 0.124 | 0.086 | 0.218 | 0.894 | 0.96 | 0% |
+| | **AIM hybrid** | **0.537** | **0.814** | **0.447** | **0.176** | **0.068** | **0.060** | **0.144** | 0.875 | 0.94 | 0% |
+| **Dutch census** | Real data | 0.396 | 0.921 | 0.379 | 0.076 | 0.030 | 0.041 | n/a | 0.829 | 0.99 | 0% |
+| | Plain AIM | 0.398 | 0.842 | 0.384 | 0.079 | **0.020** | 0.043 | n/a | 0.815 | 0.98 | 0% |
+| | **AIM hybrid** | **0.535** | **0.966** | **0.488** | **0.071** | 0.026 | **0.038** | n/a | 0.797 | 0.93 | 0% |
+
+Outcome parity and EO are at threshold 0.5 (LightGBM). Alpha-precision,
+beta-recall and epsilon-identifiability per source are in
+`results/flip_protocol_datasets.csv`.
+
+- **Sex is hidden in the data on every dataset.** The hybrid's BER is
+  0.50-0.54, against 0.16-0.40 for plain AIM from the same measurements.
+- **Lower gaps across all targets,** FLIP's task-agnostic test:
+  - categorical gaps are 12-38% below plain AIM's;
+  - numeric gaps are about 25-40% below.
+- **The outcome:**
+  - parity falls on all four datasets;
+  - EO falls about 30% on Alabama and roughly halves on Utah;
+  - EO barely moves on Adult, and on Dutch, where the real gap is already
+    small, it goes from 0.020 to 0.026.
+- **Cost:** about 0.015-0.03 AUC and 1.5-5 points of validity against plain
+  AIM, with no impossible rows anywhere.
+- **Same selection rate.** At 0.5 the hybrid selects fewer people, which
+  lowers parity by itself. At the real-data model's selection rate
+  (`results/flip_protocol_outcome_*.csv`, "matched"):
+  - **ACS-I keeps its gains.** Alabama: parity 0.139 → 0.116, EO 0.080 →
+    0.041. Utah: parity 0.244 → 0.192, EO 0.123 → 0.055.
+  - **Adult shrinks:** parity 0.201 → 0.176, EO 0.150 → 0.135.
+  - **Dutch is about unchanged:** parity 0.079 → 0.073.
+
 ## FLIP as published: the paper's Fig. 3 layout
 
 Our reproduction of FLIP as published on fold 0, lambda x epsilon, with the
@@ -414,6 +464,9 @@ python aim_fair/task_auc.py                      # results/task_auc.csv
 bash aim_fair/run_adult_refits.sh                # 3 hybrid + 3 plain refits per fold (aimre)
 aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py   # FLIP protocol (LightGBM)
 python aim_fair/flip_faithful_chart.py           # results/flip_faithful_comparison.{png,csv}
+for d in acs_al acs_ut dutch; do aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py --dataset $d; done
+for f in 0 1 2; do python run_adult_flip.py --fold $f --score-csv aim_fair/data/fold${f}_train.csv     --score-collapsed --no-save-run --tag adult_real_f$f; done   # Adult real-data reference
+python aim_fair/flip_datasets_table.py           # results/flip_protocol_datasets.csv
 ```
 
 ## References

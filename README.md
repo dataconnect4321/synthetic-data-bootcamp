@@ -173,6 +173,9 @@ python aim_fair/task_auc.py
 bash aim_fair/run_adult_refits.sh
 aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py
 python aim_fair/flip_faithful_chart.py
+# the same protocol on ACS-I Alabama / Utah and Dutch, and the 4-dataset table
+for d in acs_al acs_ut dutch; do aim_fair/.venv-aif360/Scripts/python aim_fair/flip_protocol.py --dataset $d; done
+python aim_fair/flip_datasets_table.py
 ```
 
 ### The FLIP paper's other datasets
@@ -204,7 +207,7 @@ bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
 | `aim_fair/adult_domain.py` | public bins and categories; encoding and decoding |
 | `aim_fair/run_aim.py`, `run_final.sh` | measure a fold and write refits; the 3-fold final run |
 | `aim_fair/final_chart.py`, `task_auc.py` | results tables and chart; task independence |
-| `aim_fair/flip_protocol.py`, `flip_faithful_chart.py`, `run_adult_refits.sh` | FLIP's own evaluation protocol (LightGBM, Eqs. 14 and 15, every attribute a target) and the FLIP-faithful comparison chart |
+| `aim_fair/flip_protocol.py`, `flip_faithful_chart.py`, `flip_datasets_table.py`, `run_adult_refits.sh` | FLIP's own evaluation protocol (LightGBM, Eqs. 14 and 15, every attribute a target; `--dataset` for ACS-I / Dutch), the FLIP-faithful comparison chart and the 4-dataset table |
 | `aim_fair/check_schema.py` | how well public vs private bins reproduce the real numeric values |
 | `aim_fair/export_folds.py` | the same 3-fold splits as `run_adult_flip.py` |
 | `datasets.py`, `aim_fair/run_datasets.sh`, `aim_fair/datasets_summary.py` | ACS-I Alabama / Utah and Dutch census: loaders, the 3-dataset run, its summary table |

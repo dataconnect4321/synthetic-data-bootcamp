@@ -1,0 +1,61 @@
+source,target,metric,value,value_sd,scope
+Real data,AGEP,W1,1.3756,0.0905,fold0
+Real data,WKHP,W1,5.1012,0.3735,fold0
+Real data,income,SP (Eq. 14),0.2471,0.2471,fold0
+Real data,COW,SP (Eq. 14),0.0497,0.0497,fold0
+Real data,SCHL,SP (Eq. 14),0.0871,0.0871,fold0
+Real data,MAR,SP (Eq. 14),0.0217,0.0217,fold0
+Real data,OCCP,SP (Eq. 14),0.117,0.117,fold0
+Real data,POBP,SP (Eq. 14),0.0097,0.0097,fold0
+Real data,RELP,SP (Eq. 14),0.1126,0.1126,fold0
+Real data,RAC1P,SP (Eq. 14),0.0075,0.0075,fold0
+Plain AIM,AGEP,W1,1.3425,0.0883,fold0
+Plain AIM,WKHP,W1,4.6782,0.3426,fold0
+Plain AIM,income,SP (Eq. 14),0.2439,0.2439,fold0
+Plain AIM,COW,SP (Eq. 14),0.0696,0.0696,fold0
+Plain AIM,SCHL,SP (Eq. 14),0.0669,0.0669,fold0
+Plain AIM,MAR,SP (Eq. 14),0.0356,0.0356,fold0
+Plain AIM,OCCP,SP (Eq. 14),0.1333,0.1333,fold0
+Plain AIM,POBP,SP (Eq. 14),0.0108,0.0108,fold0
+Plain AIM,RELP,SP (Eq. 14),0.1496,0.1496,fold0
+Plain AIM,RAC1P,SP (Eq. 14),0.0097,0.0097,fold0
+AIM hybrid,AGEP,W1,1.1943,0.0785,fold0
+AIM hybrid,WKHP,W1,3.017,0.2209,fold0
+AIM hybrid,income,SP (Eq. 14),0.1745,0.1745,fold0
+AIM hybrid,COW,SP (Eq. 14),0.0185,0.0185,fold0
+AIM hybrid,SCHL,SP (Eq. 14),0.0442,0.0442,fold0
+AIM hybrid,MAR,SP (Eq. 14),0.0286,0.0286,fold0
+AIM hybrid,OCCP,SP (Eq. 14),0.135,0.135,fold0
+AIM hybrid,POBP,SP (Eq. 14),0.0104,0.0104,fold0
+AIM hybrid,RELP,SP (Eq. 14),0.0844,0.0844,fold0
+AIM hybrid,RAC1P,SP (Eq. 14),0.0111,0.0111,fold0
+Real data,AGEP,W1,1.3933,0.0916,all
+Real data,WKHP,W1,5.2262,0.3826,all
+Real data,income,SP (Eq. 14),0.2475,0.2475,all
+Real data,COW,SP (Eq. 14),0.0596,0.0596,all
+Real data,SCHL,SP (Eq. 14),0.0906,0.0906,all
+Real data,MAR,SP (Eq. 14),0.0219,0.0219,all
+Real data,OCCP,SP (Eq. 14),0.1628,0.1628,all
+Real data,POBP,SP (Eq. 14),0.0089,0.0089,all
+Real data,RELP,SP (Eq. 14),0.0965,0.0965,all
+Real data,RAC1P,SP (Eq. 14),0.0113,0.0113,all
+Plain AIM,AGEP,W1,1.2949,0.0851,all
+Plain AIM,WKHP,W1,4.8052,0.3518,all
+Plain AIM,income,SP (Eq. 14),0.2425,0.2425,all
+Plain AIM,COW,SP (Eq. 14),0.0665,0.0665,all
+Plain AIM,SCHL,SP (Eq. 14),0.0683,0.0683,all
+Plain AIM,MAR,SP (Eq. 14),0.0301,0.0301,all
+Plain AIM,OCCP,SP (Eq. 14),0.1193,0.1193,all
+Plain AIM,POBP,SP (Eq. 14),0.0068,0.0068,all
+Plain AIM,RELP,SP (Eq. 14),0.1469,0.1469,all
+Plain AIM,RAC1P,SP (Eq. 14),0.0069,0.0069,all
+AIM hybrid,AGEP,W1,1.1838,0.0778,all
+AIM hybrid,WKHP,W1,2.8855,0.2112,all
+AIM hybrid,income,SP (Eq. 14),0.1762,0.1762,all
+AIM hybrid,COW,SP (Eq. 14),0.0231,0.0231,all
+AIM hybrid,SCHL,SP (Eq. 14),0.0494,0.0494,all
+AIM hybrid,MAR,SP (Eq. 14),0.0223,0.0223,all
+AIM hybrid,OCCP,SP (Eq. 14),0.122,0.122,all
+AIM hybrid,POBP,SP (Eq. 14),0.0068,0.0068,all
+AIM hybrid,RELP,SP (Eq. 14),0.0767,0.0767,all
+AIM hybrid,RAC1P,SP (Eq. 14),0.0069,0.0069,all
