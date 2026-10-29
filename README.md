@@ -43,7 +43,7 @@ are in `RESULTS.md`.
 
 | | |
 |---|---|
-| `RESULTS.md` | all results: vs FLIP (reproduction and reported numbers), vs the best VAE process, task independence, the FLIP heatmaps |
+| `RESULTS.md` | all results: vs FLIP (reproduction and reported numbers, also under FLIP's own evaluation protocol), vs the best VAE process, task independence, the FLIP heatmaps |
 | `aim_fair/WRITEUP.md` | why we moved away from FLIP; how the AIM hybrid works; A-NCB caveats; limitations |
 | `aim_fair/ARCHITECTURE.md` | architecture diagram: privacy boundary, post-processing steps, code map |
 
@@ -140,10 +140,14 @@ python -m pytest -q tests
 # AIM environment (mbi needs Python >= 3.11 and JAX) -> aim_fair/.venv
 (cd aim_fair && uv sync)
 aim_fair/.venv/bin/python aim_fair/test_aim_fair.py
+
+# LightGBM environment for FLIP's evaluation protocol (flip_protocol.py)
+python3.12 -m venv aim_fair/.venv-aif360
+aim_fair/.venv-aif360/bin/python -m pip install lightgbm pandas scipy joblib scikit-learn
 ```
 
-On Windows the interpreters are `.venv/Scripts/python` and
-`aim_fair/.venv/Scripts/python`. Activate the main environment before
+On Windows the interpreters are `.venv/Scripts/python`,
+`aim_fair/.venv/Scripts/python` and `aim_fair/.venv-aif360/Scripts/python`. Activate the main environment before
 running any script: `python` is often only a shell alias, which bash
 scripts do not see.
 
@@ -175,6 +179,12 @@ python run_adult_flip.py --score-csv adult_results/hm_e3_lam4_argmax_synthetic.c
 # results tables and chart, task independence
 python aim_fair/final_chart.py
 python aim_fair/task_auc.py
+
+# FLIP's own evaluation protocol (LightGBM, every attribute as a target):
+# fresh refits from the saved measurements, then the protocol and its chart
+bash aim_fair/run_adult_refits.sh
+aim_fair/.venv-aif360/bin/python aim_fair/flip_protocol.py
+python aim_fair/flip_faithful_chart.py
 
 # interactive dashboard (every dataset whose fold-0 split is on disk); main
 # environment. The scorecard tab needs the tau grid first: refits and scoring
@@ -239,6 +249,7 @@ bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
 | `aim_fair/run_aim.py`, `run_final.sh` | measure a fold and write refits; the 3-fold final run |
 | `aim_fair/final_chart.py`, `task_auc.py` | results tables and chart; task independence |
 | `scripts/run_tau_grid.sh`, `aim_fair/tau_grid_summary.py` | tau grid of hybrid refits from each fold's private measurements, scored, mean ± sd across folds (plus per-fold rows); the dashboard's scorecard and headline strip |
+| `aim_fair/flip_protocol.py`, `flip_faithful_chart.py`, `run_adult_refits.sh` | FLIP's own evaluation protocol (LightGBM, Eqs. 14 and 15, every attribute a target) and the FLIP-faithful comparison chart |
 | `aim_fair/check_schema.py` | how well public vs private bins reproduce the real numeric values |
 | `aim_fair/export_folds.py` | the same 3-fold splits as `run_adult_flip.py` |
 | `datasets.py`, `aim_fair/run_datasets.sh`, `aim_fair/datasets_summary.py` | ACS-I Alabama / Utah and Dutch census: loaders, the 3-dataset run, its summary table |
