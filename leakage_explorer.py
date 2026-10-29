@@ -1,10 +1,13 @@
 """Interactive dashboard of privacy (epsilon), fairness (repair amount tau)
 and utility. Writes one self-contained page, results/leakage_explorer.html,
 with a dataset picker (Adult and every datasets.py dataset whose fold-0
-training split is on disk) and three tabs:
+training split is on disk) and four tabs:
 
-  Scorecard       actual hybrid releases along tau at eps 3, scored
-                  (results/utility_tau_grid.csv, scripts/run_tau_grid.sh);
+  Scorecard       actual hybrid releases along tau at eps 3, scored, mean
+                  and sd across folds (results/utility_tau_grid.csv,
+                  scripts/run_tau_grid.sh); the same grid feeds a strip of
+                  headline findings at the top (plain AIM -> hybrid at tau
+                  1, paired within folds);
   Leakage         which columns leak the protected attribute, and each
                   column's per-group histogram in a release simulated in the
                   browser: Gaussian noise on each [protected x column] count
@@ -12,7 +15,10 @@ training split is on disk) and three tabs:
                   aim_fair/fair_aim.py (coupling, repair_plans; pooled
                   target). Not a Private-PGM fit; actual releases (fold 0,
                   refit 0) in aim_fair/out/ are drawn as check points;
-  Before vs after the real data vs the actual hybrid release.
+  Before vs after the real data vs the actual hybrid release;
+  Model graph     the marginals AIM chose to measure (fold 0's saved noisy
+                  measurements): columns as nodes, measured pairs as edges,
+                  in selection order. Private-PGM fits its model to these.
 
     python aim_fair/export_folds.py [--dataset D]   # once, writes aim_fair/data/
     bash scripts/run_tau_grid.sh                    # the scorecard (Adult)
@@ -20,6 +26,7 @@ training split is on disk) and three tabs:
 """
 import json
 import os
+import pickle
 import sys
 
 import numpy as np
@@ -46,6 +53,11 @@ CHECKPOINTS = {
                 '{p}aim_e3_f0_r0_synthetic.csv',
                 '{p}lk_e3_f0_r0_synthetic.csv'], 3, 1),
 }
+# the saved noisy measurements behind the model graph (aim_fair/run_aim.py),
+# first found wins
+GRAPH_PKLS = ['{p}aimfinal_e3_f0_measurements.pkl',
+              '{p}aim_e3_f0_measurements.pkl',
+              '{p}lk_e3_f0_measurements.pkl']
 # display names of target values (the raw values are '0' / '1')
 TARGET_LABELS = {'income': {'0': '≤50K', '1': '>50K'},
                  'occupation': {'0': 'low-level', '1': 'high-level'}}
@@ -224,14 +236,56 @@ def flip_baseline():
 
 def scorecard(name):
     """{eps, rows, baseline} from the dataset's tau-grid csv, or None if
-    missing."""
+    missing. Rows carry the mean over folds, <metric>_sd (None when the grid
+    has one run) and the folds x refits behind them."""
     if name not in SCORECARD or not os.path.exists(SCORECARD[name][0]):
         return None
     path, eps = SCORECARD[name]
     df = pd.read_csv(path)
-    df['tau'] = df['tau'].astype(object).where(df['tau'].notna(), None)
+    df = df.astype(object).where(df.notna(), None)
     return {'eps': eps, 'rows': df.to_dict('records'),
             'baseline': flip_baseline() if name == 'adult' else None}
+
+
+def model_graph(name):
+    """The marginals AIM measured, from the dataset's first saved
+    measurement pickle, or None if there is none. Nodes are the columns
+    (size and noise sd of their 1-way table); edges are the measured 2-way
+    tables, with the rounds (1-based, among the 2-way picks, in AIM's
+    selection order) that measured them."""
+    for n in GRAPH_PKLS:
+        path = os.path.join(HERE, 'aim_fair', 'out', n.format(p=prefix(name)))
+        if os.path.exists(path):
+            break
+    else:
+        return None
+    with open(path, 'rb') as f:
+        saved = pickle.load(f)
+    if isinstance(saved, list):       # older files: measurements only
+        saved = {'measurements': saved}
+    nodes, edges, k = {}, {}, 0
+    for cl, y, sd in saved['measurements']:
+        cl, sd = tuple(cl), float(sd)
+        if len(cl) == 1:
+            nodes[cl[0]] = {'name': cl[0], 'size': int(np.size(y)), 'sigma': sd}
+            continue
+        k += 1
+        key = tuple(sorted(cl))
+        e = edges.setdefault(key, {'a': key[0], 'b': key[1], 'rounds': [],
+                                   'sigma': sd, 'cells': int(np.size(y))})
+        e['rounds'].append(k)
+        e['sigma'] = min(e['sigma'], sd)
+    for e in edges.values():          # a column only ever measured in pairs
+        for c in (e['a'], e['b']):
+            nodes.setdefault(c, {'name': c, 'size': None, 'sigma': None})
+    numeric, categorical, _, _ = schema(name)
+    order = numeric + categorical       # schema order, unknown columns last
+    nodes = sorted(nodes.values(), key=lambda v: order.index(v['name'])
+                   if v['name'] in order else len(order))
+    rho = saved.get('rho_total')
+    return {'file': os.path.basename(path), 'nodes': nodes,
+            'edges': list(edges.values()), 'n_rounds': k,
+            'rho_total': None if rho is None else float(rho)}
 
 
 def build(name):
@@ -325,7 +379,8 @@ def build(name):
             'checkpoints': {k: {'eps': e, 'tau': t, 'file': f}
                             for k, (_, e, t, f) in releases.items()},
             'before_after': before_after,
-            'scorecard': scorecard(name)}
+            'scorecard': scorecard(name),
+            'model_graph': model_graph(name)}
 
 
 def main():

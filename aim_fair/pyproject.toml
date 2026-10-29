@@ -1,0 +1,17 @@
+[project]
+name = "aim-fair"
+version = "0.1.0"
+description = "Fair AIM: separate environment because mbi needs JAX"
+requires-python = ">=3.11"
+dependencies = [
+    "mbi",
+    "pandas>=2.0",
+    "scikit-learn>=1.4",
+    "scipy>=1.11",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+mbi = { git = "https://github.com/ryan112358/mbi.git", rev = "9429881f0f21ef413424f6011b9d6ae20728176d" }

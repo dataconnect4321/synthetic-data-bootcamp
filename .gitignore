@@ -40,6 +40,9 @@ Data/
 !results/
 !results/*.csv
 
+# main environment (macOS / Linux setup in README.md)
+/.venv/
+
 # AIM comparison: local environment and generated outputs
 aim_fair/.venv/
 aim_fair/out/

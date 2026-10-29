@@ -11,8 +11,10 @@ cd "$(dirname "$0")/.."
 export PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8
 # several JAX processes at once: keep each one's CPU threads small
 export XLA_FLAGS=${XLA_FLAGS:-"--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=2"}
-PY=${PY:-python}                                   # main environment
-AIMPY=${AIMPY:-aim_fair/.venv/Scripts/python.exe}  # mbi + JAX environment
+PY=${PY:-$(command -v python || command -v python3)}   # main environment
+# mbi + JAX environment: the venv's python on macOS / Linux, or on Windows
+[ -x aim_fair/.venv/bin/python ] && V=aim_fair/.venv/bin/python || V=aim_fair/.venv/Scripts/python.exe
+AIMPY=${AIMPY:-$V}
 AIMPY=$(cd "$(dirname "$AIMPY")" && pwd)/$(basename "$AIMPY")   # absolute
 DATASETS=${DATASETS:-"acs_al acs_ut dutch"}
 FOLDS=${FOLDS:-"0 1 2"}

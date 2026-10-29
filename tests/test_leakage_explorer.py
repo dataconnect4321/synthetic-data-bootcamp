@@ -201,6 +201,7 @@ def test_build_other_datasets(tmp_path, monkeypatch):
     assert np.array(relp['real'])[:, -1].sum() == 0
     assert np.array(relp['checkpoints']['hybrid'])[:, -1].sum() == \
         int(a.RELP.isin(['1', '2']).sum())
+    assert du['model_graph'] is None                  # no measurements on disk
     agep = next(c for c in ac['columns'] if c['name'] == 'AGEP')
     assert agep['ordinal'] and len(agep['labels']) == len(L.AD.EDGES['AGEP']) - 1
     for ds in P.values():
@@ -311,9 +312,11 @@ def test_all_columns_leakage_known_answers(monkeypatch):
 
 
 def test_scorecard_matches_grid_and_scorer(tmp_path, monkeypatch):
-    """The scorecard embedded in the page equals results/utility_tau_grid.csv,
-    and the csv's hybrid and plain rows equal the scorer's json for that
-    release (final_chart.METRICS: the RESULTS.md definitions)."""
+    """The scorecard embedded in the page equals results/utility_tau_grid.csv;
+    each summary row (no fold) is the mean of its per-fold rows, with the sd
+    across them; each per-fold hybrid and plain row is the mean of the
+    scorer's jsons of that fold's refits 0 .. refits - 1 (final_chart.METRICS:
+    the RESULTS.md definitions)."""
     grid = os.path.join(ROOT, 'results', 'utility_tau_grid.csv')
     if not os.path.exists(grid):
         pytest.skip('results/utility_tau_grid.csv missing: scripts/run_tau_grid.sh')
@@ -325,30 +328,37 @@ def test_scorecard_matches_grid_and_scorer(tmp_path, monkeypatch):
     assert sc['eps'] == 3 and len(sc['rows']) == len(df)
     keys = ['ber', 'ancb', 'auc', 'income_parity', 'eo_gap', 'validity',
             'impossible']
+    sds = [k + '_sd' for k in keys]
     for got, (_, want) in zip(sc['rows'], df.iterrows()):
         assert got['source'] == want['source']
+        assert (got['fold'] is None) == pd.isna(want['fold'])
         np.testing.assert_allclose([got[k] for k in keys],
                                    [want[k] for k in keys], atol=1e-12)
+        assert [got[k] is None for k in sds] == [pd.isna(want[k]) for k in sds]
     assert set(df.source) == {'AIM hybrid', 'Plain AIM', 'Real data'}
+    # summary rows from the per-fold rows (both rounded to 4 decimals)
+    for _, s in df[df.fold.isna()].iterrows():
+        per = df[df.fold.notna() & (df.source == s.source) &
+                 ((df.tau == s.tau) | (df.tau.isna() & pd.isna(s.tau)))]
+        assert len(per) == s.folds
+        np.testing.assert_allclose(per[keys].mean(), s[keys].astype(float),
+                                   atol=1e-4)
+        if s.folds > 1:
+            np.testing.assert_allclose(per[keys].std(ddof=1),
+                                       s[sds].astype(float), atol=1e-4)
     sys.path.insert(0, os.path.join(ROOT, 'aim_fair'))
     from final_chart import METRICS
     get = {k: g for k, _, _, g in METRICS}
     res = os.path.join(ROOT, 'adult_results')
     checked = 0
-    for _, row in df.iterrows():
-        if row.source == 'AIM hybrid':
-            tag = f"lk_tau{row.tau:g}_e3_f0_r0"
-        elif row.source == 'Plain AIM':
-            tag = 'lk_plain_e3_f0_r0'
-        else:
+    for _, row in df[df.fold.notna() & (df.source != 'Real data')].iterrows():
+        paths = [os.path.join(res, row.runs.format(f=int(row.fold), r=r) + '.json')
+                 for r in range(int(row.refits))]
+        if not all(os.path.exists(p) for p in paths):
             continue
-        path = os.path.join(res, tag + '.json')
-        if not os.path.exists(path):
-            continue
-        js = json.load(open(path))
-        for k in keys:
-            assert row[k] == pytest.approx(round(float(get[k](js)), 4),
-                                           abs=1e-9), (tag, k)
+        vals = [[float(get[k](json.load(open(p)))) for k in keys] for p in paths]
+        np.testing.assert_allclose(row[keys].astype(float), np.mean(vals, 0),
+                                   atol=6e-5, err_msg=row.runs)
         checked += 1
     if not checked:
         pytest.skip('scorer jsons not in adult_results/')
@@ -378,3 +388,44 @@ def test_flip_baseline_matches_final_comparison(tmp_path, monkeypatch):
     assert [k for k, v in B['values'].items() if v is None] == ['validity',
                                                               'impossible']
     assert B['values']['ancb'] == 0.91 and B['values']['auc'] == 0.66
+
+
+def test_model_graph_from_pickle(tmp_path, monkeypatch):
+    """Nodes from the 1-way tables, edges from the 2-way picks in selection
+    order: a repeated pair keeps both rounds and the smaller noise sd; the
+    older bare-list pickle format reads the same."""
+    import pickle
+    out = tmp_path / 'aim_fair' / 'out'
+    out.mkdir(parents=True)
+    meas = [(('sex',), np.zeros(2), 9.0), (('race',), np.zeros(5), 9.0),
+            (('age',), np.zeros(4), 9.0),
+            (('race', 'sex'), np.zeros(10), 20.0),
+            (('age', 'race'), np.zeros(20), 20.0),
+            (('sex', 'race'), np.zeros(10), 15.0),
+            (('age', 'workclass'), np.zeros(28), 15.0)]
+    monkeypatch.setattr(L, 'HERE', str(tmp_path))
+    assert L.model_graph('adult') is None
+    for i, saved in enumerate([{'measurements': meas, 'rho_total': 0.5},
+                               meas]):
+        name = L.GRAPH_PKLS[i].format(p='')
+        with open(out / name, 'wb') as f:
+            pickle.dump(saved, f)
+        G = L.model_graph('adult')
+        assert G['file'] == L.GRAPH_PKLS[0].format(p='')   # first found wins
+        assert G['n_rounds'] == 4 and G['rho_total'] == 0.5
+        nodes = {v['name']: v for v in G['nodes']}
+        order = L.AD.NUMERIC + L.AD.CATEGORICAL           # schema order
+        assert [v['name'] for v in G['nodes']] == sorted(
+            nodes, key=order.index)
+        assert nodes['race']['size'] == 5 and nodes['race']['sigma'] == 9.0
+        assert nodes['workclass'] == {'name': 'workclass', 'size': None,
+                                      'sigma': None}
+        edges = {(e['a'], e['b']): e for e in G['edges']}
+        assert edges[('race', 'sex')]['rounds'] == [1, 3]
+        assert edges[('race', 'sex')]['sigma'] == 15.0
+        assert edges[('age', 'race')]['rounds'] == [2]
+        assert edges[('age', 'workclass')]['cells'] == 28
+    (out / L.GRAPH_PKLS[0].format(p='')).unlink()
+    G = L.model_graph('adult')                            # the bare list
+    assert G['file'] == L.GRAPH_PKLS[1].format(p='') and G['rho_total'] is None
+    assert G['n_rounds'] == 4

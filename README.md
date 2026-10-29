@@ -128,20 +128,32 @@ public-bin variant.
 
 ## Setup
 
+Two [uv](https://docs.astral.sh/uv/) projects, each with its own lockfile
+and Python 3.13 venv:
+
 ```bash
-# main environment (torch): VAE, scoring, charts, tests
-pip install torch opacus scikit-learn pandas scipy tqdm matplotlib
+# main environment (torch): VAE, scoring, charts, tests -> .venv
+uv sync
+source .venv/bin/activate
 python -m pytest -q tests
 
-# AIM environment (mbi needs Python >= 3.11 and JAX)
-python3.13 -m venv aim_fair/.venv
-aim_fair/.venv/Scripts/python -m pip install "git+https://github.com/ryan112358/mbi.git" pandas scikit-learn scipy
-aim_fair/.venv/Scripts/python aim_fair/test_aim_fair.py
+# AIM environment (mbi needs Python >= 3.11 and JAX) -> aim_fair/.venv
+(cd aim_fair && uv sync)
+aim_fair/.venv/bin/python aim_fair/test_aim_fair.py
 ```
 
+On Windows the interpreters are `.venv/Scripts/python` and
+`aim_fair/.venv/Scripts/python`. Activate the main environment before
+running any script: `python` is often only a shell alias, which bash
+scripts do not see.
+
+The shell scripts find either layout (`aim_fair/.venv/bin/python` first)
+and take the main interpreter from `PY` or the active environment. Torch
+runs on the CPU when there is no CUDA.
+
 UCI Adult goes in `Data/adult.data` and `Data/adult.test`. Outputs go to
-`adult_results/` (not committed). If pip's git clone fails with an SSL
-error on Windows, prefix the install with `GIT_CONFIG_COUNT=1
+`adult_results/` (not committed). If the mbi git clone fails with an SSL
+error on Windows, prefix `uv sync` with `GIT_CONFIG_COUNT=1
 GIT_CONFIG_KEY_0=http.sslBackend GIT_CONFIG_VALUE_0=schannel`.
 
 ## Run
@@ -165,7 +177,9 @@ python aim_fair/final_chart.py
 python aim_fair/task_auc.py
 
 # interactive dashboard (every dataset whose fold-0 split is on disk); main
-# environment. The scorecard tab needs the tau grid first (about 20 min):
+# environment. The scorecard tab needs the tau grid first: refits and scoring
+# from run_final.sh's saved measurements, 3 folds x 3 refits per tau (a fold
+# without measurements is measured first, about 1.5 h):
 bash scripts/run_tau_grid.sh        # writes results/utility_tau_grid.csv
 python leakage_explorer.py          # writes results/leakage_explorer.html
 ```
@@ -184,7 +198,8 @@ after; ε is the privacy setting, τ the fairness setting):
 | Real data | the 30,148 training rows; every "real" number and histogram |
 | Held-out data | the 15,074 test rows; used only for folded tstr |
 | Releases | `aim_fair/out/lk_e3_f0_r0_synthetic.csv` (hybrid: eps 3, delta 1e-5, private bins, tau 1, masking + rules) and `lk_plain_e3_f0_r0_synthetic.csv` (plain AIM, tau 0, same measurements); 30,148 rows each, refit 0 of one earlier run, not `run_final.sh` |
-| Scorecard | 5 refits of the hybrid at tau 0, 0.25, 0.5, 0.75, 1 from the same eps-3 measurements (`lk_e3_f0`, refit 0; post-processing, same privacy), plus plain AIM, all scored by `run_adult_flip.py --score-csv`: BER, A-NCB (as in RESULTS.md), income AUC, income parity, EO gap, validity, impossible rows. The real-data parity / EO use the same `downstream_sp_eo` trained on real data. Values in `results/utility_tau_grid.csv`. Baseline: FLIP at lambda 4, eps 3, as reported in its paper (Fig. 3; its own evaluation code, not computed like the AIM points; no validity or impossible rows, shown n/r). The tooltips add our reproduction of FLIP (fold 0, same scorer as AIM). Both from `results/final_comparison.csv` |
+| Headline strip | plain AIM -> hybrid at tau 1 for BER, income AUC, parity and EO gap, from the scorecard grid. AUC and parity carry the paired per-fold difference (mean ± sd, and in how many folds it has the same sign); EO is set against the real data's gap. Click one to jump to its chart |
+| Scorecard | the hybrid at tau 0, 0.25, 0.5, 0.75, 1 refitted from each fold's eps-3 measurements (post-processing, same privacy), plus plain AIM from the same measurements (its own slot left of the tau axis). Each point is the mean over refits, then folds; the band is ± 1 sd across folds (the RESULTS.md convention). The committed csv is still the single run `lk_e3_f0` (refit 0, no bands) until `scripts/run_tau_grid.sh` is rerun. All scored by `run_adult_flip.py --score-csv`: BER, A-NCB (as in RESULTS.md), income AUC, income parity, EO gap, validity, impossible rows. The real-data parity / EO use the same `downstream_sp_eo` trained on real data. Values in `results/utility_tau_grid.csv`. Baseline: FLIP at lambda 4, eps 3, as reported in its paper (Fig. 3; its own evaluation code, not computed like the AIM points; no validity or impossible rows, shown n/r). The tooltips add our reproduction of FLIP (fold 0, same scorer as AIM). Both from `results/final_comparison.csv` |
 | All-columns leakage | the scorer's classifier (`paper_metrics.py`): BER on the table itself (3-fold, mean of 10 seeds) and folded tstr (trained on the table, tested on the held-out rows, masked like the table). Equal to `run_adult_flip.py --score-csv --mask-proxies` on the same file (hybrid: BER 0.5086, tstr 0.4018; the 3-fold x 10-refit means are 0.505 / 0.434) |
 
 Notes:
@@ -223,7 +238,7 @@ bash aim_fair/run_datasets.sh       # writes results/datasets_summary.csv
 | `aim_fair/adult_domain.py` | public bins and categories; encoding and decoding |
 | `aim_fair/run_aim.py`, `run_final.sh` | measure a fold and write refits; the 3-fold final run |
 | `aim_fair/final_chart.py`, `task_auc.py` | results tables and chart; task independence |
-| `scripts/run_tau_grid.sh`, `aim_fair/tau_grid_summary.py` | tau grid of hybrid refits from one private run, scored; the dashboard's scorecard |
+| `scripts/run_tau_grid.sh`, `aim_fair/tau_grid_summary.py` | tau grid of hybrid refits from each fold's private measurements, scored, mean ± sd across folds (plus per-fold rows); the dashboard's scorecard and headline strip |
 | `aim_fair/check_schema.py` | how well public vs private bins reproduce the real numeric values |
 | `aim_fair/export_folds.py` | the same 3-fold splits as `run_adult_flip.py` |
 | `datasets.py`, `aim_fair/run_datasets.sh`, `aim_fair/datasets_summary.py` | ACS-I Alabama / Utah and Dutch census: loaders, the 3-dataset run, its summary table |
