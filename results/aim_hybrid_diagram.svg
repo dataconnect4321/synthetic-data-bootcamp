@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1320 405" width="1320" height="405" font-family="'Times New Roman', Times, serif">
+  <defs>
+    <marker id="big" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="3.2" markerHeight="3.2" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4F7CA8"/>
+    </marker>
+    <marker id="bigg" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="3.2" markerHeight="3.2" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#A9BE95"/>
+    </marker>
+    <marker id="thin" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="#444"/>
+    </marker>
+    <marker id="dot" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="#111"/>
+    </marker>
+    <!-- table icons: 4 rows x 3 columns -->
+    <symbol id="mb" viewBox="0 0 27 36">
+      <rect x="0" y="0" width="9" height="9" fill="#2E5C8A"/><rect x="9" y="0" width="9" height="9" fill="#9DB7D5"/><rect x="18" y="0" width="9" height="9" fill="#5B84B1"/>
+      <rect x="0" y="9" width="9" height="9" fill="#D3E0EE"/><rect x="9" y="9" width="9" height="9" fill="#5B84B1"/><rect x="18" y="9" width="9" height="9" fill="#2E5C8A"/>
+      <rect x="0" y="18" width="9" height="9" fill="#5B84B1"/><rect x="9" y="18" width="9" height="9" fill="#2E5C8A"/><rect x="18" y="18" width="9" height="9" fill="#D3E0EE"/>
+      <rect x="0" y="27" width="9" height="9" fill="#9DB7D5"/><rect x="9" y="27" width="9" height="9" fill="#D3E0EE"/><rect x="18" y="27" width="9" height="9" fill="#9DB7D5"/>
+    </symbol>
+    <symbol id="mbin" viewBox="0 0 27 36">
+      <rect x="0" y="0" width="9" height="18" fill="#2E5C8A"/><rect x="9" y="0" width="9" height="9" fill="#9DB7D5"/><rect x="18" y="0" width="9" height="18" fill="#5B84B1"/>
+      <rect x="9" y="9" width="9" height="18" fill="#5B84B1"/>
+      <rect x="0" y="18" width="9" height="18" fill="#9DB7D5"/><rect x="18" y="18" width="9" height="18" fill="#D3E0EE"/>
+      <rect x="9" y="27" width="9" height="9" fill="#D3E0EE"/>
+      <g fill="none" stroke="#fff" stroke-width="0.8"><path d="M9,0 V36 M18,0 V36"/></g>
+    </symbol>
+    <symbol id="mg" viewBox="0 0 27 36">
+      <rect x="0" y="0" width="9" height="9" fill="#6E8B5A"/><rect x="9" y="0" width="9" height="9" fill="#C9D6B8"/><rect x="18" y="0" width="9" height="9" fill="#9DB386"/>
+      <rect x="0" y="9" width="9" height="9" fill="#E6EDDD"/><rect x="9" y="9" width="9" height="9" fill="#9DB386"/><rect x="18" y="9" width="9" height="9" fill="#6E8B5A"/>
+      <rect x="0" y="18" width="9" height="9" fill="#9DB386"/><rect x="9" y="18" width="9" height="9" fill="#6E8B5A"/><rect x="18" y="18" width="9" height="9" fill="#E6EDDD"/>
+      <rect x="0" y="27" width="9" height="9" fill="#C9D6B8"/><rect x="9" y="27" width="9" height="9" fill="#E6EDDD"/><rect x="18" y="27" width="9" height="9" fill="#C9D6B8"/>
+    </symbol>
+    <!-- noisy count table -->
+    <symbol id="mn" viewBox="0 0 36 36">
+      <rect x="0" y="0" width="12" height="12" fill="#7F9BBA"/><rect x="12" y="0" width="12" height="12" fill="#C4CFDB"/><rect x="24" y="0" width="12" height="12" fill="#9AAFC6"/>
+      <rect x="0" y="12" width="12" height="12" fill="#B3C5A2"/><rect x="12" y="12" width="12" height="12" fill="#7F9BBA"/><rect x="24" y="12" width="12" height="12" fill="#DCE3EA"/>
+      <rect x="0" y="24" width="12" height="12" fill="#DCE3EA"/><rect x="12" y="24" width="12" height="12" fill="#9AAFC6"/><rect x="24" y="24" width="12" height="12" fill="#B3C5A2"/>
+      <g fill="#222" opacity="0.55">
+        <circle cx="4" cy="5" r="0.9"/><circle cx="9" cy="9" r="0.7"/><circle cx="16" cy="3" r="0.8"/><circle cx="21" cy="8" r="0.7"/><circle cx="29" cy="4" r="0.9"/><circle cx="33" cy="10" r="0.7"/>
+        <circle cx="3" cy="17" r="0.7"/><circle cx="8" cy="21" r="0.9"/><circle cx="15" cy="15" r="0.7"/><circle cx="20" cy="20" r="0.8"/><circle cx="27" cy="16" r="0.7"/><circle cx="32" cy="22" r="0.9"/>
+        <circle cx="5" cy="29" r="0.8"/><circle cx="10" cy="33" r="0.7"/><circle cx="17" cy="27" r="0.9"/><circle cx="22" cy="32" r="0.7"/><circle cx="28" cy="28" r="0.7"/><circle cx="34" cy="33" r="0.8"/>
+      </g>
+      <rect x="0" y="0" width="36" height="36" fill="none" stroke="#6B7C8F" stroke-width="0.8"/>
+    </symbol>
+  </defs>
+
+  <rect width="1320" height="405" fill="#ffffff"/>
+
+  <!-- ===== Inputs ===== -->
+  <text x="65" y="111" text-anchor="middle" font-size="13" fill="#333">numeric</text>
+  <rect x="20" y="120" width="90" height="52" rx="12" fill="#5B84B1"/>
+  <text x="58" y="153" text-anchor="middle" font-size="23" font-style="italic" fill="#fff">X<tspan font-size="13" dx="3" dy="-10" font-style="normal">(num)</tspan></text>
+
+  <text x="65" y="206" text-anchor="middle" font-size="13" fill="#333">categorical</text>
+  <rect x="20" y="215" width="90" height="82" rx="12" fill="#E3EAD8" stroke="#9DB386" stroke-width="1.5"/>
+  <text x="58" y="243" text-anchor="middle" font-size="23" font-style="italic" fill="#2E3B24">X<tspan font-size="13" dx="3" dy="-10" font-style="normal">(cat)</tspan></text>
+  <rect x="45" y="258" width="40" height="27" rx="5" fill="#9DB386"/>
+  <text x="65" y="277" text-anchor="middle" font-size="17" font-style="italic" fill="#fff">S</text>
+  <text x="65" y="316" text-anchor="middle" font-size="12" font-style="italic" fill="#333">S = sex</text>
+
+  <path d="M111,146 H128" stroke="#4F7CA8" stroke-width="6" marker-end="url(#big)"/>
+  <path d="M111,256 H128" stroke="#A9BE95" stroke-width="6" marker-end="url(#bigg)"/>
+
+  <!-- ===== Discretizer ===== -->
+  <rect x="135" y="70" width="190" height="262" rx="3" fill="none" stroke="#222" stroke-width="1.4" stroke-dasharray="7 4"/>
+  <text x="230" y="94" text-anchor="middle" font-size="18" font-weight="bold">Discretizer</text>
+  <use href="#mb" xlink:href="#mb" x="160" y="113" width="27" height="36"/>
+  <path d="M192,131 H262" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <text x="228" y="125" text-anchor="middle" font-size="11" font-style="italic">x ↦ bin(x)</text>
+  <use href="#mbin" xlink:href="#mbin" x="270" y="113" width="27" height="36"/>
+  <text x="230" y="168" text-anchor="middle" font-size="11.5">DP bin edges</text>
+  <text x="230" y="181" text-anchor="middle" font-size="11.5">(5% of the budget)</text>
+
+  <use href="#mg" xlink:href="#mg" x="160" y="205" width="27" height="36"/>
+  <path d="M192,223 H262" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <text x="228" y="217" text-anchor="middle" font-size="11" font-style="italic">level ↦ code</text>
+  <use href="#mg" xlink:href="#mg" x="270" y="205" width="27" height="36"/>
+  <text x="230" y="260" text-anchor="middle" font-size="11.5">protected attribute S</text>
+  <text x="230" y="273" text-anchor="middle" font-size="11.5">is kept, never repaired</text>
+  <text x="230" y="312" text-anchor="middle" font-size="14" font-style="italic">D ∈ Ω<tspan font-size="10" dy="3">1</tspan><tspan dy="-3"> × … × Ω</tspan><tspan font-size="10" dy="3">d</tspan></text>
+
+  <path d="M326,200 H342" stroke="#4F7CA8" stroke-width="6" marker-end="url(#big)"/>
+
+  <!-- ===== AIM (differentially private) ===== -->
+  <rect x="348" y="40" width="352" height="330" rx="8" fill="#BDBDBD" stroke="#7A7A7A" stroke-width="1.2"/>
+  <text x="524" y="65" text-anchor="middle" font-size="17" font-weight="bold">AIM  <tspan font-weight="normal" font-size="14">(zCDP, ε = 3, δ = 10<tspan font-size="10" dy="-6">−5</tspan><tspan dy="6">)</tspan></tspan></text>
+
+  <rect x="363" y="85" width="150" height="62" rx="8" fill="#fff" stroke="#555" stroke-width="1.1"/>
+  <text x="438" y="107" text-anchor="middle" font-size="14.5" font-weight="bold">Select</text>
+  <text x="438" y="124" text-anchor="middle" font-size="11.5">exponential mechanism</text>
+  <text x="438" y="138" text-anchor="middle" font-size="11.5">over 2-way marginals</text>
+
+  <rect x="535" y="85" width="150" height="62" rx="8" fill="#fff" stroke="#555" stroke-width="1.1"/>
+  <text x="610" y="107" text-anchor="middle" font-size="14.5" font-weight="bold">Measure</text>
+  <text x="610" y="124" text-anchor="middle" font-size="12" font-style="italic">ỹ<tspan font-size="9" dy="3">c</tspan><tspan dy="-3"> = M</tspan><tspan font-size="9" dy="3">c</tspan><tspan dy="-3">(D)</tspan></text>
+  <text x="610" y="139" text-anchor="middle" font-size="12" font-style="italic">+ 𝒩(0, σ<tspan font-size="9" dy="3">t</tspan><tspan font-size="9" dy="-8">2</tspan><tspan dy="5"> I)</tspan></text>
+
+  <text x="524" y="166" text-anchor="middle" font-size="11" font-style="italic" fill="#222">repeat until budget is spent</text>
+
+  <rect x="449" y="178" width="150" height="62" rx="8" fill="#fff" stroke="#555" stroke-width="1.1"/>
+  <text x="524" y="200" text-anchor="middle" font-size="14.5" font-weight="bold">Estimate</text>
+  <text x="524" y="217" text-anchor="middle" font-size="11.5">Private-PGM model p̂</text>
+  <text x="524" y="231" text-anchor="middle" font-size="11.5">(mirror descent)</text>
+
+  <path d="M513,116 H531" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <path d="M640,147 V209 H603" fill="none" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <path d="M449,209 H408 V151" fill="none" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+
+  <!-- noisy tables -->
+  <path d="M685,116 H692 V258 H655 V272" fill="none" stroke="#444" stroke-width="1.2" stroke-dasharray="3 2" marker-end="url(#thin)"/>
+  <use href="#mn" xlink:href="#mn" x="616" y="276" width="34" height="34"/>
+  <use href="#mn" xlink:href="#mn" x="626" y="284" width="34" height="34"/>
+  <use href="#mn" xlink:href="#mn" x="636" y="292" width="34" height="34"/>
+  <text x="368" y="296" font-size="12.5">released: noisy 1- and 2-way</text>
+  <text x="368" y="312" font-size="12.5">count tables <tspan font-style="italic">{ỹ</tspan><tspan font-size="9" dy="3" font-style="italic">c</tspan><tspan dy="-3" font-style="italic">, σ</tspan><tspan font-size="9" dy="3" font-style="italic">c</tspan><tspan dy="-3" font-style="italic">}</tspan></text>
+  <text x="368" y="328" font-size="12.5">(input to everything after)</text>
+
+  <!-- privacy boundary -->
+  <path d="M718,24 V384" stroke="#8A2B2B" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <text x="710" y="396" text-anchor="end" font-size="12" font-style="italic" fill="#8A2B2B">differentially private</text>
+  <text x="726" y="396" font-size="12" font-style="italic" fill="#8A2B2B">post-processing: no extra privacy cost</text>
+
+  <path d="M671,305 H745" stroke="#4F7CA8" stroke-width="6" marker-end="url(#big)"/>
+
+  <!-- ===== Fair post-processing ===== -->
+  <rect x="738" y="40" width="322" height="330" rx="8" fill="#BDBDBD" stroke="#7A7A7A" stroke-width="1.2"/>
+  <text x="899" y="65" text-anchor="middle" font-size="17" font-weight="bold">Fair post-processing</text>
+
+  <!-- 5: sample + redraw (top, full width) -->
+  <rect x="752" y="85" width="294" height="58" rx="8" fill="#fff" stroke="#555" stroke-width="1.1"/>
+  <text x="899" y="106" text-anchor="middle" font-size="14" font-weight="bold">⑤ Sample + pair redraw</text>
+  <text x="899" y="122" text-anchor="middle" font-size="11.5">rows breaking tested pair rules are redrawn</text>
+  <text x="899" y="136" text-anchor="middle" font-size="11.5">from the model; 1-way marginals re-matched</text>
+
+  <!-- 4: refit -->
+  <rect x="752" y="170" width="140" height="62" rx="8" fill="#fff" stroke="#555" stroke-width="1.1"/>
+  <text x="822" y="192" text-anchor="middle" font-size="14" font-weight="bold">④ Refit</text>
+  <text x="822" y="209" text-anchor="middle" font-size="11.5">Private-PGM on the</text>
+  <text x="822" y="223" text-anchor="middle" font-size="11.5">repaired tables</text>
+
+  <!-- 3: repair tables -->
+  <rect x="906" y="170" width="140" height="62" rx="8" fill="#fff" stroke="#555" stroke-width="1.1"/>
+  <text x="976" y="192" text-anchor="middle" font-size="14" font-weight="bold">③ Repair tables</text>
+  <text x="976" y="209" text-anchor="middle" font-size="11.5">[S, X]: per group, T<tspan font-size="9" dy="3" font-style="italic">s</tspan></text>
+  <text x="976" y="224" text-anchor="middle" font-size="11.5">others: <tspan font-style="italic">Σ</tspan><tspan font-size="9" dy="3" font-style="italic">s</tspan><tspan dy="-3" font-style="italic"> P(s | x) T</tspan><tspan font-size="9" dy="3" font-style="italic">s</tspan></text>
+
+  <!-- 1: masking -->
+  <rect x="752" y="256" width="140" height="62" rx="8" fill="#fff" stroke="#555" stroke-width="1.1"/>
+  <text x="822" y="278" text-anchor="middle" font-size="14" font-weight="bold">① Proxy masking</text>
+  <text x="822" y="295" text-anchor="middle" font-size="11.5">merge levels with</text>
+  <text x="822" y="309" text-anchor="middle" font-size="11.5" font-style="italic">P(S | x) ≥ 0.95</text>
+
+  <!-- 2: repair plans -->
+  <rect x="906" y="256" width="140" height="62" rx="8" fill="#fff" stroke="#555" stroke-width="1.1"/>
+  <text x="976" y="278" text-anchor="middle" font-size="14" font-weight="bold">② Repair plans</text>
+  <text x="976" y="295" text-anchor="middle" font-size="11.5">from a PGM fit to ①:</text>
+  <text x="976" y="310" text-anchor="middle" font-size="11.5" font-style="italic">T<tspan font-size="9" dy="3">s</tspan><tspan dy="-3"> : P(X | S=s) → P(X)</tspan></text>
+
+  <path d="M892,287 H902" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <path d="M976,256 V236" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <path d="M906,201 H896" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <path d="M822,170 V147" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+
+  <!-- fairness objective, dotted (as L_fair in FLIP) -->
+  <text x="899" y="356" text-anchor="middle" font-size="14.5" font-style="italic">ℒ<tspan font-size="10" dy="3" font-style="normal">fair</tspan><tspan dy="-3" font-style="normal">:  Feldman repair, every non-</tspan><tspan font-style="italic">S</tspan><tspan font-style="normal"> column</tspan></text>
+  <path d="M850,343 L828,322" stroke="#111" stroke-width="1.4" stroke-dasharray="2 3" fill="none" marker-end="url(#dot)"/>
+  <path d="M948,343 L970,322" stroke="#111" stroke-width="1.4" stroke-dasharray="2 3" fill="none" marker-end="url(#dot)"/>
+  <path d="M1052,346 Q1072,290 1050,214" stroke="#111" stroke-width="1.4" stroke-dasharray="2 3" fill="none" marker-end="url(#dot)"/>
+
+  <path d="M1046,114 H1077" stroke="#4F7CA8" stroke-width="6" marker-end="url(#big)"/>
+
+  <!-- ===== Decoder ===== -->
+  <rect x="1083" y="70" width="140" height="262" rx="3" fill="none" stroke="#222" stroke-width="1.4" stroke-dasharray="7 4"/>
+  <text x="1153" y="94" text-anchor="middle" font-size="18" font-weight="bold">Decoder</text>
+  <use href="#mbin" xlink:href="#mbin" x="1098" y="113" width="27" height="36"/>
+  <path d="M1130,131 H1170" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <use href="#mb" xlink:href="#mb" x="1180" y="113" width="27" height="36"/>
+  <text x="1153" y="168" text-anchor="middle" font-size="11.5">bin → value,</text>
+  <text x="1153" y="181" text-anchor="middle" font-size="11.5">uniform within bin</text>
+  <use href="#mg" xlink:href="#mg" x="1098" y="205" width="27" height="36"/>
+  <path d="M1130,223 H1170" stroke="#444" stroke-width="1.3" marker-end="url(#thin)"/>
+  <use href="#mg" xlink:href="#mg" x="1180" y="205" width="27" height="36"/>
+  <text x="1153" y="260" text-anchor="middle" font-size="11.5">code → level</text>
+
+  <path d="M1224,140 H1234" stroke="#4F7CA8" stroke-width="6" marker-end="url(#big)"/>
+  <path d="M1224,248 H1234" stroke="#A9BE95" stroke-width="6" marker-end="url(#bigg)"/>
+
+  <!-- ===== Outputs ===== -->
+  <rect x="1240" y="114" width="72" height="52" rx="12" fill="#5B84B1"/>
+  <text x="1270" y="147" text-anchor="middle" font-size="22" font-style="italic" fill="#fff">X<tspan font-size="11" dx="3" dy="-10" font-style="normal">(num)</tspan></text><text x="1256" y="128" text-anchor="middle" font-size="18" fill="#fff">~</text>
+  <rect x="1240" y="207" width="72" height="82" rx="12" fill="#E3EAD8" stroke="#9DB386" stroke-width="1.5"/>
+  <text x="1270" y="235" text-anchor="middle" font-size="22" font-style="italic" fill="#2E3B24">X<tspan font-size="11" dx="3" dy="-10" font-style="normal">(cat)</tspan></text><text x="1256" y="216" text-anchor="middle" font-size="18" fill="#2E3B24">~</text>
+  <rect x="1258" y="250" width="36" height="27" rx="5" fill="#9DB386"/>
+  <text x="1276" y="269" text-anchor="middle" font-size="17" font-style="italic" fill="#fff">S</text><text x="1277" y="256" text-anchor="middle" font-size="15" fill="#fff">~</text>
+</svg>

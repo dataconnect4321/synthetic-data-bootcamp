@@ -18,6 +18,14 @@ compares two methods:
     dependence penalty on the decoded output.
   - Its DP is the paper's nominal, VAE-only guarantee.
 
+![AIM hybrid pipeline](results/aim_hybrid_diagram.png)
+
+*The AIM hybrid. Everything left of the red line is differentially private
+(epsilon 3 for the whole release, bins included); everything right of it
+reads only AIM's noisy count tables, so it is post-processing and costs no
+extra budget. The repair strength is tau = 1. Vector version:
+`results/aim_hybrid_diagram.svg`; code map: `aim_fair/ARCHITECTURE.md`.*
+
 **Verdict: the AIM hybrid wins.**
 
 - It reaches income parity close to the best VAE process while running at a
